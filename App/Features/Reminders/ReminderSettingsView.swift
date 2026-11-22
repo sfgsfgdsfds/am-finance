@@ -109,6 +109,7 @@ struct ReminderSettingsView: View {
                 Toggle("Kỳ trả khoản vay", isOn: $settings.loanInstallment)
                 Toggle("Giao dịch lặp lại (chỉ nhắc)", isOn: $settings.recurringItems)
                 Toggle("Cảnh báo ngân sách", isOn: $settings.budgetWarnings)
+                Toggle("Thu tiền phòng", isOn: $settings.rentCollection)
             }
             .disabled(!settings.isEnabled)
         } header: {

@@ -16,6 +16,8 @@ struct ReminderSettings: Equatable, Sendable {
     var recurringItems = true
     /// Budgets at warning or exceeded status.
     var budgetWarnings = true
+    /// Rent collection for rooms with an active lease.
+    var rentCollection = true
     /// New bank transactions found by background refresh. Independent of
     /// the master switch — these are event notifications, not scheduled
     /// reminders — and on by default.
@@ -77,6 +79,7 @@ final class ReminderSettingsStore: @unchecked Sendable {
     static let loanInstallmentKey = "reminders.loanInstallment"
     static let recurringItemsKey = "reminders.recurringItems"
     static let budgetWarningsKey = "reminders.budgetWarnings"
+    static let rentCollectionKey = "reminders.rentCollection"
     static let bankTransactionsKey = "reminders.bankTransactions"
     static let daysBeforeDueKey = "reminders.daysBeforeDue"
     static let notificationHourKey = "reminders.notificationHour"
@@ -106,6 +109,9 @@ final class ReminderSettingsStore: @unchecked Sendable {
         if let value = defaults.object(forKey: Self.budgetWarningsKey) as? Bool {
             settings.budgetWarnings = value
         }
+        if let value = defaults.object(forKey: Self.rentCollectionKey) as? Bool {
+            settings.rentCollection = value
+        }
         if let value = defaults.object(forKey: Self.bankTransactionsKey) as? Bool {
             settings.bankTransactions = value
         }
@@ -125,6 +131,7 @@ final class ReminderSettingsStore: @unchecked Sendable {
         defaults.set(sanitized.loanInstallment, forKey: Self.loanInstallmentKey)
         defaults.set(sanitized.recurringItems, forKey: Self.recurringItemsKey)
         defaults.set(sanitized.budgetWarnings, forKey: Self.budgetWarningsKey)
+        defaults.set(sanitized.rentCollection, forKey: Self.rentCollectionKey)
         defaults.set(sanitized.bankTransactions, forKey: Self.bankTransactionsKey)
         defaults.set(sanitized.daysBeforeDue, forKey: Self.daysBeforeDueKey)
         defaults.set(sanitized.notificationHour, forKey: Self.notificationHourKey)

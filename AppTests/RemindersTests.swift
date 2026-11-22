@@ -102,6 +102,7 @@ struct RemindersTests {
         #expect(!settings.isEnabled)
         #expect(settings.creditCardDue && settings.loanInstallment)
         #expect(settings.recurringItems && settings.budgetWarnings)
+        #expect(settings.rentCollection)
         #expect(settings.daysBeforeDue == [3, 1, 0])
         #expect(settings.notificationHour == 9)
     }
@@ -368,6 +369,126 @@ struct RemindersTests {
         #expect(exceeded?.body == "Đi lại: đã vượt hạn mức 300.000 ₫")
     }
 
+    // MARK: - Planner: rent collection
+
+    private func rentDue(
+        room: String = "Phòng 101", tenant: String = "Nguyễn Văn A",
+        months: [ReminderPlanner.RentDue.Month]
+    ) -> ReminderPlanner.RentDue {
+        .init(leaseID: UUID(), roomName: room, tenantName: tenant,
+              months: months)
+    }
+
+    private func rentMonth(
+        _ year: Int, _ month: Int, due: Date, remaining: Int64
+    ) -> ReminderPlanner.RentDue.Month {
+        .init(start: day(year, month, 1, 0), dueDate: due,
+              remaining: remaining)
+    }
+
+    /// An unpaid lease plans the payment-day reminder at the notification
+    /// hour, the nag three days after, and next month's payment day.
+    @Test func rentUnpaidPlansDueOverdueAndNextMonth() {
+        let plan = ReminderPlanner.plan(.init(
+            rents: [rentDue(months: [
+                rentMonth(2026, 11, due: day(2026, 11, 25),
+                          remaining: 4_500_000),
+                rentMonth(2026, 12, due: day(2026, 12, 25),
+                          remaining: 4_500_000),
+            ])],
+            settings: enabledSettings(),
+            now: day(2026, 11, 20, 8), calendar: calendar))
+
+        #expect(plan.count == 3)
+        #expect(plan.map(\.fireDate) == [
+            day(2026, 11, 25, 9), day(2026, 11, 28, 9), day(2026, 12, 25, 9),
+        ])
+        #expect(plan.map(\.title) == [
+            "Thu tiền phòng", "Quá hạn 3 ngày", "Thu tiền phòng",
+        ])
+        #expect(plan[0].body ==
+            "Phòng 101: thu 4.500.000 ₫ tiền tháng 11 · Nguyễn Văn A")
+        #expect(plan[0].id.hasPrefix("amfinance.reminder.rent."))
+        #expect(plan[0].id.hasSuffix("2026-11.due"))
+        #expect(plan[1].id.hasSuffix("2026-11.overdue"))
+        #expect(plan[2].id.hasSuffix("2026-12.due"))
+        #expect(plan[2].body.contains("tiền tháng 12"))
+    }
+
+    /// A partially collected month reminds for the remaining amount only.
+    @Test func rentPartialShowsRemainingAmount() {
+        let plan = ReminderPlanner.plan(.init(
+            rents: [rentDue(months: [
+                rentMonth(2026, 11, due: day(2026, 11, 25),
+                          remaining: 1_500_000),
+            ])],
+            settings: enabledSettings(),
+            now: day(2026, 11, 20, 8), calendar: calendar))
+        #expect(!plan.isEmpty)
+        #expect(plan.allSatisfy { $0.body.contains("1.500.000 ₫") })
+        #expect(plan.allSatisfy { !$0.body.contains("4.500.000") })
+    }
+
+    /// A month collected in full (remaining 0) produces nothing.
+    @Test func rentFullyCollectedPlansNothing() {
+        let plan = ReminderPlanner.plan(.init(
+            rents: [rentDue(months: [
+                rentMonth(2026, 11, due: day(2026, 11, 25), remaining: 0),
+            ])],
+            settings: enabledSettings(),
+            now: day(2026, 11, 20, 8), calendar: calendar))
+        #expect(plan.isEmpty)
+    }
+
+    /// The "Thu tiền phòng" switch gates every rent notification.
+    @Test func rentSwitchOffPlansNothing() {
+        let plan = ReminderPlanner.plan(.init(
+            rents: [rentDue(months: [
+                rentMonth(2026, 11, due: day(2026, 11, 25),
+                          remaining: 4_500_000),
+            ])],
+            settings: enabledSettings { $0.rentCollection = false },
+            now: day(2026, 11, 20, 8), calendar: calendar))
+        #expect(plan.isEmpty)
+    }
+
+    /// Once the payment day is past the on-day reminder is gone; the
+    /// +3-day nag stays until it too lies in the past.
+    @Test func rentPastPaymentDayKeepsOnlyTheNag() {
+        let months = [rentMonth(
+            2026, 11, due: day(2026, 11, 25), remaining: 4_500_000)]
+        let during = ReminderPlanner.plan(.init(
+            rents: [rentDue(months: months)],
+            settings: enabledSettings(),
+            now: day(2026, 11, 26, 8), calendar: calendar))
+        #expect(during.count == 1)
+        #expect(during[0].title == "Quá hạn 3 ngày")
+        #expect(during[0].fireDate == day(2026, 11, 28, 9))
+
+        let after = ReminderPlanner.plan(.init(
+            rents: [rentDue(months: months)],
+            settings: enabledSettings(),
+            now: day(2026, 11, 28, 10), calendar: calendar))
+        #expect(after.isEmpty)
+    }
+
+    /// The same lease plans identical identifiers run after run, so a
+    /// reschedule replaces instead of duplicating.
+    @Test func rentIdentifiersAreStableAcrossRuns() {
+        let input = ReminderPlanner.Input(
+            rents: [rentDue(months: [
+                rentMonth(2026, 11, due: day(2026, 11, 25),
+                          remaining: 4_500_000),
+                rentMonth(2026, 12, due: day(2026, 12, 25),
+                          remaining: 4_500_000),
+            ])],
+            settings: enabledSettings(),
+            now: day(2026, 11, 20, 8), calendar: calendar)
+        let first = ReminderPlanner.plan(input)
+        #expect(first == ReminderPlanner.plan(input))
+        #expect(first.map(\.id) == ReminderPlanner.plan(input).map(\.id))
+    }
+
     // MARK: - Planner: ordering, cap, stability, timezone
 
     /// With more candidates than the cap, the soonest 60 survive.
@@ -618,6 +739,120 @@ struct RemindersTests {
         #expect(debtItems.count == 3)
         #expect(debtItems.map(\.fireDate) == [
             day(2026, 12, 2, 9), day(2026, 12, 4, 9), day(2026, 12, 5, 9),
+        ])
+    }
+
+    // MARK: - Scheduler: rent collection
+
+    private func seedRental(
+        context: ModelContext, name: String = "Phòng 101",
+        rent: Int64 = 4_500_000, paymentDay: Int = 25,
+        tenant: String = "Nguyễn Văn A", isActive: Bool = true
+    ) throws -> RentalLease {
+        let unit = RentalUnit(name: name, listPrice: rent)
+        let lease = RentalLease(
+            tenantName: tenant, startDate: day(2026, 1, 1),
+            monthlyRent: rent, paymentDay: paymentDay,
+            isActive: isActive, unit: unit)
+        context.insert(unit)
+        context.insert(lease)
+        try context.save()
+        return lease
+    }
+
+    private func makeScheduler(
+        fake: ReminderFakeCenter
+    ) -> ReminderScheduler {
+        let store = ReminderSettingsStore(defaults: makeDefaults())
+        store.save(ReminderSettings(isEnabled: true))
+        return ReminderScheduler(
+            center: fake, settingsStore: store, calendar: calendar)
+    }
+
+    /// The real-model path: an unpaid lease feeds "rent" notifications —
+    /// the payment day, the +3-day nag and next month's payment day.
+    @Test func schedulerGathersRentFromModels() async throws {
+        let context = try makeContext()
+        let now = day(2026, 11, 20, 8)
+        _ = try seedRental(context: context)
+
+        let fake = ReminderFakeCenter()
+        let planned = await makeScheduler(fake: fake)
+            .reschedule(context: context, now: now)
+
+        let rentItems = planned.filter { $0.id.contains("rent.") }
+        #expect(rentItems.map(\.fireDate) == [
+            day(2026, 11, 25, 9), day(2026, 11, 28, 9), day(2026, 12, 25, 9),
+        ])
+        #expect(rentItems.allSatisfy {
+            $0.body.contains("Phòng 101") && $0.body.contains("Nguyễn Văn A")
+        })
+    }
+
+    /// A partial collection feeds the remaining amount into the plan.
+    @Test func schedulerGathersPartialRentRemaining() async throws {
+        let context = try makeContext()
+        let now = day(2026, 11, 20, 8)
+        let lease = try seedRental(context: context)
+        context.insert(LedgerTransaction(
+            kind: .income, amount: 3_000_000, date: day(2026, 11, 5),
+            rentalLease: lease, rentalPeriod: day(2026, 11, 1, 0)))
+        try context.save()
+
+        let fake = ReminderFakeCenter()
+        let planned = await makeScheduler(fake: fake)
+            .reschedule(context: context, now: now)
+
+        let rentItems = planned.filter { $0.id.contains("rent.") }
+        let november = rentItems.filter { $0.id.contains("2026-11") }
+        #expect(november.count == 2)
+        #expect(november.allSatisfy { $0.body.contains("1.500.000 ₫") })
+        #expect(rentItems.first {
+            $0.id.hasSuffix("2026-11.due")
+        }?.body == "Phòng 101: thu 1.500.000 ₫ tiền tháng 11 · Nguyễn Văn A")
+        // December is still fully uncollected — it shows the full rent.
+        #expect(rentItems.first { $0.id.hasSuffix("2026-12.due") }?.body
+            .contains("4.500.000 ₫") == true)
+    }
+
+    /// Once the month is fully collected the lease produces nothing at
+    /// all — and an ended lease covering the month is skipped too.
+    @Test func schedulerSkipsCollectedAndInactiveLeases() async throws {
+        let context = try makeContext()
+        let now = day(2026, 11, 20, 8)
+        let lease = try seedRental(context: context)
+        context.insert(LedgerTransaction(
+            kind: .income, amount: 4_500_000, date: day(2026, 11, 5),
+            rentalLease: lease, rentalPeriod: day(2026, 11, 1, 0)))
+        // An ended lease still owns its month but isn't active.
+        _ = try seedRental(
+            context: context, name: "Phòng 102", rent: 3_000_000,
+            tenant: "Cũ", isActive: false)
+        try context.save()
+
+        let fake = ReminderFakeCenter()
+        let planned = await makeScheduler(fake: fake)
+            .reschedule(context: context, now: now)
+        #expect(planned.filter { $0.id.contains("rent.") }.isEmpty)
+    }
+
+    /// Due day 31 clamps to the 30th inside November (a 30-day month);
+    /// the nag follows three days later and December keeps the real 31st.
+    @Test func schedulerClampsPaymentDayToMonthLength() async throws {
+        let context = try makeContext()
+        let now = day(2026, 11, 10, 8)
+        _ = try seedRental(context: context, paymentDay: 31)
+
+        let fake = ReminderFakeCenter()
+        let planned = await makeScheduler(fake: fake)
+            .reschedule(context: context, now: now)
+
+        let rentItems = planned.filter { $0.id.contains("rent.") }
+        #expect(rentItems.map(\.fireDate) == [
+            day(2026, 11, 30, 9), day(2026, 12, 3, 9), day(2026, 12, 31, 9),
+        ])
+        #expect(rentItems.map(\.title) == [
+            "Thu tiền phòng", "Quá hạn 3 ngày", "Thu tiền phòng",
         ])
     }
 
