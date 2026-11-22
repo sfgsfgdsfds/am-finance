@@ -7,6 +7,7 @@ enum AppSchema {
         LedgerCategory.self,
         Business.self,
         LedgerTransaction.self,
+        LoanRateChange.self,
     ]
 }
 

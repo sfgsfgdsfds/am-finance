@@ -43,6 +43,12 @@ final class Account {
     @Relationship(deleteRule: .nullify, inverse: \LedgerTransaction.toAccount)
     var incomingTransfers: [LedgerTransaction]? = []
 
+    /// Rate changes for a loan account (see `LoanRateChange`). `.nullify`
+    /// keeps the schema CloudKit-compatible — cascade deletes can't sync —
+    /// so rows are deleted explicitly.
+    @Relationship(deleteRule: .nullify, inverse: \LoanRateChange.account)
+    var loanRateChanges: [LoanRateChange]? = []
+
     init(
         id: UUID = UUID(),
         name: String,
