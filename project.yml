@@ -55,17 +55,36 @@ targets:
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/AMFinance.app/AMFinance
         BUNDLE_LOADER: $(TEST_HOST)
 
+  AMFinanceUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: AppUITests
+    dependencies:
+      - target: AMFinance
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: vn.amx.finance.uitests
+        DEVELOPMENT_TEAM: T6Z3K9KBDB
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: AMFinance
+
 schemes:
   AMFinance:
     build:
       targets:
         AMFinance: all
         AMFinanceTests: [test]
+        AMFinanceUITests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
         - AMFinanceTests
+        - AMFinanceUITests
     archive:
       config: Release

@@ -15,6 +15,15 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   another worker's run to finish; transient simulator failures retry once.
 - The generated `.xcodeproj` is a build artifact: git-ignored, never commit it.
 
+## UI smoke tests
+
+- `AppUITests/` (`AMFinanceUITests`, XCTest + XCUITest) — end-to-end smoke:
+  tabs, quick-add, income+business, edit/delete, settings, accounts/cards/
+  loans, debts, reports. Runs inside `./scripts/test-app.sh` with the unit tests.
+- Tests launch the app with `-uiTestInMemoryStore` → in-memory store + seed.
+- Row taps need `.onTapGesture` (List-row `Button` actions don't fire on
+  iOS 26); assertions on off-screen list items must scroll first.
+
 ## Layout
 
 - `App/Features/<FeatureName>/` — one folder per feature

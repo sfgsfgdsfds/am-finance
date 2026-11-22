@@ -70,6 +70,7 @@ struct DashboardNetWorthCard: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("dashboard.netWorthCard")
     }
 
     private func column(title: String, amount: Int64) -> some View {
@@ -117,6 +118,8 @@ struct DashboardMonthCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("dashboard.monthCard")
     }
 
     private func totalRow(
@@ -382,6 +385,8 @@ struct DashboardBusinessCard: View {
                 }
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("dashboard.businessCard")
     }
 }
 
@@ -434,6 +439,8 @@ struct DashboardRecentCard: View {
                 }
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("dashboard.recentCard")
     }
 
     private func row(_ item: DashboardSnapshot.RecentItem) -> some View {

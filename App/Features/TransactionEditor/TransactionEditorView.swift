@@ -238,6 +238,7 @@ struct TransactionEditorView: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("txEditor.category.\(category.name)")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
