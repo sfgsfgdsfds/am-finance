@@ -153,27 +153,92 @@ enum WalletSyncRuleApplier {
     ) -> WalletSyncRule? {
         let moneyIn = transaction.kind == .income
         for rule in rules where rule.matches(note: transaction.note, moneyIn: moneyIn) {
-            switch rule.action {
-            case .category(let id):
-                guard transaction.kind != .transfer,
-                      let category = categories[id],
-                      category.kind == (moneyIn ? CategoryKind.income : .expense)
-                else { continue }
-                transaction.category = category
-            case .business(let id):
-                guard transaction.kind != .transfer,
-                      let business = businesses[id]
-                else { continue }
-                transaction.business = business
-            case .transfer(let accountID):
-                guard transaction.kind != .transfer,
-                      let other = accounts[accountID],
-                      WalletSyncTransfer.convert(transaction, with: other)
-                else { continue }
-                return rule
+            guard applyAction(
+                rule, to: transaction,
+                categories: categories, businesses: businesses,
+                accounts: accounts)
+            else { continue }
+            return rule
+        }
+        return nil
+    }
+
+    /// Executes a matched rule's action on the transaction — shared by the
+    /// plain applier and `WalletSyncCompiledRules`. False means the rule's
+    /// target was dead or the action did not apply, so the next rule runs.
+    @discardableResult
+    static func applyAction(
+        _ rule: WalletSyncRule,
+        to transaction: LedgerTransaction,
+        categories: [UUID: LedgerCategory],
+        businesses: [UUID: Business],
+        accounts: [UUID: Account]
+    ) -> Bool {
+        let moneyIn = transaction.kind == .income
+        switch rule.action {
+        case .category(let id):
+            guard transaction.kind != .transfer,
+                  let category = categories[id],
+                  category.kind == (moneyIn ? CategoryKind.income : .expense)
+            else { return false }
+            transaction.category = category
+        case .business(let id):
+            guard transaction.kind != .transfer,
+                  let business = businesses[id]
+            else { return false }
+            transaction.business = business
+        case .transfer(let accountID):
+            guard transaction.kind != .transfer,
+                  let other = accounts[accountID],
+                  WalletSyncTransfer.convert(transaction, with: other)
+            else { return false }
+            return true
+        }
+        transaction.needsReview = false
+        transaction.updatedAt = .now
+        return true
+    }
+}
+
+/// Rules with pre-folded keywords — built once per sync so a large import
+/// folds each note once instead of once per rule per row.
+struct WalletSyncCompiledRules: Sendable {
+    let rules: [WalletSyncRule]
+    private let foldedKeywords: [String]
+
+    init(rules: [WalletSyncRule]) {
+        self.rules = rules
+        foldedKeywords = rules.map { SettingsNameNormalizer.fold($0.keyword) }
+    }
+
+    /// Same first-live-match semantics as `WalletSyncRuleApplier.apply`.
+    @discardableResult
+    func apply(
+        to transaction: LedgerTransaction,
+        categories: [UUID: LedgerCategory],
+        businesses: [UUID: Business],
+        accounts: [UUID: Account]
+    ) -> WalletSyncRule? {
+        let moneyIn = transaction.kind == .income
+        let foldedNote = SettingsNameNormalizer.fold(transaction.note)
+        for index in rules.indices {
+            let rule = rules[index]
+            switch rule.direction {
+            case .any:
+                break
+            case .moneyIn:
+                guard moneyIn else { continue }
+            case .moneyOut:
+                guard !moneyIn else { continue }
             }
-            transaction.needsReview = false
-            transaction.updatedAt = .now
+            let keyword = foldedKeywords[index]
+            guard !keyword.isEmpty, foldedNote.contains(keyword)
+            else { continue }
+            guard WalletSyncRuleApplier.applyAction(
+                rule, to: transaction,
+                categories: categories, businesses: businesses,
+                accounts: accounts)
+            else { continue }
             return rule
         }
         return nil

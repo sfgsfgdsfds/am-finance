@@ -254,10 +254,13 @@ extension ReminderPlanner.Input {
 
         let names = Dictionary(
             uniqueKeysWithValues: accounts.map { ($0.id, $0.name) })
+        let ledger = LedgerBalanceStores.shared(for: context.container)
         let debts = DebtsUpcomingMapper
             .items(
                 for: accounts, basisStore: basisStore,
-                now: now, calendar: calendar)
+                now: now, calendar: calendar,
+                balanceOf: { ledger.balance(of: $0) },
+                cardEntriesOf: { ledger.creditCardEntries(of: $0) })
             .compactMap { item -> ReminderPlanner.Debt? in
                 guard let name = names[item.accountID] else { return nil }
                 return ReminderPlanner.Debt(

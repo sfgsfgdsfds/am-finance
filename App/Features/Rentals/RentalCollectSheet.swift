@@ -181,7 +181,11 @@ struct RentalCollectSheet: View {
                     HStack {
                         Text(candidate.name)
                         Spacer(minLength: 8)
-                        AmountText(amount: candidate.balance, compact: true)
+                        AmountText(
+                            amount: LedgerBalanceStores.shared(
+                                for: context.container
+                            ).balance(of: candidate),
+                            compact: true)
                             .font(.subheadline)
                     }
                 } icon: {

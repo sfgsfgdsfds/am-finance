@@ -18,13 +18,25 @@ struct BalanceTrendAnchorSheet: View {
 
     init(account: Account) {
         self.account = account
+        // The shared ledger cache when the account is already in a
+        // container — otherwise the direct relationship walk.
+        let balance = account.modelContext
+            .map {
+                LedgerBalanceStores.shared(for: $0.container)
+                    .balance(of: account)
+            } ?? account.balance
         let displayed = BalanceTrendSeries.displayed(
-            account.balance, isLiability: account.kind.isLiability
+            balance, isLiability: account.kind.isLiability
         )
         _typed = State(initialValue: max(0, displayed))
     }
 
     private var isLiability: Bool { account.kind.isLiability }
+
+    private var computedBalance: Int64 {
+        LedgerBalanceStores.shared(for: context.container)
+            .balance(of: account)
+    }
 
     /// Signed target behind the keypad number (debt → negative balance).
     private var target: Int64 {
@@ -33,14 +45,15 @@ struct BalanceTrendAnchorSheet: View {
 
     /// The delta still needed — nil only on Int64 overflow.
     private var delta: Int64? {
-        BalanceTrendAnchor.adjustmentDelta(computed: account.balance, target: target)
+        BalanceTrendAnchor.adjustmentDelta(
+            computed: computedBalance, target: target)
     }
 
     /// "Chênh lệch" in displayed terms: positive = the user typed more than
     /// the app shows. 0 disables the action.
     private var displayedDifference: Int64 {
         BalanceTrendAnchor.displayedDifference(
-            computed: account.balance, target: target, isLiability: isLiability
+            computed: computedBalance, target: target, isLiability: isLiability
         ) ?? 0
     }
 
@@ -62,7 +75,7 @@ struct BalanceTrendAnchorSheet: View {
                     LabeledContent(
                         isLiability ? "Dư nợ trong app" : "Số dư trong app",
                         value: VND.format(
-                            BalanceTrendSeries.displayed(account.balance, isLiability: isLiability)
+                            BalanceTrendSeries.displayed(computedBalance, isLiability: isLiability)
                         )
                     )
                     LabeledContent {
@@ -120,7 +133,7 @@ struct BalanceTrendAnchorSheet: View {
     }
 
     private func apply() {
-        let computed = account.balance
+        let computed = computedBalance
         switch mode {
         case .openingBalance:
             if let newOpening = BalanceTrendAnchor.newOpeningBalance(

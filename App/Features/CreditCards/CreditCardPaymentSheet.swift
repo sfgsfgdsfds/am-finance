@@ -126,7 +126,11 @@ struct CreditCardPaymentSheet: View {
                     HStack {
                         Text(account.name)
                         Spacer(minLength: 8)
-                        AmountText(amount: account.balance, compact: true)
+                        AmountText(
+                            amount: LedgerBalanceStores.shared(
+                                for: context.container
+                            ).balance(of: account),
+                            compact: true)
                             .font(.subheadline)
                     }
                 } icon: {

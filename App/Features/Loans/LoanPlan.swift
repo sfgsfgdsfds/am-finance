@@ -28,11 +28,19 @@ struct LoanPlan {
 
     /// Builds the plan for an account, or nil when its loan fields are too
     /// incomplete to compute a schedule — the view then offers to fill them.
-    init?(account: Account, basis: LoanInterestBasis, calendar: Calendar) {
+    /// `balance` defaults to `account.balance`; callers with a ledger cache
+    /// feed the cached value instead.
+    init?(
+        account: Account,
+        balance: Int64? = nil,
+        basis: LoanInterestBasis,
+        calendar: Calendar
+    ) {
         guard let terms = Self.terms(for: account, basis: basis),
               let schedule = try? terms.schedule(calendar: calendar)
         else { return nil }
-        self.init(schedule: schedule, remainingDebt: -account.balance)
+        self.init(
+            schedule: schedule, remainingDebt: -(balance ?? account.balance))
     }
 
     // MARK: - Terms

@@ -16,7 +16,6 @@ struct WalletSyncLinkRequest: Identifiable {
 struct WalletSyncAccountsView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Account.sortOrder) private var appAccounts: [Account]
-    @Query private var pendingReview: [LedgerTransaction]
 
     private let session: WalletLinkSession
     private let defaults: UserDefaults
@@ -43,9 +42,6 @@ struct WalletSyncAccountsView: View {
         self.injectedAPI = api
         self.stateStore = WalletSyncStateStore(defaults: defaults)
         self.ruleStore = WalletSyncRuleStore(defaults: defaults)
-        _pendingReview = Query(
-            filter: #Predicate { $0.needsReview == true },
-            sort: \.date, order: .reverse)
     }
 
     var body: some View {
@@ -212,8 +208,8 @@ struct WalletSyncAccountsView: View {
                 HStack {
                     Label("Hộp thư chờ phân loại", systemImage: "tray.full.fill")
                     Spacer()
-                    if !pendingReview.isEmpty {
-                        Text("\(pendingReview.count)")
+                    if let pending = coordinator?.pendingReviewCount, pending > 0 {
+                        Text("\(pending)")
                             .font(.callout)
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
@@ -363,7 +359,12 @@ struct WalletSyncLinkSheet: View {
     let onLink: (Account, WalletSyncImportFrom) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var context
     @State private var importFrom: WalletSyncImportFrom = .last30Days
+
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
+    }
 
     var body: some View {
         NavigationStack {
@@ -416,7 +417,9 @@ struct WalletSyncLinkSheet: View {
                                     colorHex: account.colorHex, size: 32)
                                 Text(account.name)
                                 Spacer()
-                                AmountText(amount: account.balance, compact: true)
+                                AmountText(
+                                    amount: ledger.balance(of: account),
+                                    compact: true)
                                     .font(.subheadline)
                                     .foregroundStyle(.secondary)
                             }

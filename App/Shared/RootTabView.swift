@@ -15,6 +15,11 @@ struct RootTabView: View {
     @State private var selectedTab = 0
     /// Last time the activation housekeeping ran — the once-a-minute cap.
     @State private var lastActivationWork = Date.distantPast
+    /// Ledger `changeCount` the reminder queue was last built against —
+    /// an activation with no ledger movement and a fresh plan skips the
+    /// rebuild entirely.
+    @State private var lastReminderChangeCount = -1
+    @State private var lastReminderBuild = Date.distantPast
 
     init(syncCoordinator: WalletSyncCoordinator? = nil) {
         self.syncCoordinator = syncCoordinator
@@ -73,8 +78,9 @@ struct RootTabView: View {
     }
 
     /// Once per activation (capped at one run a minute): post the due
-    /// recurring transactions, then rebuild the reminder queue. Every
-    /// failure is swallowed — housekeeping must never crash or block.
+    /// recurring transactions, then rebuild the reminder queue — but only
+    /// when the ledger moved or the plan went stale; every failure is
+    /// swallowed, housekeeping must never crash or block.
     private func runActivationWork() {
         let now = Date.now
         guard now.timeIntervalSince(lastActivationWork) >= 60 else { return }
@@ -83,6 +89,12 @@ struct RootTabView: View {
         // UI tests must never touch the real notification center — a
         // reschedule could schedule live requests on the device/simulator.
         guard !AppLockSettingsStore.isUITestLaunch() else { return }
+        let ledger = LedgerBalanceStores.shared(for: context.container)
+        guard ledger.changeCount != lastReminderChangeCount
+            || now.timeIntervalSince(lastReminderBuild) >= 15 * 60
+        else { return }
+        lastReminderChangeCount = ledger.changeCount
+        lastReminderBuild = now
         Task {
             await ReminderScheduler().reschedule(context: context)
         }

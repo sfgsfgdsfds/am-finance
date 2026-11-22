@@ -12,6 +12,7 @@ struct ReceivablesView: View {
     /// nil lists every client; non-nil scopes to one business.
     let business: Business?
 
+    @Environment(\.modelContext) private var context
     @Query(sort: \Account.sortOrder) private var accounts: [Account]
 
     @State private var isCreating = false
@@ -19,6 +20,10 @@ struct ReceivablesView: View {
 
     init(business: Business? = nil) {
         self.business = business
+    }
+
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
     }
 
     private var clients: [Account] {
@@ -29,7 +34,7 @@ struct ReceivablesView: View {
     }
 
     private var rows: [(account: Account, snapshot: ReceivableSnapshot)] {
-        clients.map { ($0, ReceivableSnapshot.make(account: $0)) }
+        clients.map { ($0, ledger.receivableSnapshot(of: $0)) }
     }
 
     private var outstandingRows: [(account: Account, snapshot: ReceivableSnapshot)] {

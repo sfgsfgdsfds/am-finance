@@ -171,14 +171,15 @@ struct TransactionListContent: View {
     }
 
     var body: some View {
+        let scan = matchedScan
         VStack(spacing: 0) {
             if !searching {
-                monthHeader
+                monthHeader(scan.rows)
             }
             if !chips.isEmpty {
                 chipBar
             }
-            listView
+            listView(scan)
         }
         .background(Color(.systemGroupedBackground))
     }
@@ -189,34 +190,48 @@ struct TransactionListContent: View {
         Dictionary(transactions.map { ($0.id, $0) }) { first, _ in first }
     }
 
-    /// Every matched row (sorted newest first by the query), unbounded.
-    private var matchedRowsUnbounded: [TransactionListRow] {
-        transactions
+    /// Matched rows plus whether the full scan had more than the cap.
+    /// While searching the query folds once and iteration stops at
+    /// `resultCap + 1` matches, so a 30k-row ledger never materializes the
+    /// whole scan per keystroke. Evaluated once per body pass — the result
+    /// feeds the month totals, the sections and the cap notice.
+    private var matchedScan: (rows: [TransactionListRow], capped: Bool) {
+        let query = TransactionListSearch.normalizedQuery(searchText)
+        var iterator = transactions.lazy
             .map { TransactionListRow(transaction: $0) }
             .filter { row in
                 filter.matches(row)
                     && (!searching
-                        || TransactionListSearch.matches(row, query: searchText))
+                        || TransactionListSearch.matches(
+                            row, query: query,
+                            searchable: TransactionListSearch.searchableFields(
+                                for: row)))
             }
+            .makeIterator()
+        if !searching {
+            var all: [TransactionListRow] = []
+            while let row = iterator.next() { all.append(row) }
+            return (all, false)
+        }
+        var collected: [TransactionListRow] = []
+        collected.reserveCapacity(TransactionListSearch.resultCap + 1)
+        while collected.count <= TransactionListSearch.resultCap,
+              let row = iterator.next() {
+            collected.append(row)
+        }
+        let capped = collected.count > TransactionListSearch.resultCap
+        return (Array(collected.prefix(TransactionListSearch.resultCap)), capped)
     }
 
-    private var matchedRows: [TransactionListRow] {
-        searching
-            ? Array(matchedRowsUnbounded.prefix(TransactionListSearch.resultCap))
-            : matchedRowsUnbounded
-    }
-
-    private var resultWasCapped: Bool {
-        searching && matchedRowsUnbounded.count > TransactionListSearch.resultCap
-    }
-
-    private var sections: [TransactionListDaySection] {
-        TransactionListGrouping.sections(for: matchedRows)
+    private func sections(
+        of rows: [TransactionListRow]
+    ) -> [TransactionListDaySection] {
+        TransactionListGrouping.sections(for: rows)
     }
 
     // MARK: - Month header card
 
-    private var monthHeader: some View {
+    private func monthHeader(_ rows: [TransactionListRow]) -> some View {
         VStack(spacing: 12) {
             HStack {
                 Button { shiftMonth(-1) } label: {
@@ -242,17 +257,17 @@ struct TransactionListContent: View {
             HStack(spacing: 0) {
                 totalCell(
                     "Thu",
-                    TransactionListGrouping.incomeTotal(of: matchedRows),
+                    TransactionListGrouping.incomeTotal(of: rows),
                     kind: .income
                 )
                 totalCell(
                     "Chi",
-                    TransactionListGrouping.expenseTotal(of: matchedRows),
+                    TransactionListGrouping.expenseTotal(of: rows),
                     kind: .expense
                 )
                 totalCell(
                     "Chênh lệch",
-                    TransactionListGrouping.netTotal(of: matchedRows),
+                    TransactionListGrouping.netTotal(of: rows),
                     kind: nil
                 )
             }
@@ -372,9 +387,11 @@ struct TransactionListContent: View {
 
     // MARK: - Day-grouped list
 
-    private var listView: some View {
+    private func listView(
+        _ scan: (rows: [TransactionListRow], capped: Bool)
+    ) -> some View {
         List {
-            ForEach(sections) { section in
+            ForEach(sections(of: scan.rows)) { section in
                 Section {
                     ForEach(section.rows) { row in
                         rowButton(row)
@@ -402,7 +419,7 @@ struct TransactionListContent: View {
                     .textCase(nil)
                 }
             }
-            if resultWasCapped {
+            if scan.capped {
                 Section {
                     Text("Chỉ hiển thị \(TransactionListSearch.resultCap) giao dịch đầu tiên — hãy tìm cụ thể hơn.")
                         .font(.caption)
@@ -415,7 +432,7 @@ struct TransactionListContent: View {
         }
         .listStyle(.insetGrouped)
         .scrollDismissesKeyboard(.interactively)
-        .overlay { if sections.isEmpty { emptyState } }
+        .overlay { if scan.rows.isEmpty { emptyState } }
     }
 
     private func rowButton(_ row: TransactionListRow) -> some View {

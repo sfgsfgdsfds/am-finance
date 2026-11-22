@@ -50,7 +50,13 @@ struct LoanDetailView: View {
     /// Recomputed on every body evaluation — cheap for term-sized schedules
     /// and always in sync with the latest ledger balance and rate changes.
     private var plan: LoanPlan? {
-        LoanPlan(account: account, basis: basis, calendar: AppCalendar.vietnam)
+        LoanPlan(
+            account: account,
+            balance: LedgerBalanceStores.shared(for: context.container)
+                .balance(of: account),
+            basis: basis,
+            calendar: AppCalendar.vietnam
+        )
     }
 
     @ViewBuilder
