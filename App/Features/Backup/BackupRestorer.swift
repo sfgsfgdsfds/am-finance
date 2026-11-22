@@ -75,20 +75,9 @@ enum BackupRestorer {
             }
 
             // Parents first so transaction references resolve against the
-            // rows just inserted as well as pre-existing ones.
-            for dto in document.accounts {
-                if let existing = accounts[dto.id] {
-                    apply(dto, to: existing)
-                    result.updated += 1
-                } else {
-                    let account = Account(id: dto.id, name: "", kind: .cash)
-                    apply(dto, to: account)
-                    context.insert(account)
-                    accounts[dto.id] = account
-                    result.inserted += 1
-                }
-            }
-
+            // rows just inserted as well as pre-existing ones. Businesses
+            // come before accounts because an account's `business` link is
+            // re-applied from the restored set.
             for dto in document.categories {
                 if let existing = categories[dto.id] {
                     apply(dto, to: existing)
@@ -111,6 +100,19 @@ enum BackupRestorer {
                     apply(dto, to: business)
                     context.insert(business)
                     businesses[dto.id] = business
+                    result.inserted += 1
+                }
+            }
+
+            for dto in document.accounts {
+                if let existing = accounts[dto.id] {
+                    apply(dto, to: existing, businesses: businesses)
+                    result.updated += 1
+                } else {
+                    let account = Account(id: dto.id, name: "", kind: .cash)
+                    apply(dto, to: account, businesses: businesses)
+                    context.insert(account)
+                    accounts[dto.id] = account
                     result.inserted += 1
                 }
             }
@@ -196,8 +198,14 @@ enum BackupRestorer {
     // MARK: - Applying DTOs
 
     /// Copies every stored field; `kindRaw` is assigned directly so a value
-    /// this build does not know still round-trips verbatim.
-    private static func apply(_ dto: BackupAccount, to account: Account) {
+    /// this build does not know still round-trips verbatim. `businessID`
+    /// (a receivable account's business) is re-linked to a live object; an
+    /// id that exists neither in the backup nor in the store becomes nil.
+    private static func apply(
+        _ dto: BackupAccount,
+        to account: Account,
+        businesses: [UUID: Business]
+    ) {
         account.name = dto.name
         account.kindRaw = dto.kindRaw
         account.openingBalance = dto.openingBalance
@@ -218,6 +226,7 @@ enum BackupRestorer {
         account.loanMethodRaw = dto.loanMethodRaw
         account.externalSource = dto.externalSource
         account.externalAccountID = dto.externalAccountID
+        account.business = dto.businessID.flatMap { businesses[$0] }
     }
 
     private static func apply(_ dto: BackupCategory, to category: LedgerCategory) {

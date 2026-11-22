@@ -10,6 +10,8 @@ import Foundation
 /// - 2: adds `loanRateChanges`.
 /// - 3: adds `budgets` and `recurringRules`. Older files still decode —
 ///   absent keys are read as empty lists.
+/// - 4: adds `businessID` on accounts — the business a receivable account
+///   belongs to. Older files decode it as nil.
 struct BackupDocument: Codable, Equatable, Sendable {
     var formatVersion: Int
     var exportedAt: Date
@@ -99,6 +101,10 @@ struct BackupAccount: Codable, Equatable, Sendable {
     // External bank/linking fields.
     var externalSource: String?
     var externalAccountID: String?
+
+    /// The business a receivable account belongs to (formatVersion 4) —
+    /// re-linked on restore; nil everywhere else.
+    var businessID: UUID?
 }
 
 extension BackupAccount {
@@ -124,6 +130,7 @@ extension BackupAccount {
         loanMethodRaw = account.loanMethodRaw
         externalSource = account.externalSource
         externalAccountID = account.externalAccountID
+        businessID = account.business?.id
     }
 }
 

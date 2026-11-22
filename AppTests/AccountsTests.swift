@@ -113,6 +113,39 @@ struct AccountsTests {
         #expect(account.statementDay == nil)
     }
 
+    // MARK: - Receivable business link
+
+    @Test func draftRoundTripsReceivableBusiness() throws {
+        let context = try makeContext()
+        let business = Business(name: "Chạy quảng cáo thuê")
+        context.insert(business)
+        let client = Account(name: "Khách A", kind: .receivable, openingBalance: 2_000_000)
+        client.business = business
+        context.insert(client)
+        try context.save()
+
+        let draft = AccountDraft(account: client)
+        #expect(draft.business?.id == business.id)
+        #expect(draft.openingBalance == 2_000_000) // asset — positive, not negated
+        #expect(draft.validate() == nil)
+
+        var edited = draft
+        edited.business = nil
+        edited.apply(to: client)
+        #expect(client.business == nil)
+    }
+
+    @Test func draftClearsBusinessOnNonReceivableKinds() {
+        var draft = AccountDraft()
+        draft.name = "Tiền mặt"
+        draft.kind = .cash
+        draft.business = Business(name: "Làm web")
+
+        let account = Account(name: "Tiền mặt", kind: .cash)
+        draft.apply(to: account)
+        #expect(account.business == nil)
+    }
+
     // MARK: - AccountGrouping
 
     @Test func groupingOrdersKindsAndComputesSubtotals() throws {
@@ -120,9 +153,10 @@ struct AccountsTests {
         let cash = Account(name: "Tiền mặt", kind: .cash, openingBalance: 1_000_000)
         let bank = Account(name: "Ngân hàng", kind: .bank, openingBalance: 3_000_000)
         let wallet = Account(name: "Momo", kind: .eWallet, openingBalance: 500_000)
+        let client = Account(name: "Khách A", kind: .receivable, openingBalance: 4_000_000)
         let card = Account(name: "Thẻ", kind: .creditCard, openingBalance: -2_000_000)
         let loan = Account(name: "Vay", kind: .loan, openingBalance: -10_000_000)
-        for account in [loan, card, wallet, bank, cash] {
+        for account in [loan, card, client, wallet, bank, cash] {
             context.insert(account)
         }
         try context.save()
@@ -130,8 +164,8 @@ struct AccountsTests {
         let all = try context.fetch(FetchDescriptor<Account>())
         let sections = AccountGrouping.sections(from: all)
 
-        #expect(sections.map(\.kind) == [.cash, .bank, .eWallet, .creditCard, .loan])
-        #expect(sections.map(\.subtotal) == [1_000_000, 3_000_000, 500_000, -2_000_000, -10_000_000])
+        #expect(sections.map(\.kind) == [.cash, .bank, .eWallet, .receivable, .creditCard, .loan])
+        #expect(sections.map(\.subtotal) == [1_000_000, 3_000_000, 500_000, 4_000_000, -2_000_000, -10_000_000])
     }
 
     @Test func groupingSplitsArchivedAndSumsWithinKind() throws {

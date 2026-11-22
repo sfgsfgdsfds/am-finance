@@ -596,15 +596,110 @@ struct BackupTests {
         #expect(try fetchAll(Account.self, in: context).count == 1)
     }
 
+    // MARK: - Account.business (formatVersion 4)
+
+    /// A receivable account's business link exports as `businessID` and is
+    /// re-linked to the restored business — including on a replace restore
+    /// where the business row itself is reinserted.
+    @Test func roundTripKeepsAccountBusiness() throws {
+        let context = try makeContext()
+        let business = Business(name: "Chạy quảng cáo thuê", sortOrder: 3)
+        let client = Account(name: "Khách A", kind: .receivable)
+        client.business = business
+        let bank = Account(name: "Ngân hàng", kind: .bank)
+        context.insert(business)
+        context.insert(client)
+        context.insert(bank)
+        try context.save()
+
+        let businessID = business.id, clientID = client.id, bankID = bank.id
+
+        let data = try BackupCodec.encode(context: context)
+        let document = try BackupCodec.decode(data)
+        #expect(document.formatVersion == BackupCodec.formatVersion)
+        #expect(document.accounts.first { $0.id == clientID }?.businessID == businessID)
+        #expect(document.accounts.first { $0.id == bankID }?.businessID == nil)
+
+        try BackupRestorer.restore(document, mode: .replace, into: context)
+
+        let accounts = try fetchAll(Account.self, in: context)
+        let rClient = try #require(accounts.first { $0.id == clientID })
+        let rBank = try #require(accounts.first { $0.id == bankID })
+        #expect(rClient.business?.id == businessID)
+        #expect(rBank.business == nil)
+        #expect(rClient.business?.accounts?.contains { $0.id == clientID } == true)
+    }
+
+    /// Merge re-links `business` onto an existing account too.
+    @Test func mergeUpsertsAccountBusiness() throws {
+        let context = try makeContext()
+        let business = Business(name: "Làm web")
+        let client = Account(name: "Khách B", kind: .receivable)
+        context.insert(business)
+        context.insert(client)
+        try context.save()
+
+        var dto = BackupAccount(client)
+        dto.businessID = business.id
+        let document = BackupDocument(
+            formatVersion: 4, exportedAt: .now, appVersion: "test",
+            accounts: [dto, BackupAccount(Account(name: "Khách C", kind: .receivable))],
+            categories: [],
+            businesses: [BackupBusiness(business)],
+            transactions: []
+        )
+
+        let result = try BackupRestorer.restore(document, mode: .merge, into: context)
+        #expect(result.updated == 2)   // client + the re-applied business
+        #expect(result.inserted == 1)  // the new receivable
+        #expect(client.business?.id == business.id)
+        let newClient = try #require(
+            try fetchAll(Account.self, in: context).first { $0.name == "Khách C" }
+        )
+        #expect(newClient.business == nil)
+    }
+
+    /// A v3 account has no `businessID` key — it decodes as nil and the
+    /// restored account keeps no business link.
+    @Test func version3FileStillDecodesAndRestores() throws {
+        let context = try makeContext()
+        let json = """
+        {"formatVersion": 3,
+         "exportedAt": "2026-11-15T00:00:00Z",
+         "appVersion": "1.0",
+         "accounts": [{
+            "id": "5EED0000-0000-4000-8000-00000000CC01",
+            "name": "Khách cũ", "kindRaw": "receivable",
+            "openingBalance": 800000, "icon": "person.badge.clock.fill",
+            "colorHex": "0A84FF", "note": "", "sortOrder": 0,
+            "isArchived": false,
+            "createdAt": "2026-01-01T00:00:00Z"}],
+         "categories": [], "businesses": [], "transactions": [],
+         "loanRateChanges": [], "budgets": [], "recurringRules": []}
+        """
+        let document = try BackupCodec.decode(Data(json.utf8))
+        #expect(document.formatVersion == 3)
+        #expect(document.accounts.first?.businessID == nil)
+
+        let result = try BackupRestorer.restore(document, mode: .merge, into: context)
+        #expect(result.inserted == 1)
+        let restored = try #require(
+            try fetchAll(Account.self, in: context).first { $0.name == "Khách cũ" }
+        )
+        #expect(restored.kind == .receivable)
+        #expect(restored.openingBalance == 800_000)
+        #expect(restored.business == nil)
+    }
+
     // MARK: - Rejected files
 
     @Test func decodeRejectsNewerFormatVersion() throws {
         let json = """
-        {"formatVersion": 4, "exportedAt": "2026-11-22T07:05:00Z",
+        {"formatVersion": 5, "exportedAt": "2026-11-22T07:05:00Z",
          "appVersion": "9", "accounts": [], "categories": [],
          "businesses": [], "transactions": [], "loanRateChanges": []}
         """
-        #expect(throws: BackupError.unsupportedVersion(found: 4)) {
+        #expect(throws: BackupError.unsupportedVersion(found: 5)) {
             _ = try BackupCodec.decode(Data(json.utf8))
         }
     }
@@ -633,10 +728,10 @@ struct BackupTests {
         let context = try makeContext()
         try SeedData.seedIfNeeded(context: context)
         let future = BackupDocument(
-            formatVersion: 4, exportedAt: .now, appVersion: "x",
+            formatVersion: 5, exportedAt: .now, appVersion: "x",
             accounts: [], categories: [], businesses: [], transactions: []
         )
-        #expect(throws: BackupError.unsupportedVersion(found: 4)) {
+        #expect(throws: BackupError.unsupportedVersion(found: 5)) {
             _ = try BackupRestorer.restore(future, mode: .replace, into: context)
         }
         // Even in replace mode nothing was deleted or inserted.

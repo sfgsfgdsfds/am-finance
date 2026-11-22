@@ -19,6 +19,12 @@ final class Business {
     @Relationship(deleteRule: .nullify, inverse: \RecurringRule.business)
     var recurringRules: [RecurringRule]? = []
 
+    /// Client receivable accounts bound to this business ("Phải thu") —
+    /// `.nullify` keeps the schema CloudKit-compatible: deleting a business
+    /// leaves its receivable accounts behind as personal clients.
+    @Relationship(deleteRule: .nullify, inverse: \Account.business)
+    var accounts: [Account]? = []
+
     init(
         id: UUID = UUID(),
         name: String,

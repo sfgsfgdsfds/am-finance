@@ -35,6 +35,10 @@ final class Account {
     var externalSource: String?
     var externalAccountID: String?
 
+    /// The business a receivable account belongs to (kind == .receivable) —
+    /// nil on every other kind and on personal clients.
+    var business: Business?
+
     /// Transactions where this account is the source (see `LedgerMath`).
     @Relationship(deleteRule: .nullify, inverse: \LedgerTransaction.account)
     var transactions: [LedgerTransaction]? = []

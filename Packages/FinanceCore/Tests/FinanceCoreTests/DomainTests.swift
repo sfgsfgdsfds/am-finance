@@ -6,15 +6,17 @@ struct AccountKindTests {
         #expect(AccountKind.cash.rawValue == "cash")
         #expect(AccountKind.bank.rawValue == "bank")
         #expect(AccountKind.eWallet.rawValue == "eWallet")
+        #expect(AccountKind.receivable.rawValue == "receivable")
         #expect(AccountKind.creditCard.rawValue == "creditCard")
         #expect(AccountKind.loan.rawValue == "loan")
-        #expect(AccountKind.allCases == [.cash, .bank, .eWallet, .creditCard, .loan])
+        #expect(AccountKind.allCases == [.cash, .bank, .eWallet, .receivable, .creditCard, .loan])
     }
 
     @Test func liabilities() {
         #expect(AccountKind.cash.isLiability == false)
         #expect(AccountKind.bank.isLiability == false)
         #expect(AccountKind.eWallet.isLiability == false)
+        #expect(AccountKind.receivable.isLiability == false)
         #expect(AccountKind.creditCard.isLiability)
         #expect(AccountKind.loan.isLiability)
     }
@@ -23,6 +25,7 @@ struct AccountKindTests {
         #expect(AccountKind.cash.displayName == "Tiền mặt")
         #expect(AccountKind.bank.displayName == "Ngân hàng")
         #expect(AccountKind.eWallet.displayName == "Ví điện tử")
+        #expect(AccountKind.receivable.displayName == "Phải thu")
         #expect(AccountKind.creditCard.displayName == "Thẻ tín dụng")
         #expect(AccountKind.loan.displayName == "Khoản vay")
     }
