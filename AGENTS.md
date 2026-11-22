@@ -76,6 +76,7 @@ workers know what already exists. Pushed views must not create their own
 
 - `Accounts/` — `AccountsListView`, `AccountDetailView(account:)`, `AccountEditView(account:)`; `AccountBalanceAdjustment` helper.
 - `AppLock/` — `AppLockSettingsView`, the `.appLockProtected()` modifier on the root; `AppLockController.shared`.
+- `BackgroundRefresh/` — `BackgroundRefreshScheduler` (BGAppRefreshTask `vn.amx.finance.refresh`, registered in `AMFinanceApp`), `BackgroundRefreshRunner` (background wallet sync + recurring + reminders with local notifications), `BackgroundRefreshNotificationPlan`.
 - `Backup/` — `BackupView` (Settings → Dữ liệu).
 - `BalanceTrend/` — `BalanceTrendView(account:)`, `BalanceTrendAnchorSheet(account:)`.
 - `Budgets/` — `BudgetsView`, `BudgetsEditSheet`, `BudgetsSummaryCard` (dashboard).

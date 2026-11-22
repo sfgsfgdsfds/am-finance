@@ -16,6 +16,10 @@ struct ReminderSettings: Equatable, Sendable {
     var recurringItems = true
     /// Budgets at warning or exceeded status.
     var budgetWarnings = true
+    /// New bank transactions found by background refresh. Independent of
+    /// the master switch — these are event notifications, not scheduled
+    /// reminders — and on by default.
+    var bankTransactions = true
     /// Day offsets before a due date that fire a reminder — [3, 1, 0]
     /// means "3 days before", "the day before" and "on the day". Kept
     /// sorted descending, deduplicated, each in 0...30.
@@ -73,6 +77,7 @@ final class ReminderSettingsStore: @unchecked Sendable {
     static let loanInstallmentKey = "reminders.loanInstallment"
     static let recurringItemsKey = "reminders.recurringItems"
     static let budgetWarningsKey = "reminders.budgetWarnings"
+    static let bankTransactionsKey = "reminders.bankTransactions"
     static let daysBeforeDueKey = "reminders.daysBeforeDue"
     static let notificationHourKey = "reminders.notificationHour"
     static let warningLogMonthKey = "reminders.budgetWarningMonth"
@@ -101,6 +106,9 @@ final class ReminderSettingsStore: @unchecked Sendable {
         if let value = defaults.object(forKey: Self.budgetWarningsKey) as? Bool {
             settings.budgetWarnings = value
         }
+        if let value = defaults.object(forKey: Self.bankTransactionsKey) as? Bool {
+            settings.bankTransactions = value
+        }
         if let days = defaults.array(forKey: Self.daysBeforeDueKey) as? [Int] {
             settings.daysBeforeDue = days
         }
@@ -117,6 +125,7 @@ final class ReminderSettingsStore: @unchecked Sendable {
         defaults.set(sanitized.loanInstallment, forKey: Self.loanInstallmentKey)
         defaults.set(sanitized.recurringItems, forKey: Self.recurringItemsKey)
         defaults.set(sanitized.budgetWarnings, forKey: Self.budgetWarningsKey)
+        defaults.set(sanitized.bankTransactions, forKey: Self.bankTransactionsKey)
         defaults.set(sanitized.daysBeforeDue, forKey: Self.daysBeforeDueKey)
         defaults.set(sanitized.notificationHour, forKey: Self.notificationHourKey)
     }

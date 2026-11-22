@@ -9,6 +9,26 @@ struct WalletSyncAccountResult: Equatable, Sendable {
     var inserted = 0
     var skippedExisting = 0
     var skippedTooOld = 0
+    /// The rows this account committed, in import order — for callers
+    /// (background refresh) that need to know exactly which transactions
+    /// a sync inserted without re-reading the store.
+    var insertedRows: [WalletSyncInsertedTransaction] = []
+}
+
+/// A bank row a sync just inserted — enough for local notifications and
+/// tests without handing out the SwiftData object.
+struct WalletSyncInsertedTransaction: Equatable, Sendable {
+    /// The server's transaction UUID — stable, unique per import.
+    var externalID: String
+    /// Server session UUID of the linked account the row landed on.
+    var sessionID: String
+    /// Display name of the app account at insert time ("VPBank *1234").
+    var accountName: String
+    /// The server's signed amount — positive is money in, negative out.
+    var signedAmount: Int64
+    var date: Date
+    /// The bank note, "" when the server sent none.
+    var note: String
 }
 
 /// Result of `WalletSyncEngine.syncAll` — one entry per linked account.
@@ -21,6 +41,11 @@ struct WalletSyncSummary: Equatable, Sendable {
 
     var totalSkipped: Int {
         accounts.reduce(0) { $0 + $1.skippedExisting + $1.skippedTooOld }
+    }
+
+    /// Every row the run committed, across all linked accounts.
+    var insertedRows: [WalletSyncInsertedTransaction] {
+        accounts.flatMap(\.insertedRows)
     }
 }
 
@@ -59,6 +84,10 @@ struct WalletSyncEngine {
     let context: ModelContext
     /// Page size per fetch — the server's maximum is 500.
     var pageSize = 500
+    /// Fired after each page is committed — lets a caller collect the rows
+    /// that actually landed even when a later page fails and `syncAll`
+    /// throws (those committed rows are still new imports).
+    var onPageCommitted: (([WalletSyncInsertedTransaction]) -> Void)?
 
     init(
         api: any WalletSyncAPI,
@@ -149,9 +178,13 @@ struct WalletSyncEngine {
             uniquingKeysWith: { first, _ in first })
 
         while true {
+            // Honours task expiration between committed pages — a
+            // background run can be cut short at any point.
+            try Task.checkCancellation()
             let page = try await api.transactions(
                 sessionID: sessionID, afterID: cursor, limit: pageSize)
 
+            var pageInserted: [WalletSyncInsertedTransaction] = []
             for item in page.items where item.sessionId == sessionID {
                 let externalID = item.id
                 if let importFrom = state.importFrom,
@@ -182,12 +215,21 @@ struct WalletSyncEngine {
                     accounts: accounts
                 )
                 result.inserted += 1
+                pageInserted.append(WalletSyncInsertedTransaction(
+                    externalID: externalID,
+                    sessionID: sessionID,
+                    accountName: account.name,
+                    signedAmount: item.amount,
+                    date: item.transactionDate,
+                    note: item.note ?? ""))
             }
 
             // Commit the page first; the cursor only advances after a
             // successful save, so a crash or API failure next page cannot
             // skip rows.
             try context.save()
+            result.insertedRows.append(contentsOf: pageInserted)
+            onPageCommitted?(pageInserted)
 
             let previous = cursor
             // `next_after_id` echoes the sent cursor on an empty page —
