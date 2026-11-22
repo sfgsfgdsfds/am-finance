@@ -94,11 +94,12 @@ struct AccountDetailView: View {
     /// Debt carried on the card — the account's negative balance, clamped.
     private var cardDebt: Int64 { max(0, -account.balance) }
 
-    private var cardCycleConfig: CreditCardCycleConfig? {
-        guard let statementDay = account.statementDay else { return nil }
-        return CreditCardCycleConfig(
-            statementDay: statementDay,
-            graceDays: account.graceDays ?? 0
+    private var cardCycleInfo: AccountCardCycleInfo? {
+        AccountCardCycleInfo(
+            statementDay: account.statementDay,
+            graceDays: account.graceDays,
+            onOrAfter: .now,
+            calendar: AppCalendar.vietnam
         )
     }
 
@@ -109,21 +110,22 @@ struct AccountDetailView: View {
                 LabeledContent("Đã dùng", value: VND.format(cardDebt))
                 LabeledContent("Còn lại", value: VND.format(max(0, limit - cardDebt)))
             }
-            if let config = cardCycleConfig {
+            if let info = cardCycleInfo {
                 LabeledContent(
                     "Sao kê tiếp theo",
-                    value: AccountDateFormat.full(
-                        config.nextClosingDate(onOrAfter: .now, calendar: AppCalendar.vietnam)
-                    )
+                    value: AccountDateFormat.full(info.nextStatementDate)
                 )
-                LabeledContent(
-                    "Hạn thanh toán",
-                    value: AccountDateFormat.full(
-                        config.nextDueDate(onOrAfter: .now, calendar: AppCalendar.vietnam)
+                if let dueDate = info.nextDueDate {
+                    LabeledContent(
+                        "Hạn thanh toán",
+                        value: AccountDateFormat.full(dueDate)
                     )
-                )
+                } else {
+                    Text("Chưa đặt số ngày ân hạn")
+                        .foregroundStyle(.secondary)
+                }
             }
-            if account.creditLimit == nil && cardCycleConfig == nil {
+            if account.creditLimit == nil && cardCycleInfo == nil {
                 Text("Chưa có thông tin hạn mức hay chu kỳ sao kê.")
                     .foregroundStyle(.secondary)
             }
@@ -282,6 +284,26 @@ struct AccountDetailView: View {
 struct AccountTransactionDay {
     let day: Date
     var items: [LedgerTransaction]
+}
+
+/// What the account detail screen shows for a card's statement cycle: the
+/// next closing date once `statementDay` is set, and the payment due date
+/// only when `graceDays` is set too — the same "configured" rule as
+/// `Account.creditCardCycleConfig`.
+struct AccountCardCycleInfo {
+    let nextStatementDate: Date
+    let nextDueDate: Date?
+
+    /// nil while `statementDay` is unset — the card has no cycle at all.
+    init?(statementDay: Int?, graceDays: Int?, onOrAfter date: Date, calendar: Calendar) {
+        guard let statementDay else { return nil }
+        nextStatementDate = CreditCardCycleConfig(statementDay: statementDay, graceDays: 0)
+            .nextClosingDate(onOrAfter: date, calendar: calendar)
+        nextDueDate = graceDays.map {
+            CreditCardCycleConfig(statementDay: statementDay, graceDays: $0)
+                .nextDueDate(onOrAfter: date, calendar: calendar)
+        }
+    }
 }
 
 #Preview("Tài khoản tiền mặt") {

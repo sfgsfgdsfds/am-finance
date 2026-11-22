@@ -258,4 +258,49 @@ struct AccountsTests {
         try context.save()
         #expect(!AccountGrouping.canDelete(bank))
     }
+
+    // MARK: - AccountCardCycleInfo
+
+    private func ymd(_ year: Int, _ month: Int, _ day: Int) -> Date {
+        AppCalendar.vietnam.date(
+            from: DateComponents(year: year, month: month, day: day)
+        )!
+    }
+
+    @Test func cardCycleInfoNeedsStatementDay() {
+        #expect(AccountCardCycleInfo(
+            statementDay: nil, graceDays: 15,
+            onOrAfter: ymd(2026, 7, 1), calendar: AppCalendar.vietnam
+        ) == nil)
+    }
+
+    /// Only `statementDay` set: the next statement date shows, but there is
+    /// no due date — the detail screen shows the "ân hạn" hint instead.
+    @Test func cardCycleInfoWithoutGraceDaysHasNoDueDate() throws {
+        let info = try #require(AccountCardCycleInfo(
+            statementDay: 20, graceDays: nil,
+            onOrAfter: ymd(2026, 7, 1), calendar: AppCalendar.vietnam
+        ))
+        #expect(info.nextStatementDate == ymd(2026, 7, 20))
+        #expect(info.nextDueDate == nil)
+    }
+
+    /// Both fields set: statement date and the still-upcoming due date of
+    /// the last closed statement (Jun 20 + 15 days = Jul 5).
+    @Test func cardCycleInfoWithGraceDaysHasBothDates() throws {
+        let info = try #require(AccountCardCycleInfo(
+            statementDay: 20, graceDays: 15,
+            onOrAfter: ymd(2026, 7, 1), calendar: AppCalendar.vietnam
+        ))
+        #expect(info.nextStatementDate == ymd(2026, 7, 20))
+        #expect(info.nextDueDate == ymd(2026, 7, 5))
+
+        // Once that due date passes, the open cycle's due date is next.
+        let later = try #require(AccountCardCycleInfo(
+            statementDay: 20, graceDays: 15,
+            onOrAfter: ymd(2026, 7, 10), calendar: AppCalendar.vietnam
+        ))
+        #expect(later.nextStatementDate == ymd(2026, 7, 20))
+        #expect(later.nextDueDate == ymd(2026, 8, 4))
+    }
 }
