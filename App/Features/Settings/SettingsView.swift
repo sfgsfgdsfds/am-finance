@@ -1,11 +1,36 @@
 import SwiftUI
 import SwiftData
 
+/// Defers a navigation destination until it is actually pushed: building the
+/// link only stores the closure, so a screen listing many destinations whose
+/// inits are heavyweight (the notification center, UserDefaults stores) does
+/// not pay for them on every body evaluation — iOS 26 evaluates
+/// `NavigationLink` destinations eagerly, which made this screen churn.
+private struct LazyDestination<Content: View>: View {
+    let build: () -> Content
+
+    init(@ViewBuilder _ build: @escaping () -> Content) {
+        self.build = build
+    }
+
+    var body: some View { build() }
+}
+
 /// Màn hình cài đặt — pushed inside an existing NavigationStack, so it must
 /// not create its own stack.
 struct SettingsView: View {
     @Query private var categories: [LedgerCategory]
     @Query private var businesses: [Business]
+    /// Imported rows still waiting for a category — the inbox row's badge.
+    @Query private var pendingReview: [LedgerTransaction]
+
+    init() {
+        _pendingReview = Query(
+            filter: #Predicate { $0.needsReview == true },
+            sort: \.date,
+            order: .reverse
+        )
+    }
 
     private var activeCategoryCount: Int {
         categories.filter { !$0.isArchived }.count
@@ -17,22 +42,86 @@ struct SettingsView: View {
 
     var body: some View {
         List {
+            Section("Ngân hàng") {
+                NavigationLink {
+                    LazyDestination { WalletLinkSettingsView() }
+                } label: {
+                    Label("Kết nối wallet.amx.vn", systemImage: "link")
+                }
+                NavigationLink {
+                    LazyDestination { WalletSyncAccountsView() }
+                } label: {
+                    Label(
+                        "Tài khoản liên kết & đồng bộ",
+                        systemImage: "arrow.triangle.2.circlepath")
+                }
+                NavigationLink {
+                    LazyDestination { WalletSyncInboxView() }
+                } label: {
+                    rowLabel(
+                        "Giao dịch chờ phân loại",
+                        symbol: "tray.full.fill",
+                        count: pendingReview.isEmpty ? nil : pendingReview.count)
+                }
+                NavigationLink {
+                    LazyDestination { WalletSyncRulesView() }
+                } label: {
+                    Label("Quy tắc tự phân loại", systemImage: "checklist")
+                }
+            }
+
+            Section("Kế hoạch") {
+                NavigationLink {
+                    LazyDestination { BudgetsView() }
+                } label: {
+                    Label("Ngân sách", systemImage: "chart.pie.fill")
+                }
+                NavigationLink {
+                    LazyDestination { RecurringListView() }
+                } label: {
+                    Label("Giao dịch định kỳ", systemImage: "repeat")
+                }
+                NavigationLink {
+                    LazyDestination { ReminderSettingsView() }
+                } label: {
+                    Label("Nhắc nhở", systemImage: "bell.fill")
+                }
+            }
+
             Section("Phân loại") {
                 NavigationLink {
-                    CategoriesListView()
+                    LazyDestination { CategoriesListView() }
                 } label: {
                     rowLabel("Danh mục", symbol: "tag.fill", count: activeCategoryCount)
                 }
                 NavigationLink {
-                    BusinessesListView()
+                    LazyDestination { BusinessesListView() }
                 } label: {
                     rowLabel("Mảng kinh doanh", symbol: "briefcase.fill", count: activeBusinessCount)
+                }
+                NavigationLink {
+                    LazyDestination { BusinessHubView() }
+                } label: {
+                    Label("Lãi lỗ theo mảng", systemImage: "chart.bar.fill")
+                }
+                NavigationLink {
+                    LazyDestination { ReceivablesView() }
+                } label: {
+                    Label("Khoản ứng hộ khách", systemImage: "person.badge.clock.fill")
+                }
+            }
+
+            Section("Bảo mật") {
+                NavigationLink {
+                    LazyDestination { AppLockSettingsView() }
+                } label: {
+                    Label("Khoá ứng dụng", systemImage: "lock.fill")
                 }
             }
 
             Section("Dữ liệu") {
                 NavigationLink {
-                    BackupView()
+                    LazyDestination { BackupView() }
                 } label: {
                     Label("Sao lưu & khôi phục", systemImage: "icloud.fill")
                 }
@@ -46,14 +135,16 @@ struct SettingsView: View {
         .navigationTitle("Cài đặt")
     }
 
-    private func rowLabel(_ title: String, symbol: String, count: Int) -> some View {
+    private func rowLabel(_ title: String, symbol: String, count: Int?) -> some View {
         HStack {
             Label(title, systemImage: symbol)
             Spacer()
-            Text("\(count)")
-                .font(.callout)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
+            if let count {
+                Text("\(count)")
+                    .font(.callout)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

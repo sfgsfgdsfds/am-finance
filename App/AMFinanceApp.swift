@@ -4,6 +4,9 @@ import SwiftData
 @main
 struct AMFinanceApp: App {
     private let container: ModelContainer?
+    /// The one shared coordinator behind `walletSyncAutoRefresh` and the
+    /// dashboard banner — nil during UI tests, so no wallet sync ever runs.
+    private let syncCoordinator: WalletSyncCoordinator?
 
     init() {
         do {
@@ -14,15 +17,19 @@ struct AMFinanceApp: App {
             let container = try AppModelContainer.make(inMemory: inMemory)
             try SeedData.seedIfNeeded(context: ModelContext(container))
             self.container = container
+            self.syncCoordinator = inMemory ? nil : MainActor.assumeIsolated {
+                WalletSyncCoordinator.live(context: container.mainContext)
+            }
         } catch {
             self.container = nil
+            self.syncCoordinator = nil
         }
     }
 
     var body: some Scene {
         WindowGroup {
             if let container {
-                RootTabView()
+                RootTabView(syncCoordinator: syncCoordinator)
                     .modelContainer(container)
             } else {
                 Text("Không thể mở dữ liệu. Vui lòng khởi động lại ứng dụng.")

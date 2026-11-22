@@ -67,3 +67,29 @@ with the system inset-grouped style. All in `App/Shared/`:
 - `AmountKeypad` + `AmountKeypadState` — đồng keypad; pure reducer, 13-digit cap.
 - `IconPickerGrid` + `ColorHexPickerGrid` — icon and color pickers for edit forms.
 - `EmptyStateView` — empty-list placeholder with optional action.
+
+## Feature map
+
+One line per `App/Features/` folder with its public entry views so future
+workers know what already exists. Pushed views must not create their own
+`NavigationStack`.
+
+- `Accounts/` — `AccountsListView`, `AccountDetailView(account:)`, `AccountEditView(account:)`; `AccountBalanceAdjustment` helper.
+- `AppLock/` — `AppLockSettingsView`, the `.appLockProtected()` modifier on the root; `AppLockController.shared`.
+- `Backup/` — `BackupView` (Settings → Dữ liệu).
+- `BalanceTrend/` — `BalanceTrendView(account:)`, `BalanceTrendAnchorSheet(account:)`.
+- `Budgets/` — `BudgetsView`, `BudgetsEditSheet`, `BudgetsSummaryCard` (dashboard).
+- `BusinessHub/` — `BusinessHubView`, `BusinessHubDetailView(business:)`.
+- `CreditCards/` — `CreditCardDetailView(account:)`, `CreditCardPaymentSheet`.
+- `Dashboard/` — `DashboardView` ("Tổng quan" tab) + its card structs.
+- `Debts/` — `DebtsView` ("Nợ & Thẻ" tab).
+- `Loans/` — `LoanDetailView(account:)`, `LoanPaymentSheet`, `LoanPrepaymentSheet`, `LoanRateChangeSheet`.
+- `Receivables/` — `ReceivablesView(business:?)`, `ReceivableDetailView(account:)`, `ReceivableActionSheet` (advance/repayment/fee/write-off).
+- `Recurring/` — `RecurringListView`, `RecurringEditView`; `App/Models/RecurringGenerator` posts due occurrences on activation.
+- `Reminders/` — `ReminderSettingsView`; `ReminderScheduler.reschedule(context:)` runs on activation.
+- `Reports/` — `ReportsView` ("Báo cáo" tab) + section views.
+- `Settings/` — `SettingsView` (hub) + `CategoriesListView`, `BusinessesListView`, `BusinessEditView`, `CategoryEditView`.
+- `TransactionEditor/` — `TransactionEditorView` (quick-add and edit sheet).
+- `Transactions/` — `TransactionsView` ("Giao dịch" tab).
+- `WalletLink/` — `WalletLinkSettingsView` (OIDC sign-in to wallet.amx.vn via auth.amx.vn).
+- `WalletSync/` — `WalletSyncAccountsView`, `WalletSyncInboxView`, `WalletSyncRulesView`, `WalletSyncStatusBanner`, `.walletSyncAutoRefresh()` modifier; shared `WalletSyncCoordinator` created in `AMFinanceApp`.

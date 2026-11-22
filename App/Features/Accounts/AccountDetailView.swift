@@ -9,7 +9,7 @@ struct AccountDetailView: View {
     let account: Account
 
     @State private var isEditing = false
-    @State private var isAdjusting = false
+    @State private var isAnchoring = false
 
     init(account: Account) {
         self.account = account
@@ -26,6 +26,30 @@ struct AccountDetailView: View {
             if account.kind == .creditCard { creditCardInfo }
             if account.kind == .loan { loanInfo }
 
+            Section {
+                if account.kind == .receivable {
+                    NavigationLink {
+                        ReceivableDetailView(account: account)
+                    } label: {
+                        Label(
+                            "Chi tiết khoản phải thu",
+                            systemImage: "person.badge.clock.fill")
+                    }
+                }
+                NavigationLink {
+                    BalanceTrendView(account: account)
+                } label: {
+                    Label("Lịch sử số dư", systemImage: "chart.line.uptrend.xyaxis")
+                }
+                Button {
+                    isAnchoring = true
+                } label: {
+                    Label("Đặt số dư thực tế", systemImage: "checkmark.circle")
+                }
+            } header: {
+                Text("Số dư")
+            }
+
             if !account.note.isEmpty {
                 Section("Ghi chú") {
                     Text(account.note)
@@ -40,15 +64,12 @@ struct AccountDetailView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button("Sửa") { isEditing = true }
             }
-            ToolbarItem(placement: .secondaryAction) {
-                Button("Điều chỉnh số dư") { isAdjusting = true }
-            }
         }
         .sheet(isPresented: $isEditing) {
             AccountEditView(account: account)
         }
-        .sheet(isPresented: $isAdjusting) {
-            AccountBalanceAdjustView(account: account)
+        .sheet(isPresented: $isAnchoring) {
+            BalanceTrendAnchorSheet(account: account)
         }
     }
 
@@ -261,74 +282,6 @@ struct AccountDetailView: View {
 struct AccountTransactionDay {
     let day: Date
     var items: [LedgerTransaction]
-}
-
-/// Sheet behind "Điều chỉnh số dư": the user types the real balance (or the
-/// real debt on a liability) and one income/expense transaction is inserted
-/// for the difference — note "Điều chỉnh số dư", no category.
-struct AccountBalanceAdjustView: View {
-    let account: Account
-
-    @Environment(\.modelContext) private var context
-    @Environment(\.dismiss) private var dismiss
-    @State private var typed: Int64
-
-    init(account: Account) {
-        self.account = account
-        _typed = State(initialValue: max(0, abs(account.balance)))
-    }
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 12) {
-                Text(
-                    account.kind.isLiability
-                        ? "Nhập dư nợ thực tế của \"\(account.name)\"."
-                        : "Nhập số dư thực tế của \"\(account.name)\"."
-                )
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
-
-                AmountKeypad(amount: $typed)
-                    .padding(.horizontal)
-
-                Spacer()
-            }
-            .padding(.top, 20)
-            .navigationTitle("Điều chỉnh số dư")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Huỷ") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Lưu") { save() }
-                        .disabled(adjustment == nil)
-                }
-            }
-        }
-    }
-
-    private var adjustment: (kind: TransactionKind, amount: Int64)? {
-        AccountBalanceAdjustment.adjustment(
-            current: account.balance,
-            target: AccountBalanceAdjustment.signedTarget(typed: typed, kind: account.kind)
-        )
-    }
-
-    private func save() {
-        if let adjustment {
-            context.insert(LedgerTransaction(
-                kind: adjustment.kind,
-                amount: adjustment.amount,
-                note: "Điều chỉnh số dư",
-                account: account
-            ))
-        }
-        dismiss()
-    }
 }
 
 #Preview("Tài khoản tiền mặt") {
