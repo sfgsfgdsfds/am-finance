@@ -147,6 +147,16 @@ struct ReportsView: View {
     }
 }
 
+/// A pending drill-down into one category's transactions for the shown
+/// period and scope — the reports equivalent of the old donut-row links.
+private struct CategoryDrill {
+    let title: String
+    let kind: TransactionKind
+    let categoryID: UUID?
+    let interval: ReportDateInterval
+    let scope: ReportScope
+}
+
 /// The data-owning body of the reports tab — re-initialized whenever the
 /// period changes so its @Query refetches exactly the needed window
 /// (previous period + 12-month trend + current period), never the table.
@@ -157,6 +167,9 @@ private struct ReportsContent: View {
 
     @Query(sort: \LedgerCategory.sortOrder) private var categories: [LedgerCategory]
     @Query private var transactions: [LedgerTransaction]
+
+    @State private var drill: CategoryDrill?
+    @State private var pushedBusiness: Business?
 
     init(period: ReportsPeriod, scope: ReportScope, businesses: [Business]) {
         self.period = period
@@ -208,27 +221,17 @@ private struct ReportsContent: View {
             if !snapshot.isEmpty {
                 ReportsSummarySection(comparison: snapshot.comparison)
 
-                ReportsCategorySection(
-                    title: "Chi theo danh mục",
-                    kind: .expense,
-                    rows: snapshot.expense,
-                    chartRows: snapshot.expenseChart,
-                    total: snapshot.comparison.current.expense,
-                    emptyCaption: "Không có chi tiêu nào trong kỳ này.",
-                    interval: interval,
-                    scope: scope
-                )
+                SpendingShareSection(
+                    interval: interval, scope: scope, kind: .expense,
+                    onSelectCategory: { selectCategory($0, kind: .expense) },
+                    onSelectBusiness: selectBusiness)
 
-                ReportsCategorySection(
-                    title: "Thu theo danh mục",
-                    kind: .income,
-                    rows: snapshot.income,
-                    chartRows: snapshot.incomeChart,
-                    total: snapshot.comparison.current.income,
-                    emptyCaption: "Không có thu nhập nào trong kỳ này.",
-                    interval: interval,
-                    scope: scope
-                )
+                if scope == .all {
+                    SpendingShareSection(
+                        interval: interval, scope: scope, kind: .income,
+                        onSelectCategory: { selectCategory($0, kind: .income) },
+                        onSelectBusiness: selectBusiness)
+                }
 
                 if scope == .all && !snapshot.businesses.isEmpty {
                     ReportsBusinessSection(results: snapshot.businesses)
@@ -243,9 +246,50 @@ private struct ReportsContent: View {
         }
         .listStyle(.insetGrouped)
         .contentMargins(.bottom, 40)
+        .navigationDestination(isPresented: Binding(
+            get: { drill != nil },
+            set: { if !$0 { drill = nil } }
+        )) {
+            if let drill {
+                ReportsCategoryTransactionsView(
+                    title: drill.title,
+                    kind: drill.kind,
+                    categoryID: drill.categoryID,
+                    interval: drill.interval,
+                    scope: drill.scope
+                )
+            }
+        }
+        .navigationDestination(isPresented: Binding(
+            get: { pushedBusiness != nil },
+            set: { if !$0 { pushedBusiness = nil } }
+        )) {
+            if let pushedBusiness {
+                BusinessHubDetailView(business: pushedBusiness)
+            }
+        }
         .overlay {
             if snapshot.isEmpty { emptyState }
         }
+    }
+
+    /// Donut category tap → the day-grouped transaction list for that
+    /// category in the displayed interval and scope ("Chưa phân loại"
+    /// when the slice carries no category).
+    private func selectCategory(
+        _ categoryID: UUID?, kind: TransactionKind
+    ) {
+        let title = categories.first { $0.id == categoryID }?.name
+            ?? "Chưa phân loại"
+        drill = CategoryDrill(
+            title: title, kind: kind, categoryID: categoryID,
+            interval: interval, scope: scope)
+    }
+
+    /// Donut business tap → that business's hub detail; the "Cá nhân"
+    /// slice (nil) opens nothing.
+    private func selectBusiness(_ businessID: UUID?) {
+        pushedBusiness = businesses.first { $0.id == businessID }
     }
 
     private var emptyState: some View {

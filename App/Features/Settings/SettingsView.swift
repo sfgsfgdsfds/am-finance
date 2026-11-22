@@ -70,6 +70,19 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Trợ lý AI") {
+                NavigationLink {
+                    LazyDestination { AISettingsView() }
+                } label: {
+                    Label("Nhà cung cấp AI", systemImage: "cpu.fill")
+                }
+                NavigationLink {
+                    LazyDestination { AIChatView() }
+                } label: {
+                    Label("Phân tích tài chính", systemImage: "sparkles")
+                }
+            }
+
             Section("Kế hoạch") {
                 NavigationLink {
                     LazyDestination { BudgetsView() }

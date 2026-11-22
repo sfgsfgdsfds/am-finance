@@ -75,6 +75,7 @@ workers know what already exists. Pushed views must not create their own
 `NavigationStack`.
 
 - `Accounts/` — `AccountsListView`, `AccountDetailView(account:)`, `AccountEditView(account:)`; `AccountBalanceAdjustment` helper.
+- `AIAssistant/` — `AISettingsView`, `AIChatView`, `AIInboxSuggestView`, `AICaptureView`; wired at Settings → "Trợ lý AI", the inbox toolbar's "Phân loại bằng AI", the dashboard sparkles button and the `root.aiCapture` satellite beside the "+".
 - `AppLock/` — `AppLockSettingsView`, the `.appLockProtected()` modifier on the root; `AppLockController.shared`.
 - `BackgroundRefresh/` — `BackgroundRefreshScheduler` (BGAppRefreshTask `vn.amx.finance.refresh`, registered in `AMFinanceApp`), `BackgroundRefreshRunner` (background wallet sync + recurring + reminders with local notifications), `BackgroundRefreshNotificationPlan`.
 - `Backup/` — `BackupView` (Settings → Dữ liệu).
@@ -93,6 +94,7 @@ workers know what already exists. Pushed views must not create their own
 - `Rentals/` — `RentalsView(business:?)`, `RentalUnitDetailView(unit:)`, `RentalUnitEditView`, `RentalLeaseEditView`, `RentalCollectSheet`; posting via `RentalActions`, month math in `RentalSnapshot`.
 - `Reports/` — `ReportsView` ("Báo cáo" tab) + section views.
 - `Settings/` — `SettingsView` (hub) + `CategoriesListView`, `BusinessesListView`, `BusinessEditView`, `CategoryEditView`.
+- `SpendingShare/` — `SpendingShareCard(interval:title:)` (dashboard, "Tỉ lệ chi tiêu tháng này") and `SpendingShareSection(interval:scope:kind:onSelectCategory:onSelectBusiness:)` (reports donuts, drill-down by slice); off-main aggregation in `SpendingShareBuilder`, chart in `App/Shared/ShareDonutChart.swift`.
 - `TransactionEditor/` — `TransactionEditorView` (quick-add and edit sheet).
 - `Transactions/` — `TransactionsView` ("Giao dịch" tab).
 - `WalletLink/` — `WalletLinkSettingsView` (OIDC sign-in to wallet.amx.vn via auth.amx.vn).

@@ -10,6 +10,7 @@ struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var quickAddShown = false
+    @State private var aiCaptureShown = false
     /// Selected tab — "Tổng quan" (0) by default, which is also where a
     /// rebuilt tree lands after the data reset.
     @State private var selectedTab = 0
@@ -70,10 +71,13 @@ struct RootTabView: View {
                 .tag(3)
         }
         .overlay(alignment: .bottom) {
-            quickAddButton
+            floatingButtons
         }
         .sheet(isPresented: $quickAddShown) {
             TransactionEditorView()
+        }
+        .sheet(isPresented: $aiCaptureShown) {
+            AICaptureView()
         }
     }
 
@@ -98,6 +102,45 @@ struct RootTabView: View {
         Task {
             await ReminderScheduler().reschedule(context: context)
         }
+    }
+
+    /// The "+" and its smaller "Nhập bằng AI" satellite in one floating row.
+    /// "+" stays horizontally centered over the tab bar's middle gap; the
+    /// satellite sits at 3/4 of the width — the dead gap between the
+    /// "Nợ & Thẻ" and "Báo cáo" items — so it covers no tab label and, like
+    /// "+", no list row either.
+    private var floatingButtons: some View {
+        GeometryReader { proxy in
+            quickAddButton
+                .frame(
+                    maxWidth: .infinity, maxHeight: .infinity,
+                    alignment: .bottom)
+            aiCaptureButton
+                .frame(
+                    maxWidth: .infinity, maxHeight: .infinity,
+                    alignment: .bottom)
+                .offset(x: proxy.size.width / 4)
+        }
+    }
+
+    /// Smaller sparkles circle beside "+" — opens the AI expense capture
+    /// sheet.
+    private var aiCaptureButton: some View {
+        Button {
+            aiCaptureShown = true
+        } label: {
+            Image(systemName: "sparkles")
+                .font(.callout.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 40, height: 40)
+                .background(Color.accentColor, in: Circle())
+                .shadow(color: .black.opacity(0.25), radius: 5, y: 3)
+        }
+        .accessibilityLabel("Nhập bằng AI")
+        .accessibilityIdentifier("root.aiCapture")
+        // Vertically centred on the "+" (whose centre sits 48pt above the
+        // screen's bottom edge).
+        .padding(.bottom, 28)
     }
 
     /// Centered "+" floating over the tab bar's middle gap — the fastest way

@@ -299,54 +299,6 @@ struct DashboardChartCard: View {
     }
 }
 
-// MARK: - Top expense categories
-
-/// Card 5: the month's five biggest expense categories with proportional
-/// bars; everything else is folded into the trailing "Khác" row.
-struct DashboardTopCategoriesCard: View {
-    let rows: [DashboardSnapshot.CategoryRow]
-
-    var body: some View {
-        DashboardCard("Chi tiêu theo danh mục") {
-            VStack(spacing: 12) {
-                ForEach(rows) { row in
-                    HStack(spacing: 10) {
-                        IconBadge(symbol: row.icon, colorHex: row.colorHex, size: 30)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(row.name)
-                                .font(.subheadline)
-                                .lineLimit(1)
-                            bar(share: row.share, colorHex: row.colorHex)
-                        }
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 2) {
-                            AmountText(amount: row.total, kind: .expense)
-                                .font(.subheadline.weight(.medium))
-                            Text(DashboardSnapshot.shareText(row.share))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func bar(share: Double, colorHex: String) -> some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color(.tertiarySystemFill))
-                Capsule()
-                    .fill(Color(hex: colorHex))
-                    .frame(width: max(4, geometry.size.width * min(1, share)))
-            }
-        }
-        .frame(height: 6)
-        .accessibilityHidden(true)
-    }
-}
-
 // MARK: - Business profit & loss
 
 /// Card 6: revenue, cost and profit per business for the month — only

@@ -470,6 +470,31 @@ final class AMFinanceUITests: XCTestCase {
                       "rules empty state missing")
         goBack(to: "Cài đặt")
 
+        // Trợ lý AI — no provider is configured in tests, so both screens
+        // show their unconfigured states and nothing touches the network.
+        tapOption("Nhà cung cấp AI")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Trí tuệ nhân tạo (AI)"]
+                .waitForExistence(timeout: 5),
+            "AI settings screen missing")
+        assertVisible(app.staticTexts["Chưa có cấu hình AI"],
+                      "AI provider empty state missing")
+        assertVisible(
+            app.staticTexts.matching(NSPredicate(
+                format: "label BEGINSWITH %@", "Dữ liệu tài chính"))
+                .firstMatch,
+            "AI privacy note missing")
+        goBack(to: "Cài đặt")
+
+        tapOption("Phân tích tài chính")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Trợ lý AI"]
+                .waitForExistence(timeout: 5),
+            "AI chat screen missing")
+        assertVisible(app.staticTexts["Chưa cấu hình AI"],
+                      "AI chat no-provider state missing")
+        goBack(to: "Cài đặt")
+
         // Budgets — create the overall monthly budget; it must land back
         // on the dashboard card.
         tapOption("Ngân sách")
@@ -789,6 +814,118 @@ final class AMFinanceUITests: XCTestCase {
                       "scoped board does not show 'Đã thu'")
         goBack(to: "Căn hộ dịch vụ")
         goBack(to: "Tổng quan")
+    }
+
+    // MARK: - 6. AI capture entry point and the spending-share donuts
+
+    /// Third-pass wiring, continued: the sparkles satellite beside "+"
+    /// opens the AI capture sheet in its no-provider state (no provider is
+    /// configured, so nothing touches the network); two expenses in two
+    /// categories plus an income feed the dashboard's "Tỉ lệ chi tiêu
+    /// tháng này" card and the reports' "Cơ cấu" sections, each with its
+    /// "Danh mục / Mảng" switch.
+    func testAIEntryPointsAndSpendingShare() throws {
+        // Gate on the quick-add button first — it is the stable element
+        // every test waits on, so a slow cold launch is absorbed here
+        // rather than failing the new satellite's lookup.
+        XCTAssertTrue(waitReady(app.buttons["root.quickAdd"], timeout: 30),
+                      "quick-add button missing")
+
+        // The sparkles satellite opens the capture sheet; it shows the
+        // no-provider empty state and dismisses cleanly.
+        let aiCapture = app.buttons["Nhập bằng AI"]
+        XCTAssertTrue(waitReady(aiCapture, timeout: 10),
+                      "AI capture button missing")
+        aiCapture.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["AI nhập chi tiêu"]
+                .waitForExistence(timeout: 5),
+            "AI capture sheet missing")
+        assertVisible(app.staticTexts["Chưa cấu hình AI"],
+                      "AI capture no-provider state missing")
+        tapWhenReady(app.buttons["Đóng"], "AI capture close missing")
+        waitForDisappearance(
+            app.navigationBars.staticTexts["AI nhập chi tiêu"],
+            message: "AI capture sheet did not dismiss")
+
+        // Two personal expenses in different categories, and a personal
+        // income so the reports' income share section has data too.
+        quickAddExpense(amount: 150_000, category: "Ăn uống")
+        quickAddExpense(amount: 50_000, category: "Di chuyển")
+        tapQuickAdd()
+        let incomeSegment = app.buttons["Thu"]
+        XCTAssertTrue(incomeSegment.waitForExistence(timeout: 4),
+                      "income segment missing")
+        incomeSegment.tap()
+        typeAmount(5_000_000)
+        pickCategory("Doanh thu dịch vụ")
+        saveSheet()
+
+        // Dashboard: the share card under the month card. The mode switch
+        // sits right under the card title, so it must be tapped while the
+        // card top is still on screen — revealing a lower legend row first
+        // would scroll it off the top, and the reveal helpers only swipe
+        // up. Legend rows are combined accessibility buttons labelled
+        // "name, %, amount", matched by their leading name.
+        assertVisible(app.staticTexts["Tỉ lệ chi tiêu tháng này"],
+                      "dashboard share card missing")
+        let card = scopedElement("spendingShare.card")
+        let cardSwitch = hittableOrRevealedInOuter(
+            card.buttons.matching(
+                NSPredicate(format: "label == %@", "Mảng")))
+        XCTAssertNotNil(cardSwitch, "share card mode switch missing")
+        cardSwitch?.tap()
+        XCTAssertTrue(
+            card.buttons.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "Cá nhân"))
+                .firstMatch.waitForExistence(timeout: 5),
+            "share card 'Cá nhân' segment missing")
+        let cardSwitchBack = hittableOrRevealedInOuter(
+            card.buttons.matching(
+                NSPredicate(format: "label == %@", "Danh mục")))
+        XCTAssertNotNil(cardSwitchBack, "share card switch back missing")
+        cardSwitchBack?.tap()
+        XCTAssertTrue(
+            card.buttons.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "Ăn uống"))
+                .firstMatch.waitForExistence(timeout: 5),
+            "share card legend missing 'Ăn uống'")
+
+        // Reports: both "Cơ cấu" sections under the "Tất cả" scope — same
+        // ordering, each switch is tapped while its header is on screen.
+        openTab("Báo cáo")
+        assertVisible(app.staticTexts["Cơ cấu chi"],
+                      "reports expense share section missing")
+        let reportsSwitch = hittableOrRevealedInOuter(
+            app.buttons.matching(
+                NSPredicate(format: "label == %@", "Mảng")))
+        XCTAssertNotNil(reportsSwitch, "reports mode switch missing")
+        reportsSwitch?.tap()
+        XCTAssertTrue(
+            app.buttons.matching(
+                NSPredicate(format: "label BEGINSWITH %@", "Cá nhân"))
+                .firstMatch.waitForExistence(timeout: 5),
+            "reports 'Cá nhân' segment missing")
+        // The income section sits right below "Cơ cấu chi". Reveal its
+        // donut centre first — "Tổng thu" is a ~200pt-tall target that
+        // cannot be skipped between swipes — and check the legend while
+        // the section is on screen. The small header can rest under the
+        // floating tab bar (materialized but never hittable), so it is
+        // checked for existence after a short scroll back up.
+        assertVisible(app.staticTexts["Tổng thu"],
+                      "reports income donut missing")
+        XCTAssertTrue(
+            app.buttons.matching(
+                NSPredicate(
+                    format: "label BEGINSWITH %@", "Doanh thu dịch vụ"))
+                .firstMatch.waitForExistence(timeout: 5),
+            "income donut legend missing")
+        let incomeHeader = app.staticTexts["Cơ cấu thu"]
+        for _ in 0..<6 where !incomeHeader.exists {
+            swipeListDown()
+        }
+        XCTAssertTrue(incomeHeader.exists,
+                      "reports income share section missing")
     }
 
     // MARK: - Flow helpers
@@ -1255,6 +1392,20 @@ final class AMFinanceUITests: XCTestCase {
             swipes += 1
         }
         return element.exists && element.isHittable
+    }
+
+    /// One downward swipe on the tallest scroll container — scrolls the
+    /// page back toward the top by about a screenful. Picks the tallest
+    /// scroller (the same pick as `hittableOrRevealedInOuter`) so a
+    /// nested horizontal chart cannot swallow the gesture.
+    private func swipeListDown() {
+        let scroller = (
+            app.scrollViews.allElementsBoundByIndex
+                + app.collectionViews.allElementsBoundByIndex
+        ).max(by: { $0.frame.height < $1.frame.height })
+        if let scroller, scroller.exists {
+            scroller.swipeDown()
+        }
     }
 
     /// Swipes only when the element still resolves — `frontScrollable()`
