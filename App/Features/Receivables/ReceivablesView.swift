@@ -42,12 +42,30 @@ struct ReceivablesView: View {
             }
     }
 
-    private var settledRows: [(account: Account, snapshot: ReceivableSnapshot)] {
-        rows.filter { $0.snapshot.isSettled }
+    /// Clients in credit — they prepaid, so later advances consume the
+    /// credit. Not "đang nợ" and not "đã tất toán".
+    private var prepaidRows: [(account: Account, snapshot: ReceivableSnapshot)] {
+        rows
+            .filter { $0.snapshot.hasPrepaid }
+            .sorted {
+                $0.snapshot.prepaid != $1.snapshot.prepaid
+                    ? $0.snapshot.prepaid > $1.snapshot.prepaid
+                    : $0.account.name < $1.account.name
+            }
     }
 
+    private var settledRows: [(account: Account, snapshot: ReceivableSnapshot)] {
+        rows.filter { $0.snapshot.isSettled && !$0.snapshot.hasPrepaid }
+    }
+
+    /// "Tổng phải thu" — positive outstandings only; prepaid credit is
+    /// excluded and totalled on its own.
     private var totalOutstanding: Int64 {
         rows.reduce(0) { $0 + $1.snapshot.outstanding }
+    }
+
+    private var totalPrepaid: Int64 {
+        rows.reduce(0) { $0 + $1.snapshot.prepaid }
     }
 
     var body: some View {
@@ -87,11 +105,27 @@ struct ReceivablesView: View {
                     AmountText(amount: totalOutstanding)
                         .font(.headline)
                 }
+                if totalPrepaid > 0 {
+                    LabeledContent("Tổng khách ứng trước") {
+                        Text(VND.format(totalPrepaid))
+                            .font(.headline)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             if !outstandingRows.isEmpty {
                 Section("Đang nợ") {
                     ForEach(outstandingRows, id: \.account.id) { row in
+                        clientRow(row.account, snapshot: row.snapshot)
+                    }
+                }
+            }
+
+            if !prepaidRows.isEmpty {
+                Section("Khách ứng trước") {
+                    ForEach(prepaidRows, id: \.account.id) { row in
                         clientRow(row.account, snapshot: row.snapshot)
                     }
                 }
@@ -138,8 +172,17 @@ struct ReceivablesView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
-                AmountText(amount: snapshot.outstanding)
-                    .font(.subheadline.weight(.semibold))
+                if snapshot.hasPrepaid {
+                    Text("Khách ứng trước: \(VND.format(snapshot.prepaid))")
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                } else {
+                    AmountText(amount: snapshot.outstanding)
+                        .font(.subheadline.weight(.semibold))
+                }
             }
         }
     }

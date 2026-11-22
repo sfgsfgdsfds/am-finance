@@ -100,9 +100,9 @@ struct LoanPaymentSheet: View {
     }
 }
 
-/// Picker of the asset accounts a loan payment can leave from — non-archived
-/// and not a liability — each shown with its compact balance. Shared by the
-/// payment and prepayment sheets.
+/// Picker of the accounts a loan payment can leave from — non-archived
+/// cash, bank and e-wallet (`AccountKind.canPay`) — each shown with its
+/// compact balance. Shared by the payment and prepayment sheets.
 struct LoanPayingAccountPicker: View {
     @Query(sort: \Account.sortOrder) private var accounts: [Account]
     @Binding var selection: Account?
@@ -130,10 +130,14 @@ struct LoanPayingAccountPicker: View {
         .onChange(of: accounts.count) { _, _ in selectDefault() }
     }
 
-    /// Non-archived asset accounts — cash, bank and e-wallet, never the
-    /// loan itself or a credit card.
+    /// Non-archived accounts real money can leave from — cash, bank and
+    /// e-wallet; never a loan, a credit card or a client receivable.
+    static func candidates(_ accounts: [Account]) -> [Account] {
+        accounts.filter { !$0.isArchived && $0.kind.canPay }
+    }
+
     private var candidates: [Account] {
-        accounts.filter { !$0.isArchived && !$0.kind.isLiability }
+        Self.candidates(accounts)
     }
 
     /// Preselect the first candidate when nothing is chosen, and repair the

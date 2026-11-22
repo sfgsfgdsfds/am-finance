@@ -1,4 +1,5 @@
 import Foundation
+import FinanceCore
 
 /// Card-payment rules. A card payment is **always a transfer** from an asset
 /// account into the card — never an expense — so `makeTransfer` builds the
@@ -25,13 +26,22 @@ enum CreditCardPayment {
         )
     }
 
-    /// Accounts a payment can come from: not archived and not a liability —
-    /// paying a card with another card or a loan is a cash-advance, which the
-    /// app does not model here.
+    /// Accounts a payment can come from: not archived and holding real
+    /// money — see `AccountKind.canPay`.
     static func eligiblePayers(_ accounts: [Account], paying card: Account) -> [Account] {
         accounts.filter {
-            !$0.isArchived && !$0.kind.isLiability && $0.id != card.id
+            !$0.isArchived && $0.kind.canPay && $0.id != card.id
         }
+    }
+}
+
+extension AccountKind {
+    /// Kinds money can actually leave from when paying a credit card or a
+    /// loan: cash, bank and e-wallet. Paying from a card or a loan is a
+    /// cash-advance the app does not model, and a receivable is a client's
+    /// money — never the owner's.
+    var canPay: Bool {
+        self == .cash || self == .bank || self == .eWallet
     }
 }
 

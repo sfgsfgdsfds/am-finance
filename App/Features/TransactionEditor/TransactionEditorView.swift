@@ -340,7 +340,7 @@ struct TransactionEditorView: View {
 
     private func deleteTransaction() {
         guard let transaction else { return }
-        modelContext.delete(transaction)
+        LedgerTransactionDeletion.delete(transaction, in: modelContext)
         try? modelContext.save()
         dismiss()
     }

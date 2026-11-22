@@ -112,19 +112,23 @@ struct WalletSyncEngine {
     func syncAll(now: Date = .now, fullRescan: Bool = false) async throws -> WalletSyncSummary {
         let linked = Self.linkedAccounts(context: context)
         guard !linked.isEmpty else { throw WalletSyncError.noLinkedAccounts }
+        // One fetch per sync: every externalID ever imported (on any
+        // account) or tombstoned blocks a re-import.
+        var known = knownExternalIDs()
         var summary = WalletSyncSummary()
         for (sessionID, account) in linked {
             summary.accounts.append(
                 try await syncAccount(
                     sessionID: sessionID, account: account, now: now,
-                    fullRescan: fullRescan))
+                    fullRescan: fullRescan, known: &known))
         }
         return summary
     }
 
     /// One account's page loop: fetch → insert → save → advance cursor.
     private func syncAccount(
-        sessionID: String, account: Account, now: Date, fullRescan: Bool
+        sessionID: String, account: Account, now: Date, fullRescan: Bool,
+        known: inout Set<String>
     ) async throws -> WalletSyncAccountResult {
         var state = stateStore.state(for: sessionID)
         // A nil `lastFullRescanAt` means this account never scanned from
@@ -133,7 +137,6 @@ struct WalletSyncEngine {
             .map({ now.timeIntervalSince($0) >= Self.fullRescanInterval }) ?? true
         var cursor = rescan ? WalletSyncAccountState.startCursor : state.cursor
         var result = WalletSyncAccountResult(sessionID: sessionID)
-        var known = knownExternalIDs(of: account)
         let rules = ruleStore.loadRules()
         let categories = Dictionary(
             ((try? context.fetch(FetchDescriptor<LedgerCategory>())) ?? []).map { ($0.id, $0) },
@@ -208,15 +211,16 @@ struct WalletSyncEngine {
         return result
     }
 
-    /// Every `externalID` the account already holds — as source and, for
-    /// rows converted to transfers, as destination too.
-    private func knownExternalIDs(of account: Account) -> Set<String> {
-        var known = Set<String>()
-        for transaction in (account.transactions ?? []) + (account.incomingTransfers ?? []) {
-            guard transaction.externalSource == Self.externalSource,
-                  let id = transaction.externalID else { continue }
-            known.insert(id)
-        }
+    /// Every `externalID` the ledger already holds for this source, on
+    /// any account — a row the user moved to another account still blocks
+    /// a duplicate — plus every tombstoned id, so a deleted import is
+    /// never resurrected.
+    private func knownExternalIDs() -> Set<String> {
+        let source = Self.externalSource
+        let rows = (try? context.fetch(FetchDescriptor<LedgerTransaction>(
+            predicate: #Predicate { $0.externalSource == source }))) ?? []
+        var known = Set(rows.compactMap(\.externalID))
+        known.formUnion(stateStore.tombstonedIDs(source: source))
         return known
     }
 
