@@ -5,11 +5,14 @@ public enum AccountKind: String, Codable, CaseIterable, Sendable {
     case cash
     case bank
     case eWallet
+    case receivable
     case creditCard
     case loan
 
     /// Liabilities are money I owe: card debt and loans. A negative balance
     /// on a liability account is normal — it is the amount outstanding.
+    /// A receivable is the opposite: money a client owes me, so it sits
+    /// with the assets and carries a positive balance while unpaid.
     public var isLiability: Bool {
         self == .creditCard || self == .loan
     }
@@ -20,6 +23,7 @@ public enum AccountKind: String, Codable, CaseIterable, Sendable {
         case .cash: return "Tiền mặt"
         case .bank: return "Ngân hàng"
         case .eWallet: return "Ví điện tử"
+        case .receivable: return "Phải thu"
         case .creditCard: return "Thẻ tín dụng"
         case .loan: return "Khoản vay"
         }
@@ -31,6 +35,7 @@ public enum AccountKind: String, Codable, CaseIterable, Sendable {
         case .cash: return "banknote.fill"
         case .bank: return "building.columns.fill"
         case .eWallet: return "wallet.pass.fill"
+        case .receivable: return "person.badge.clock.fill"
         case .creditCard: return "creditcard.fill"
         case .loan: return "doc.text.fill"
         }

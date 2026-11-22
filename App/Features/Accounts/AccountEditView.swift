@@ -11,6 +11,7 @@ struct AccountEditView: View {
     @Environment(\.modelContext) private var context
     @Environment(\.dismiss) private var dismiss
     @Query(sort: \Account.sortOrder) private var existingAccounts: [Account]
+    @Query(sort: \Business.sortOrder) private var businesses: [Business]
 
     @State private var draft: AccountDraft
     @State private var error: AccountDraftError?
@@ -72,6 +73,14 @@ struct AccountEditView: View {
                 }
             } else {
                 LabeledContent("Loại tài khoản", value: draft.kind.displayName)
+            }
+            if draft.kind == .receivable {
+                Picker("Mảng kinh doanh", selection: $draft.business) {
+                    Text("Không có").tag(nil as Business?)
+                    ForEach(businesses.filter { !$0.isArchived }, id: \.id) { business in
+                        Text(business.name).tag(business as Business?)
+                    }
+                }
             }
         }
         .onChange(of: draft.kind) { oldKind, newKind in

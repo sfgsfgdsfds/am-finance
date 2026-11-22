@@ -5,10 +5,11 @@ import SwiftData
 /// Dates are ISO 8601 with fractional seconds so `updatedAt` ordering and
 /// `createdAt` equality survive a round trip.
 enum BackupCodec {
-    /// The newest backup format this build writes; files at version 1 or 2
-    /// are accepted on read (v1 lacks `loanRateChanges`, v1/v2 lack
-    /// `budgets`/`recurringRules` — absent keys decode as empty lists).
-    static let formatVersion = 3
+    /// The newest backup format this build writes; older files are accepted
+    /// on read (v1 lacks `loanRateChanges`, v1/v2 lack
+    /// `budgets`/`recurringRules`, pre-v4 accounts lack `businessID` —
+    /// absent keys decode as empty lists or nil).
+    static let formatVersion = 4
 
     /// Version string stamped into every exported document.
     static var appVersion: String {

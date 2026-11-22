@@ -15,6 +15,9 @@ struct AccountDraft: Equatable {
     var icon = ""
     var colorHex = ""
     var note = ""
+    /// The business a receivable account belongs to (kind == .receivable);
+    /// nil means a personal client.
+    var business: Business?
 
     // Credit-card fields (kind == .creditCard). A limit of 0 means none.
     var creditLimit: Int64 = 0
@@ -46,6 +49,7 @@ struct AccountDraft: Equatable {
         icon = account.icon
         colorHex = account.colorHex
         note = account.note
+        business = account.business
         creditLimit = account.creditLimit ?? 0
         statementDay = account.statementDay ?? 15
         graceDays = account.graceDays ?? 15
@@ -78,14 +82,15 @@ struct AccountDraft: Equatable {
                 return .invalidLoanRate
             }
             if !(1...31).contains(loanPaymentDay) { return .invalidLoanPaymentDay }
-        case .cash, .bank, .eWallet:
+        case .cash, .bank, .eWallet, .receivable:
             break
         }
         return nil
     }
 
     /// Writes every field onto a model. Irrelevant kind-specific fields are
-    /// cleared so a stale credit limit never survives on a cash account.
+    /// cleared so a stale credit limit never survives on a cash account —
+    /// and a stale business never survives on a non-receivable account.
     func apply(to account: Account) {
         account.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         account.kind = kind
@@ -93,6 +98,7 @@ struct AccountDraft: Equatable {
         account.icon = icon
         account.colorHex = colorHex
         account.note = note
+        account.business = kind == .receivable ? business : nil
 
         account.creditLimit = kind == .creditCard && creditLimit > 0 ? creditLimit : nil
         account.statementDay = kind == .creditCard ? statementDay : nil
@@ -110,6 +116,27 @@ struct AccountDraft: Equatable {
     /// "Sao kê tiếp theo" / "Hạn thanh toán" previews in the form.
     var creditCardCycleConfig: CreditCardCycleConfig {
         CreditCardCycleConfig(statementDay: statementDay, graceDays: graceDays)
+    }
+
+    /// `Business` is a reference type without `Equatable`, so drafts compare
+    /// by the linked row's identity instead.
+    static func == (lhs: AccountDraft, rhs: AccountDraft) -> Bool {
+        lhs.name == rhs.name
+            && lhs.kind == rhs.kind
+            && lhs.openingBalance == rhs.openingBalance
+            && lhs.icon == rhs.icon
+            && lhs.colorHex == rhs.colorHex
+            && lhs.note == rhs.note
+            && lhs.business?.id == rhs.business?.id
+            && lhs.creditLimit == rhs.creditLimit
+            && lhs.statementDay == rhs.statementDay
+            && lhs.graceDays == rhs.graceDays
+            && lhs.loanPrincipal == rhs.loanPrincipal
+            && lhs.loanAnnualRatePercent == rhs.loanAnnualRatePercent
+            && lhs.loanTermMonths == rhs.loanTermMonths
+            && lhs.loanStartDate == rhs.loanStartDate
+            && lhs.loanPaymentDay == rhs.loanPaymentDay
+            && lhs.loanMethod == rhs.loanMethod
     }
 }
 

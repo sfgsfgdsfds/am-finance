@@ -107,6 +107,18 @@ private struct BusinessHubDetailContent: View {
         Dictionary(periodTransactions.map { ($0.id, $0) }) { first, _ in first }
     }
 
+    /// This business's client receivable accounts ("Phải thu"), not archived.
+    private var receivableAccounts: [Account] {
+        (business.accounts ?? [])
+            .filter { $0.kind == .receivable && !$0.isArchived }
+    }
+
+    /// What clients still owe this business — the receivables' positive
+    /// balances summed.
+    private var receivableOutstanding: Int64 {
+        receivableAccounts.reduce(0) { $0 + max(0, $1.balance) }
+    }
+
     private var sections: [TransactionListDaySection] {
         TransactionListGrouping.sections(
             for: periodTransactions.map { TransactionListRow(transaction: $0) })
@@ -115,6 +127,29 @@ private struct BusinessHubDetailContent: View {
     var body: some View {
         List {
             BusinessHubDetailSummarySection(snapshot: snapshot)
+
+            Section {
+                NavigationLink {
+                    ReceivablesView(business: business)
+                } label: {
+                    HStack(spacing: 12) {
+                        IconBadge(
+                            symbol: "person.badge.clock.fill",
+                            colorHex: "FF9F0A", size: 32
+                        )
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Khách đang nợ")
+                            Text("\(receivableAccounts.count) khách hàng")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        AmountText(amount: receivableOutstanding)
+                    }
+                }
+            } header: {
+                Text("Khoản ứng hộ khách")
+            }
 
             BusinessHubDetailCategorySection(
                 title: "Thu theo danh mục",

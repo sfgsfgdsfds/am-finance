@@ -124,7 +124,11 @@ struct AccountsListView: View {
 
     private func row(_ account: Account) -> some View {
         NavigationLink {
-            AccountDetailView(account: account)
+            if account.kind == .receivable {
+                ReceivableDetailView(account: account)
+            } else {
+                AccountDetailView(account: account)
+            }
         } label: {
             HStack(spacing: 12) {
                 IconBadge(symbol: account.icon, colorHex: account.colorHex, size: 36)
