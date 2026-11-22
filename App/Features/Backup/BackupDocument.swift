@@ -4,6 +4,11 @@ import Foundation
 /// category, business and transaction, with relationships written as UUID
 /// references. `formatVersion` gates restores: a file written by a newer
 /// app is refused instead of being half-read.
+///
+/// Version history:
+/// - 1: accounts, categories, businesses, transactions.
+/// - 2: adds `loanRateChanges`. v1 files still decode — the absent key is
+///   read as an empty list.
 struct BackupDocument: Codable, Equatable, Sendable {
     var formatVersion: Int
     var exportedAt: Date
@@ -12,6 +17,42 @@ struct BackupDocument: Codable, Equatable, Sendable {
     var categories: [BackupCategory]
     var businesses: [BackupBusiness]
     var transactions: [BackupTransaction]
+    var loanRateChanges: [BackupLoanRateChange]
+
+    init(
+        formatVersion: Int,
+        exportedAt: Date,
+        appVersion: String,
+        accounts: [BackupAccount],
+        categories: [BackupCategory],
+        businesses: [BackupBusiness],
+        transactions: [BackupTransaction],
+        loanRateChanges: [BackupLoanRateChange] = []
+    ) {
+        self.formatVersion = formatVersion
+        self.exportedAt = exportedAt
+        self.appVersion = appVersion
+        self.accounts = accounts
+        self.categories = categories
+        self.businesses = businesses
+        self.transactions = transactions
+        self.loanRateChanges = loanRateChanges
+    }
+
+    /// `loanRateChanges` is the only field a v1 file may lack.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        formatVersion = try container.decode(Int.self, forKey: .formatVersion)
+        exportedAt = try container.decode(Date.self, forKey: .exportedAt)
+        appVersion = try container.decode(String.self, forKey: .appVersion)
+        accounts = try container.decode([BackupAccount].self, forKey: .accounts)
+        categories = try container.decode([BackupCategory].self, forKey: .categories)
+        businesses = try container.decode([BackupBusiness].self, forKey: .businesses)
+        transactions = try container.decode([BackupTransaction].self, forKey: .transactions)
+        loanRateChanges = try container.decodeIfPresent(
+            [BackupLoanRateChange].self, forKey: .loanRateChanges
+        ) ?? []
+    }
 }
 
 /// Stored fields of `Account`. Transactions hold the account references, so
@@ -115,6 +156,24 @@ extension BackupBusiness {
         note = business.note
         sortOrder = business.sortOrder
         isArchived = business.isArchived
+    }
+}
+
+/// Stored fields of `LoanRateChange` (added in formatVersion 2). The owning
+/// loan account travels as `accountID` and is re-linked on restore.
+struct BackupLoanRateChange: Codable, Equatable, Sendable {
+    var id: UUID
+    var fromInstallment: Int
+    var annualRatePercent: Double
+    var accountID: UUID?
+}
+
+extension BackupLoanRateChange {
+    init(_ change: LoanRateChange) {
+        id = change.id
+        fromInstallment = change.fromInstallment
+        annualRatePercent = change.annualRatePercent
+        accountID = change.account?.id
     }
 }
 

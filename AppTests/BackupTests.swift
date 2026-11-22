@@ -53,6 +53,9 @@ struct BackupTests {
         loan.externalAccountID = "LN-001"
         loan.createdAt = Date(timeIntervalSince1970: 1_700_000_200)
         for account in [bank, card, loan] { context.insert(account) }
+        context.insert(LoanRateChange(
+            fromInstallment: 13, annualRatePercent: 11.5, account: loan
+        ))
 
         let category = LedgerCategory(name: "Cà phê", kind: .expense,
                                       icon: "cup.and.saucer.fill", colorHex: "A2845E", sortOrder: 99)
@@ -98,6 +101,7 @@ struct BackupTests {
         let purchaseID = purchase.id, purchaseCreatedAt = purchase.createdAt
         let purchaseUpdatedAt = purchase.updatedAt
         let payoffID = payoff.id, salaryID = salary.id
+        let rateChangeID = try #require(loan.loanRateChanges?.first).id
         let accountIDs = Set(try fetchAll(Account.self, in: context).map(\.id))
 
         let data = try BackupCodec.encode(
@@ -117,7 +121,7 @@ struct BackupTests {
         #expect(categories.count == 22) // 21 seeded + 1 added
         #expect(businesses.count == 3)
         #expect(restored.count == 3)
-        #expect(result.inserted == 4 + 22 + 3 + 3)
+        #expect(result.inserted == 4 + 22 + 3 + 3 + 1) // + the rate change
         #expect(result.updated == 0)
         #expect(result.skipped == 0)
         #expect(Set(accounts.map(\.id)) == accountIDs)
@@ -143,6 +147,14 @@ struct BackupTests {
         #expect(rLoan.loanMethodRaw == "annuity")
         #expect(rLoan.externalSource == "bank-link")
         #expect(rLoan.externalAccountID == "LN-001")
+
+        let rateChanges = try fetchAll(LoanRateChange.self, in: context)
+        let rChange = try #require(rateChanges.first { $0.id == rateChangeID })
+        #expect(rateChanges.count == 1)
+        #expect(rChange.fromInstallment == 13)
+        #expect(rChange.annualRatePercent == 11.5)
+        #expect(rChange.account?.id == loanID)
+        #expect(rLoan.loanRateChanges?.count == 1)
 
         let rCategory = try #require(categories.first { $0.id == categoryID })
         #expect(rCategory.name == "Cà phê")
@@ -275,15 +287,103 @@ struct BackupTests {
         #expect(try fetchAll(Business.self, in: context).count == 1)
     }
 
+    // MARK: - Loan rate changes
+
+    @Test func mergeUpsertsLoanRateChangesAndRelinksAccount() throws {
+        let context = try makeContext()
+        let loan = Account(name: "Vay cũ", kind: .loan, openingBalance: -120_000_000)
+        context.insert(loan)
+        let existing = LoanRateChange(
+            fromInstallment: 13, annualRatePercent: 11.5, account: loan
+        )
+        context.insert(existing)
+        try context.save()
+
+        let newLoanID = UUID()
+        let newChangeID = UUID()
+
+        var updated = BackupLoanRateChange(existing)
+        updated.fromInstallment = 14
+        updated.annualRatePercent = 18.0
+
+        var inserted = BackupLoanRateChange(
+            LoanRateChange(id: newChangeID, fromInstallment: 5, annualRatePercent: 9.0)
+        )
+        inserted.accountID = newLoanID
+
+        let document = BackupDocument(
+            formatVersion: 2, exportedAt: .now, appVersion: "test",
+            accounts: [BackupAccount(Account(id: newLoanID, name: "Vay mới", kind: .loan))],
+            categories: [], businesses: [], transactions: [],
+            loanRateChanges: [updated, inserted]
+        )
+
+        let result = try BackupRestorer.restore(document, mode: .merge, into: context)
+
+        #expect(result.inserted == 2) // new loan account + new rate change
+        #expect(result.updated == 1)  // the existing rate change
+        #expect(existing.fromInstallment == 14)
+        #expect(existing.annualRatePercent == 18.0)
+        #expect(existing.account?.id == loan.id)
+
+        let changes = try fetchAll(LoanRateChange.self, in: context)
+        #expect(changes.count == 2)
+        let newChange = try #require(changes.first { $0.id == newChangeID })
+        #expect(newChange.fromInstallment == 5)
+        #expect(newChange.annualRatePercent == 9.0)
+        #expect(newChange.account?.id == newLoanID)
+    }
+
+    /// The backup covers every model type in the schema — this fails the
+    /// moment a new `@Model` lands in `AppSchema.allModels` without backup
+    /// support, so one can never be forgotten.
+    @Test func backupCoversEveryModelInTheSchema() {
+        let schema = Set(AppSchema.allModels.map { ObjectIdentifier($0) })
+        let covered = Set(BackupCoverage.coveredModels.map { ObjectIdentifier($0) })
+        #expect(covered == schema)
+    }
+
+    // MARK: - Older files
+
+    /// A v1 file has no `loanRateChanges` key at all — it still decodes and
+    /// restores, with the rate-change list read as empty.
+    @Test func version1FileStillDecodesAndRestores() throws {
+        let context = try makeContext()
+        let json = """
+        {"formatVersion": 1,
+         "exportedAt": "2026-11-01T00:00:00Z",
+         "appVersion": "1.0",
+         "accounts": [{
+            "id": "5EED0000-0000-4000-8000-00000000AA01",
+            "name": "Thẻ cũ", "kindRaw": "creditCard",
+            "openingBalance": -1500000, "icon": "creditcard.fill",
+            "colorHex": "FF9500", "note": "", "sortOrder": 0,
+            "isArchived": false,
+            "createdAt": "2026-01-01T00:00:00Z"}],
+         "categories": [], "businesses": [], "transactions": []}
+        """
+        let document = try BackupCodec.decode(Data(json.utf8))
+        #expect(document.formatVersion == 1)
+        #expect(document.loanRateChanges.isEmpty)
+
+        let result = try BackupRestorer.restore(document, mode: .merge, into: context)
+        #expect(result.inserted == 1)
+        let restored = try #require(
+            try fetchAll(Account.self, in: context).first { $0.name == "Thẻ cũ" }
+        )
+        #expect(restored.kind == .creditCard)
+        #expect(restored.openingBalance == -1_500_000)
+    }
+
     // MARK: - Rejected files
 
     @Test func decodeRejectsNewerFormatVersion() throws {
         let json = """
-        {"formatVersion": 2, "exportedAt": "2026-11-22T07:05:00Z",
+        {"formatVersion": 3, "exportedAt": "2026-11-22T07:05:00Z",
          "appVersion": "9", "accounts": [], "categories": [],
-         "businesses": [], "transactions": []}
+         "businesses": [], "transactions": [], "loanRateChanges": []}
         """
-        #expect(throws: BackupError.unsupportedVersion(found: 2)) {
+        #expect(throws: BackupError.unsupportedVersion(found: 3)) {
             _ = try BackupCodec.decode(Data(json.utf8))
         }
     }
@@ -312,10 +412,10 @@ struct BackupTests {
         let context = try makeContext()
         try SeedData.seedIfNeeded(context: context)
         let future = BackupDocument(
-            formatVersion: 2, exportedAt: .now, appVersion: "x",
+            formatVersion: 3, exportedAt: .now, appVersion: "x",
             accounts: [], categories: [], businesses: [], transactions: []
         )
-        #expect(throws: BackupError.unsupportedVersion(found: 2)) {
+        #expect(throws: BackupError.unsupportedVersion(found: 3)) {
             _ = try BackupRestorer.restore(future, mode: .replace, into: context)
         }
         // Even in replace mode nothing was deleted or inserted.

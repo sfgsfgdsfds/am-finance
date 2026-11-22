@@ -38,9 +38,11 @@ enum BackupRestorer {
             var categories: [UUID: LedgerCategory]
             var businesses: [UUID: Business]
             var transactions: [UUID: LedgerTransaction]
+            var rateChanges: [UUID: LoanRateChange]
 
             if mode == .replace {
                 for row in try context.fetch(FetchDescriptor<LedgerTransaction>()) { context.delete(row) }
+                for row in try context.fetch(FetchDescriptor<LoanRateChange>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<Account>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<LedgerCategory>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<Business>()) { context.delete(row) }
@@ -48,6 +50,7 @@ enum BackupRestorer {
                 categories = [:]
                 businesses = [:]
                 transactions = [:]
+                rateChanges = [:]
             } else {
                 accounts = try context.fetch(FetchDescriptor<Account>())
                     .reduce(into: [:]) { $0[$1.id] = $1 }
@@ -56,6 +59,8 @@ enum BackupRestorer {
                 businesses = try context.fetch(FetchDescriptor<Business>())
                     .reduce(into: [:]) { $0[$1.id] = $1 }
                 transactions = try context.fetch(FetchDescriptor<LedgerTransaction>())
+                    .reduce(into: [:]) { $0[$1.id] = $1 }
+                rateChanges = try context.fetch(FetchDescriptor<LoanRateChange>())
                     .reduce(into: [:]) { $0[$1.id] = $1 }
             }
 
@@ -119,6 +124,23 @@ enum BackupRestorer {
                 }
             }
 
+            // Rate changes re-link against the restored loan accounts, so
+            // they come after the accounts pass — like transactions do.
+            for dto in document.loanRateChanges {
+                if let existing = rateChanges[dto.id] {
+                    apply(dto, to: existing, accounts: accounts)
+                    result.updated += 1
+                } else {
+                    let change = LoanRateChange(
+                        id: dto.id, fromInstallment: 0, annualRatePercent: 0
+                    )
+                    apply(dto, to: change, accounts: accounts)
+                    context.insert(change)
+                    rateChanges[dto.id] = change
+                    result.inserted += 1
+                }
+            }
+
             try context.save()
             return result
         } catch {
@@ -170,6 +192,18 @@ enum BackupRestorer {
         business.note = dto.note
         business.sortOrder = dto.sortOrder
         business.isArchived = dto.isArchived
+    }
+
+    /// The account reference is re-linked to a live loan account; an id
+    /// that exists neither in the backup nor in the store becomes nil.
+    private static func apply(
+        _ dto: BackupLoanRateChange,
+        to change: LoanRateChange,
+        accounts: [UUID: Account]
+    ) {
+        change.fromInstallment = dto.fromInstallment
+        change.annualRatePercent = dto.annualRatePercent
+        change.account = dto.accountID.flatMap { accounts[$0] }
     }
 
     /// IDs in the DTO are re-linked to live objects; an id that exists

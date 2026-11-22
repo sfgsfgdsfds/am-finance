@@ -60,6 +60,11 @@ struct DashboardView: View {
                                 accounts.first { $0.id == id }
                             }
                         }
+                        if !upcomingItems.isEmpty {
+                            DashboardUpcomingCard(items: upcomingItems) { id in
+                                accounts.first { $0.id == id }
+                            }
+                        }
                         DashboardChartCard(months: snapshot.months)
                         if !snapshot.topExpenseCategories.isEmpty {
                             DashboardTopCategoriesCard(rows: snapshot.topExpenseCategories)
@@ -109,6 +114,14 @@ struct DashboardView: View {
                 refreshTransactionCount()
             }
         }
+    }
+
+    /// Debt payments due within the next 14 days (overdue ones included) —
+    /// drives the "Sắp đến hạn" card, hidden when empty.
+    private var upcomingItems: [DebtsUpcomingItem] {
+        DebtsUpcomingMapper.items(
+            for: accounts, now: .now, calendar: AppCalendar.vietnam, withinDays: 14
+        )
     }
 
     // MARK: - Snapshot
