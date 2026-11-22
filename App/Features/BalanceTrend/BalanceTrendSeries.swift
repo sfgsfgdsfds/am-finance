@@ -161,7 +161,8 @@ extension Account {
     /// The account's movements as `BalanceHistory` entries: the signed delta
     /// of every transaction it participates in — source role via
     /// `LedgerMath.delta`, transfer destination `+amount` — de-duplicated by
-    /// transaction id.
+    /// transaction id and sorted stably by date (relationship arrays have no
+    /// guaranteed order).
     var balanceTrendEntries: [BalanceHistoryEntry] {
         var seen = Set<UUID>()
         var entries: [BalanceHistoryEntry] = []
@@ -176,5 +177,12 @@ extension Account {
             }
         }
         return entries
+            .enumerated()
+            .sorted { lhs, rhs in
+                lhs.element.date == rhs.element.date
+                    ? lhs.offset < rhs.offset
+                    : lhs.element.date < rhs.element.date
+            }
+            .map(\.element)
     }
 }
