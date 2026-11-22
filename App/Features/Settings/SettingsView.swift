@@ -135,6 +135,12 @@ struct SettingsView: View {
                 } label: {
                     Label("Nhập sao kê CSV", systemImage: "doc.badge.arrow.down")
                 }
+                NavigationLink {
+                    LazyDestination { DataResetView() }
+                } label: {
+                    Label("Xoá dữ liệu", systemImage: "trash.fill")
+                        .foregroundStyle(.red)
+                }
             }
 
             Section("Giới thiệu") {

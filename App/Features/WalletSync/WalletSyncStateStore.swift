@@ -66,6 +66,9 @@ protocol WalletSyncStateStoring: Sendable {
     /// Records external ids as tombstoned for `source`. Re-recording an
     /// id bumps it to newest; the list is capped per source.
     func recordTombstones(_ ids: [String], source: String)
+    /// Wipes every session state and every tombstone — the "Xoá dữ liệu"
+    /// reset uses it; callers re-create states they still need.
+    func removeAll()
 }
 
 /// UserDefaults-backed store: one JSON blob `[sessionID: state]` for the
@@ -154,6 +157,11 @@ final class WalletSyncStateStore: WalletSyncStateStoring, @unchecked Sendable {
         }
         return copy
     }
+
+    func removeAll() {
+        defaults.removeObject(forKey: Self.key)
+        defaults.removeObject(forKey: Self.tombstonesKey)
+    }
 }
 
 /// Volatile `WalletSyncStateStoring` for tests and previews.
@@ -187,5 +195,10 @@ final class WalletSyncInMemoryStateStore: WalletSyncStateStoring, @unchecked Sen
         guard !ids.isEmpty else { return }
         tombstones[source] = WalletSyncStateStore.appending(
             ids, to: tombstones[source] ?? [])
+    }
+
+    func removeAll() {
+        states = [:]
+        tombstones = [:]
     }
 }

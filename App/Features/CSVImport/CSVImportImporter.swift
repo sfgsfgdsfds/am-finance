@@ -14,6 +14,9 @@ protocol CSVImportBatchStoring: Sendable {
     func batch(for accountID: UUID) -> CSVImportBatch?
     func setBatch(_ batch: CSVImportBatch, for accountID: UUID)
     func clearBatch(for accountID: UUID)
+    /// Drops every remembered batch — the "Xoá dữ liệu" reset uses it so
+    /// imports can start over.
+    func removeAllBatches()
 }
 
 /// One JSON blob `[accountUUID: batch]` in UserDefaults.
@@ -54,6 +57,10 @@ final class CSVImportBatchStore: CSVImportBatchStoring, @unchecked Sendable {
         copy.removeValue(forKey: accountID.uuidString)
         all = copy
     }
+
+    func removeAllBatches() {
+        defaults.removeObject(forKey: Self.key)
+    }
 }
 
 /// Volatile `CSVImportBatchStoring` for tests and previews.
@@ -72,6 +79,10 @@ final class CSVImportInMemoryBatchStore: CSVImportBatchStoring, @unchecked Senda
 
     func clearBatch(for accountID: UUID) {
         batches.removeValue(forKey: accountID)
+    }
+
+    func removeAllBatches() {
+        batches = [:]
     }
 }
 
