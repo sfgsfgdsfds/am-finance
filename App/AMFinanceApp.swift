@@ -7,7 +7,11 @@ struct AMFinanceApp: App {
 
     init() {
         do {
-            let container = try AppModelContainer.make()
+            // UI tests pass -uiTestInMemoryStore so they run against a throwaway
+            // in-memory store (still seeded) and never touch real data.
+            let inMemory = ProcessInfo.processInfo.arguments
+                .contains("-uiTestInMemoryStore")
+            let container = try AppModelContainer.make(inMemory: inMemory)
             try SeedData.seedIfNeeded(context: ModelContext(container))
             self.container = container
         } catch {

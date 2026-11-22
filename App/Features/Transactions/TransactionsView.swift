@@ -419,13 +419,12 @@ struct TransactionListContent: View {
     }
 
     private func rowButton(_ row: TransactionListRow) -> some View {
-        Button {
+        TransactionListRowView(row: row)
+        .contentShape(Rectangle())
+        .onTapGesture {
             guard let transaction = transactionsByID[row.id] else { return }
             onEdit(transaction)
-        } label: {
-            TransactionListRowView(row: row)
         }
-        .buttonStyle(.plain)
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button(role: .destructive) {
                 if let transaction = transactionsByID[row.id] {

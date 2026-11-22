@@ -45,6 +45,7 @@ struct RootTabView: View {
                 .shadow(color: .black.opacity(0.25), radius: 6, y: 3)
         }
         .accessibilityLabel("Thêm giao dịch")
+        .accessibilityIdentifier("root.quickAdd")
         .padding(.bottom, 20)
     }
 }
