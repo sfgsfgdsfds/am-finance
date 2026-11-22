@@ -125,6 +125,11 @@ struct SettingsView: View {
                 } label: {
                     Label("Sao lưu & khôi phục", systemImage: "icloud.fill")
                 }
+                NavigationLink {
+                    LazyDestination { CSVImportView() }
+                } label: {
+                    Label("Nhập sao kê CSV", systemImage: "doc.badge.arrow.down")
+                }
             }
 
             Section("Giới thiệu") {
