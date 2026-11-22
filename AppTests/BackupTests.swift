@@ -691,15 +691,245 @@ struct BackupTests {
         #expect(restored.business == nil)
     }
 
+    // MARK: - Rental units and leases (formatVersion 5)
+
+    /// A serviced-apartment round trip: the unit's fields, the lease's
+    /// fields, the unit→business and lease→unit links, and a rent
+    /// collection's lease/period on its transaction all come back.
+    @Test func replaceRestoreRoundTripsRentals() throws {
+        let context = try makeContext()
+        let apartment = Business(name: "Căn hộ dịch vụ", sortOrder: 2)
+        let bank = Account(name: "Ngân hàng", kind: .bank, openingBalance: 0)
+        let unit = RentalUnit(
+            name: "Phòng 101", listPrice: 5_000_000, note: "Tầng 1",
+            sortOrder: 4, business: apartment
+        )
+        unit.createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let archived = RentalUnit(
+            name: "Phòng cũ", listPrice: 3_000_000,
+            sortOrder: 9, isArchived: true
+        )
+        let lease = RentalLease(
+            tenantName: "Nguyễn Văn A", tenantPhone: "090 123 4567",
+            startDate: day(2026, 1, 15), endDate: day(2026, 12, 31),
+            monthlyRent: 5_000_000, deposit: 5_000_000,
+            paymentDay: 31, isActive: true,
+            note: "Trả đầu tháng", unit: unit
+        )
+        lease.createdAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let rentRow = LedgerTransaction(
+            kind: .income, amount: 5_000_000,
+            date: day(2026, 11, 5), note: "Tiền Phòng 101 tháng 11/2026",
+            account: bank, business: apartment,
+            rentalLease: lease, rentalPeriod: day(2026, 11, 1)
+        )
+        let extraRow = LedgerTransaction(
+            kind: .income, amount: 700_000,
+            date: day(2026, 11, 5), note: "Điện, nước",
+            account: bank, rentalLease: lease, rentalPeriod: nil
+        )
+        context.insert(apartment)
+        context.insert(bank)
+        for room in [unit, archived] { context.insert(room) }
+        context.insert(lease)
+        for row in [rentRow, extraRow] { context.insert(row) }
+        try context.save()
+
+        let apartmentID = apartment.id, bankID = bank.id
+        let unitID = unit.id, archivedID = archived.id, leaseID = lease.id
+        let rentID = rentRow.id, extraID = extraRow.id
+
+        let data = try BackupCodec.encode(
+            context: context, exportedAt: Date(timeIntervalSince1970: 1_763_791_500)
+        )
+        let document = try BackupCodec.decode(data)
+        #expect(document.formatVersion == BackupCodec.formatVersion)
+        #expect(document.rentalUnits.count == 2)
+        #expect(document.rentalLeases.count == 1)
+        #expect(document.rentalUnits.first { $0.id == unitID }?.businessID == apartmentID)
+        #expect(document.rentalLeases.first { $0.id == leaseID }?.unitID == unitID)
+        #expect(document.transactions.first { $0.id == rentID }?.rentalLeaseID == leaseID)
+        #expect(document.transactions.first { $0.id == rentID }?.rentalPeriod == day(2026, 11, 1))
+
+        let result = try BackupRestorer.restore(document, mode: .replace, into: context)
+        #expect(result.inserted == 2 + 1 + 1 + 1 + 2) // units+lease+account+business+transactions
+
+        let units = try fetchAll(RentalUnit.self, in: context)
+        #expect(units.count == 2)
+        let rUnit = try #require(units.first { $0.id == unitID })
+        #expect(rUnit.name == "Phòng 101")
+        #expect(rUnit.listPrice == 5_000_000)
+        #expect(rUnit.note == "Tầng 1")
+        #expect(rUnit.sortOrder == 4)
+        #expect(!rUnit.isArchived)
+        #expect(rUnit.createdAt == Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(rUnit.business?.id == apartmentID)
+        let rArchived = try #require(units.first { $0.id == archivedID })
+        #expect(rArchived.isArchived)
+        #expect(rArchived.business == nil)
+
+        let leases = try fetchAll(RentalLease.self, in: context)
+        let rLease = try #require(leases.first { $0.id == leaseID })
+        #expect(leases.count == 1)
+        #expect(rLease.tenantName == "Nguyễn Văn A")
+        #expect(rLease.tenantPhone == "090 123 4567")
+        #expect(rLease.startDate == day(2026, 1, 15))
+        #expect(rLease.endDate == day(2026, 12, 31))
+        #expect(rLease.monthlyRent == 5_000_000)
+        #expect(rLease.deposit == 5_000_000)
+        #expect(rLease.paymentDay == 31)
+        #expect(rLease.isActive)
+        #expect(rLease.note == "Trả đầu tháng")
+        #expect(rLease.createdAt == Date(timeIntervalSince1970: 1_700_000_100))
+        #expect(rLease.unit?.id == unitID)
+        // The inverse relationship was re-linked too.
+        #expect(rUnit.leases?.contains { $0.id == leaseID } == true)
+
+        let transactions = try fetchAll(LedgerTransaction.self, in: context)
+        let rRent = try #require(transactions.first { $0.id == rentID })
+        #expect(rRent.rentalLease?.id == leaseID)
+        #expect(rRent.rentalPeriod == day(2026, 11, 1))
+        #expect(rRent.business?.id == apartmentID)
+        #expect(rRent.account?.id == bankID)
+        let rExtra = try #require(transactions.first { $0.id == extraID })
+        #expect(rExtra.rentalLease?.id == leaseID)
+        #expect(rExtra.rentalPeriod == nil)
+        #expect(rLease.payments?.count == 2)
+    }
+
+    /// Merge upserts both rental models: an existing unit/lease is updated
+    /// in place, new ones insert, and a lease pointing at a unit the file
+    /// does not contain relinks to the restored copy — a dangling unit id
+    /// decodes to nil.
+    @Test func mergeUpsertsRentalsAndRelinks() throws {
+        let context = try makeContext()
+        let apartment = Business(name: "Căn hộ dịch vụ")
+        let unit = RentalUnit(name: "Phòng 101", listPrice: 4_000_000, business: apartment)
+        let lease = RentalLease(
+            tenantName: "Thuê cũ", startDate: day(2026, 1, 1),
+            monthlyRent: 4_000_000, paymentDay: 5, unit: unit
+        )
+        context.insert(apartment)
+        context.insert(unit)
+        context.insert(lease)
+        try context.save()
+
+        let newUnitID = UUID()
+        let newLeaseID = UUID()
+
+        var updatedUnit = BackupRentalUnit(unit)
+        updatedUnit.name = "Phòng 101 đổi tên"
+        updatedUnit.listPrice = 5_000_000
+
+        var updatedLease = BackupRentalLease(lease)
+        updatedLease.tenantName = "Thuê mới"
+        updatedLease.monthlyRent = 5_000_000
+        updatedLease.isActive = false
+        updatedLease.endDate = day(2026, 6, 30)
+
+        var insertedLease = BackupRentalLease(
+            RentalLease(id: newLeaseID, tenantName: "Thuê khác",
+                        startDate: day(2026, 7, 1), monthlyRent: 6_000_000)
+        )
+        insertedLease.unitID = newUnitID
+        var danglingLease = BackupRentalLease(
+            RentalLease(tenantName: "Mồ côi", startDate: day(2026, 1, 1))
+        )
+        danglingLease.unitID = UUID() // not in the file — restores as nil
+
+        // Built detached on purpose: assigning a live business while the
+        // model is constructed would register it in the context and the
+        // restore would read it as "existing" rather than "inserted".
+        var newUnitDTO = BackupRentalUnit(RentalUnit(id: newUnitID, name: "Phòng 202"))
+        newUnitDTO.businessID = apartment.id
+
+        let document = BackupDocument(
+            formatVersion: 5, exportedAt: .now, appVersion: "test",
+            accounts: [], categories: [],
+            businesses: [BackupBusiness(apartment)],
+            transactions: [],
+            rentalUnits: [updatedUnit, newUnitDTO],
+            rentalLeases: [updatedLease, insertedLease, danglingLease]
+        )
+
+        let result = try BackupRestorer.restore(document, mode: .merge, into: context)
+        #expect(result.updated == 3)   // business + unit + lease
+        #expect(result.inserted == 3)  // new unit + two new leases
+
+        #expect(unit.name == "Phòng 101 đổi tên")
+        #expect(unit.listPrice == 5_000_000)
+        #expect(unit.business?.id == apartment.id)
+        #expect(lease.tenantName == "Thuê mới")
+        #expect(lease.monthlyRent == 5_000_000)
+        #expect(!lease.isActive)
+        #expect(lease.endDate == day(2026, 6, 30))
+        #expect(lease.unit?.id == unit.id)
+
+        let units = try fetchAll(RentalUnit.self, in: context)
+        #expect(units.count == 2)
+        let newUnit = try #require(units.first { $0.id == newUnitID })
+        #expect(newUnit.name == "Phòng 202")
+        #expect(newUnit.business?.id == apartment.id)
+
+        let leases = try fetchAll(RentalLease.self, in: context)
+        #expect(leases.count == 3)
+        #expect(try #require(leases.first { $0.id == newLeaseID }).unit?.id == newUnitID)
+        #expect(try #require(leases.first { $0.tenantName == "Mồ côi" }).unit == nil)
+    }
+
+    /// A v4 file has no `rentalUnits`/`rentalLeases` keys and transactions
+    /// without the rental fields — it still decodes and restores, with
+    /// every rental value read as empty or nil.
+    @Test func version4FileStillDecodesAndRestores() throws {
+        let context = try makeContext()
+        let json = """
+        {"formatVersion": 4,
+         "exportedAt": "2026-11-20T00:00:00Z",
+         "appVersion": "1.0",
+         "accounts": [{
+            "id": "5EED0000-0000-4000-8000-00000000DD01",
+            "name": "Tiền mặt", "kindRaw": "cash",
+            "openingBalance": 0, "icon": "banknote.fill",
+            "colorHex": "34C759", "note": "", "sortOrder": 0,
+            "isArchived": false, "businessID": null,
+            "createdAt": "2026-01-01T00:00:00Z"}],
+         "categories": [], "businesses": [],
+         "transactions": [{
+            "id": "5EED0000-0000-4000-8000-00000000DD02",
+            "kindRaw": "income", "amount": 5000000,
+            "date": "2026-11-05T00:00:00Z", "note": "Thu nhập cũ",
+            "accountID": "5EED0000-0000-4000-8000-00000000DD01",
+            "needsReview": false,
+            "createdAt": "2026-11-05T00:00:00Z",
+            "updatedAt": "2026-11-05T00:00:00Z"}],
+         "loanRateChanges": [], "budgets": [], "recurringRules": []}
+        """
+        let document = try BackupCodec.decode(Data(json.utf8))
+        #expect(document.formatVersion == 4)
+        #expect(document.rentalUnits.isEmpty)
+        #expect(document.rentalLeases.isEmpty)
+        #expect(document.transactions.first?.rentalLeaseID == nil)
+        #expect(document.transactions.first?.rentalPeriod == nil)
+
+        let result = try BackupRestorer.restore(document, mode: .merge, into: context)
+        #expect(result.inserted == 2)
+        let restored = try #require(
+            try fetchAll(LedgerTransaction.self, in: context).first
+        )
+        #expect(restored.rentalLease == nil)
+        #expect(restored.rentalPeriod == nil)
+        #expect(restored.account?.name == "Tiền mặt")
+    }
+
     // MARK: - Rejected files
 
     @Test func decodeRejectsNewerFormatVersion() throws {
         let json = """
-        {"formatVersion": 5, "exportedAt": "2026-11-22T07:05:00Z",
+        {"formatVersion": 6, "exportedAt": "2026-11-22T07:05:00Z",
          "appVersion": "9", "accounts": [], "categories": [],
          "businesses": [], "transactions": [], "loanRateChanges": []}
         """
-        #expect(throws: BackupError.unsupportedVersion(found: 5)) {
+        #expect(throws: BackupError.unsupportedVersion(found: 6)) {
             _ = try BackupCodec.decode(Data(json.utf8))
         }
     }
@@ -728,10 +958,10 @@ struct BackupTests {
         let context = try makeContext()
         try SeedData.seedIfNeeded(context: context)
         let future = BackupDocument(
-            formatVersion: 5, exportedAt: .now, appVersion: "x",
+            formatVersion: 6, exportedAt: .now, appVersion: "x",
             accounts: [], categories: [], businesses: [], transactions: []
         )
-        #expect(throws: BackupError.unsupportedVersion(found: 5)) {
+        #expect(throws: BackupError.unsupportedVersion(found: 6)) {
             _ = try BackupRestorer.restore(future, mode: .replace, into: context)
         }
         // Even in replace mode nothing was deleted or inserted.

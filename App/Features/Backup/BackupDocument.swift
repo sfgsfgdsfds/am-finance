@@ -12,6 +12,10 @@ import Foundation
 ///   absent keys are read as empty lists.
 /// - 4: adds `businessID` on accounts — the business a receivable account
 ///   belongs to. Older files decode it as nil.
+/// - 5: adds `rentalUnits`/`rentalLeases` (the serviced-apartment rooms and
+///   tenancies) plus `rentalLeaseID`/`rentalPeriod` on transactions — the
+///   lease a rent collection belongs to and the month it covers. Older
+///   files decode the new keys as empty lists / nil.
 struct BackupDocument: Codable, Equatable, Sendable {
     var formatVersion: Int
     var exportedAt: Date
@@ -23,6 +27,8 @@ struct BackupDocument: Codable, Equatable, Sendable {
     var loanRateChanges: [BackupLoanRateChange]
     var budgets: [BackupBudget]
     var recurringRules: [BackupRecurringRule]
+    var rentalUnits: [BackupRentalUnit]
+    var rentalLeases: [BackupRentalLease]
 
     init(
         formatVersion: Int,
@@ -34,7 +40,9 @@ struct BackupDocument: Codable, Equatable, Sendable {
         transactions: [BackupTransaction],
         loanRateChanges: [BackupLoanRateChange] = [],
         budgets: [BackupBudget] = [],
-        recurringRules: [BackupRecurringRule] = []
+        recurringRules: [BackupRecurringRule] = [],
+        rentalUnits: [BackupRentalUnit] = [],
+        rentalLeases: [BackupRentalLease] = []
     ) {
         self.formatVersion = formatVersion
         self.exportedAt = exportedAt
@@ -46,10 +54,13 @@ struct BackupDocument: Codable, Equatable, Sendable {
         self.loanRateChanges = loanRateChanges
         self.budgets = budgets
         self.recurringRules = recurringRules
+        self.rentalUnits = rentalUnits
+        self.rentalLeases = rentalLeases
     }
 
     /// Fields added after v1 are optional on read: a v1 file lacks
-    /// `loanRateChanges`, v1/v2 files lack `budgets`/`recurringRules`.
+    /// `loanRateChanges`, v1/v2 files lack `budgets`/`recurringRules`,
+    /// pre-v5 files lack `rentalUnits`/`rentalLeases`.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         formatVersion = try container.decode(Int.self, forKey: .formatVersion)
@@ -67,6 +78,12 @@ struct BackupDocument: Codable, Equatable, Sendable {
         ) ?? []
         recurringRules = try container.decodeIfPresent(
             [BackupRecurringRule].self, forKey: .recurringRules
+        ) ?? []
+        rentalUnits = try container.decodeIfPresent(
+            [BackupRentalUnit].self, forKey: .rentalUnits
+        ) ?? []
+        rentalLeases = try container.decodeIfPresent(
+            [BackupRentalLease].self, forKey: .rentalLeases
         ) ?? []
     }
 }
@@ -267,6 +284,67 @@ extension BackupRecurringRule {
     }
 }
 
+/// Stored fields of `RentalUnit` (added in formatVersion 5). The owning
+/// business travels as `businessID` and is re-linked on restore.
+struct BackupRentalUnit: Codable, Equatable, Sendable {
+    var id: UUID
+    var name: String
+    var listPrice: Int64
+    var note: String
+    var sortOrder: Int
+    var isArchived: Bool
+    var createdAt: Date
+    var businessID: UUID?
+}
+
+extension BackupRentalUnit {
+    init(_ unit: RentalUnit) {
+        id = unit.id
+        name = unit.name
+        listPrice = unit.listPrice
+        note = unit.note
+        sortOrder = unit.sortOrder
+        isArchived = unit.isArchived
+        createdAt = unit.createdAt
+        businessID = unit.business?.id
+    }
+}
+
+/// Stored fields of `RentalLease` (added in formatVersion 5). The room
+/// travels as `unitID` and is re-linked on restore; rent collections are
+/// re-linked through `BackupTransaction.rentalLeaseID`.
+struct BackupRentalLease: Codable, Equatable, Sendable {
+    var id: UUID
+    var tenantName: String
+    var tenantPhone: String
+    var startDate: Date
+    var endDate: Date?
+    var monthlyRent: Int64
+    var deposit: Int64
+    var paymentDay: Int
+    var isActive: Bool
+    var note: String
+    var createdAt: Date
+    var unitID: UUID?
+}
+
+extension BackupRentalLease {
+    init(_ lease: RentalLease) {
+        id = lease.id
+        tenantName = lease.tenantName
+        tenantPhone = lease.tenantPhone
+        startDate = lease.startDate
+        endDate = lease.endDate
+        monthlyRent = lease.monthlyRent
+        deposit = lease.deposit
+        paymentDay = lease.paymentDay
+        isActive = lease.isActive
+        note = lease.note
+        createdAt = lease.createdAt
+        unitID = lease.unit?.id
+    }
+}
+
 /// Stored fields of `LedgerTransaction`. Relationships travel as the UUIDs
 /// of the referenced rows and are re-linked to live objects on restore.
 struct BackupTransaction: Codable, Equatable, Sendable {
@@ -284,6 +362,12 @@ struct BackupTransaction: Codable, Equatable, Sendable {
     var externalID: String?
     var createdAt: Date
     var updatedAt: Date
+
+    // Rent collection fields (formatVersion 5): the lease a rent payment
+    // belongs to and the first day of the month it covers. Lease extras
+    // carry `rentalLeaseID` with a nil `rentalPeriod`.
+    var rentalLeaseID: UUID?
+    var rentalPeriod: Date?
 }
 
 extension BackupTransaction {
@@ -302,5 +386,7 @@ extension BackupTransaction {
         externalID = transaction.externalID
         createdAt = transaction.createdAt
         updatedAt = transaction.updatedAt
+        rentalLeaseID = transaction.rentalLease?.id
+        rentalPeriod = transaction.rentalPeriod
     }
 }

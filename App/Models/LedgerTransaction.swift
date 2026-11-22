@@ -22,6 +22,14 @@ final class LedgerTransaction {
     /// The income stream this belongs to; nil means personal.
     var business: Business?
 
+    /// The rental lease this income row collects rent for; nil on every
+    /// other transaction.
+    var rentalLease: RentalLease?
+    /// First day of the month this rent payment covers; nil when the row is
+    /// not rent (including lease extras like utilities, which stay linked
+    /// to the lease but never count toward a month's rent).
+    var rentalPeriod: Date?
+
     var needsReview: Bool = false
 
     // External link fields (bank sync, imports).
@@ -41,6 +49,8 @@ final class LedgerTransaction {
         toAccount: Account? = nil,
         category: LedgerCategory? = nil,
         business: Business? = nil,
+        rentalLease: RentalLease? = nil,
+        rentalPeriod: Date? = nil,
         needsReview: Bool = false
     ) {
         self.id = id
@@ -52,6 +62,8 @@ final class LedgerTransaction {
         self.toAccount = toAccount
         self.category = category
         self.business = business
+        self.rentalLease = rentalLease
+        self.rentalPeriod = rentalPeriod
         self.needsReview = needsReview
     }
 

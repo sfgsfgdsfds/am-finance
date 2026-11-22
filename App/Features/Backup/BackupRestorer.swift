@@ -41,12 +41,16 @@ enum BackupRestorer {
             var rateChanges: [UUID: LoanRateChange]
             var budgets: [UUID: Budget]
             var recurringRules: [UUID: RecurringRule]
+            var rentalUnits: [UUID: RentalUnit]
+            var rentalLeases: [UUID: RentalLease]
 
             if mode == .replace {
                 for row in try context.fetch(FetchDescriptor<LedgerTransaction>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<LoanRateChange>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<Budget>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<RecurringRule>()) { context.delete(row) }
+                for row in try context.fetch(FetchDescriptor<RentalLease>()) { context.delete(row) }
+                for row in try context.fetch(FetchDescriptor<RentalUnit>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<Account>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<LedgerCategory>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<Business>()) { context.delete(row) }
@@ -57,6 +61,8 @@ enum BackupRestorer {
                 rateChanges = [:]
                 budgets = [:]
                 recurringRules = [:]
+                rentalUnits = [:]
+                rentalLeases = [:]
             } else {
                 accounts = try context.fetch(FetchDescriptor<Account>())
                     .reduce(into: [:]) { $0[$1.id] = $1 }
@@ -71,6 +77,10 @@ enum BackupRestorer {
                 budgets = try context.fetch(FetchDescriptor<Budget>())
                     .reduce(into: [:]) { $0[$1.id] = $1 }
                 recurringRules = try context.fetch(FetchDescriptor<RecurringRule>())
+                    .reduce(into: [:]) { $0[$1.id] = $1 }
+                rentalUnits = try context.fetch(FetchDescriptor<RentalUnit>())
+                    .reduce(into: [:]) { $0[$1.id] = $1 }
+                rentalLeases = try context.fetch(FetchDescriptor<RentalLease>())
                     .reduce(into: [:]) { $0[$1.id] = $1 }
             }
 
@@ -117,19 +127,50 @@ enum BackupRestorer {
                 }
             }
 
+            // Rental units re-link their business; leases re-link their
+            // unit — both before the transaction pass, which re-links
+            // `rentalLeaseID` against the lease map.
+            for dto in document.rentalUnits {
+                if let existing = rentalUnits[dto.id] {
+                    apply(dto, to: existing, businesses: businesses)
+                    result.updated += 1
+                } else {
+                    let unit = RentalUnit(id: dto.id, name: "")
+                    apply(dto, to: unit, businesses: businesses)
+                    context.insert(unit)
+                    rentalUnits[dto.id] = unit
+                    result.inserted += 1
+                }
+            }
+
+            for dto in document.rentalLeases {
+                if let existing = rentalLeases[dto.id] {
+                    apply(dto, to: existing, units: rentalUnits)
+                    result.updated += 1
+                } else {
+                    let lease = RentalLease(id: dto.id, tenantName: "")
+                    apply(dto, to: lease, units: rentalUnits)
+                    context.insert(lease)
+                    rentalLeases[dto.id] = lease
+                    result.inserted += 1
+                }
+            }
+
             for dto in document.transactions {
                 if let existing = transactions[dto.id] {
                     // The row with the newer updatedAt wins; an equal stamp
                     // means the copies agree and nothing needs writing.
                     if dto.updatedAt > existing.updatedAt {
-                        apply(dto, to: existing, accounts: accounts, categories: categories, businesses: businesses)
+                        apply(dto, to: existing, accounts: accounts, categories: categories,
+                              businesses: businesses, leases: rentalLeases)
                         result.updated += 1
                     } else {
                         result.skipped += 1
                     }
                 } else {
                     let transaction = LedgerTransaction(id: dto.id, kind: .expense, amount: 0)
-                    apply(dto, to: transaction, accounts: accounts, categories: categories, businesses: businesses)
+                    apply(dto, to: transaction, accounts: accounts, categories: categories,
+                          businesses: businesses, leases: rentalLeases)
                     context.insert(transaction)
                     transactions[dto.id] = transaction
                     result.inserted += 1
@@ -259,6 +300,42 @@ enum BackupRestorer {
         change.account = dto.accountID.flatMap { accounts[$0] }
     }
 
+    /// A unit's business is re-linked to a live object; an id that exists
+    /// neither in the backup nor in the store becomes nil.
+    private static func apply(
+        _ dto: BackupRentalUnit,
+        to unit: RentalUnit,
+        businesses: [UUID: Business]
+    ) {
+        unit.name = dto.name
+        unit.listPrice = dto.listPrice
+        unit.note = dto.note
+        unit.sortOrder = dto.sortOrder
+        unit.isArchived = dto.isArchived
+        unit.createdAt = dto.createdAt
+        unit.business = dto.businessID.flatMap { businesses[$0] }
+    }
+
+    /// A lease's room is re-linked to a live object; an id that exists
+    /// neither in the backup nor in the store becomes nil.
+    private static func apply(
+        _ dto: BackupRentalLease,
+        to lease: RentalLease,
+        units: [UUID: RentalUnit]
+    ) {
+        lease.tenantName = dto.tenantName
+        lease.tenantPhone = dto.tenantPhone
+        lease.startDate = dto.startDate
+        lease.endDate = dto.endDate
+        lease.monthlyRent = dto.monthlyRent
+        lease.deposit = dto.deposit
+        lease.paymentDay = dto.paymentDay
+        lease.isActive = dto.isActive
+        lease.note = dto.note
+        lease.createdAt = dto.createdAt
+        lease.unit = dto.unitID.flatMap { units[$0] }
+    }
+
     /// IDs in the DTO are re-linked to live objects; an id that exists
     /// neither in the backup nor in the store becomes nil.
     private static func apply(
@@ -266,7 +343,8 @@ enum BackupRestorer {
         to transaction: LedgerTransaction,
         accounts: [UUID: Account],
         categories: [UUID: LedgerCategory],
-        businesses: [UUID: Business]
+        businesses: [UUID: Business],
+        leases: [UUID: RentalLease]
     ) {
         transaction.kindRaw = dto.kindRaw
         transaction.amount = dto.amount
@@ -276,6 +354,8 @@ enum BackupRestorer {
         transaction.toAccount = dto.toAccountID.flatMap { accounts[$0] }
         transaction.category = dto.categoryID.flatMap { categories[$0] }
         transaction.business = dto.businessID.flatMap { businesses[$0] }
+        transaction.rentalLease = dto.rentalLeaseID.flatMap { leases[$0] }
+        transaction.rentalPeriod = dto.rentalPeriod
         transaction.needsReview = dto.needsReview
         transaction.externalSource = dto.externalSource
         transaction.externalID = dto.externalID

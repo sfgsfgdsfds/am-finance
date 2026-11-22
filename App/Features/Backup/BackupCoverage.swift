@@ -16,5 +16,7 @@ enum BackupCoverage {
         LoanRateChange.self,
         Budget.self,
         RecurringRule.self,
+        RentalUnit.self,
+        RentalLease.self,
     ]
 }
