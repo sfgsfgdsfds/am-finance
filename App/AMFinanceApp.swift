@@ -20,6 +20,12 @@ struct AMFinanceApp: App {
             self.syncCoordinator = inMemory ? nil : MainActor.assumeIsolated {
                 WalletSyncCoordinator.live(context: container.mainContext)
             }
+            // BGTaskScheduler demands registration before the launch
+            // sequence finishes — App.init is the earliest hook there is.
+            // The scheduler itself is a no-op under -uiTestInMemoryStore.
+            MainActor.assumeIsolated {
+                BackgroundRefreshScheduler.registerHandler(container: container)
+            }
         } catch {
             self.container = nil
             self.syncCoordinator = nil
@@ -31,6 +37,7 @@ struct AMFinanceApp: App {
             if let container {
                 RootTabView(syncCoordinator: syncCoordinator)
                     .modelContainer(container)
+                    .backgroundRefreshOnScenePhase()
             } else {
                 Text("Không thể mở dữ liệu. Vui lòng khởi động lại ứng dụng.")
                     .multilineTextAlignment(.center)
@@ -38,5 +45,26 @@ struct AMFinanceApp: App {
                     .padding()
             }
         }
+    }
+}
+
+/// Keeps one refresh request outstanding: every time the scene goes to
+/// the background the next `vn.amx.finance.refresh` is submitted ~15
+/// minutes out (the run itself also re-arms when it finishes). Read at
+/// view level — the App struct's own environment carries no scenePhase.
+private struct BackgroundRefreshPhaseModifier: ViewModifier {
+    @Environment(\.scenePhase) private var scenePhase
+
+    func body(content: Content) -> some View {
+        content.onChange(of: scenePhase) { _, phase in
+            guard phase == .background else { return }
+            BackgroundRefreshScheduler.scheduleNext()
+        }
+    }
+}
+
+extension View {
+    fileprivate func backgroundRefreshOnScenePhase() -> some View {
+        modifier(BackgroundRefreshPhaseModifier())
     }
 }

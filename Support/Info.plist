@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Partial Info.plist merged into the generated one (GENERATE_INFOPLIST_FILE
+     stays on). Kept outside App/ so it is never globbed into bundle
+     resources. Keys that INFOPLIST_KEY_* build settings cannot express —
+     arrays — live here. -->
+<plist version="1.0">
+<dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>vn.amx.finance.refresh</string>
+	</array>
+</dict>
+</plist>

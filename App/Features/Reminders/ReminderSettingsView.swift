@@ -35,6 +35,7 @@ struct ReminderSettingsView: View {
             permissionSection
             kindsSection
             timingSection
+            bankSyncSection
             previewSection
             testSection
         }
@@ -150,6 +151,21 @@ struct ReminderSettingsView: View {
                 settings.daysBeforeDue = days.sorted(by: >)
             }
         )
+    }
+
+    // MARK: - Bank sync
+
+    /// Notifications for bank transactions the background refresh syncs
+    /// in — independent of the reminder master switch.
+    private var bankSyncSection: some View {
+        Section {
+            Toggle("Thông báo giao dịch ngân hàng mới",
+                   isOn: $settings.bankTransactions)
+        } header: {
+            Text("Đồng bộ ngân hàng")
+        } footer: {
+            Text("iOS tự quyết định thời điểm làm mới trong nền nên thông báo có thể đến trễ. Cần bật \"Làm mới ứng dụng trong nền\" cho AM Finance trong Cài đặt hệ thống.")
+        }
     }
 
     // MARK: - Preview
