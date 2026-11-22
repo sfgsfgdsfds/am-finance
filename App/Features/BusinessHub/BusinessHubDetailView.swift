@@ -119,6 +119,23 @@ private struct BusinessHubDetailContent: View {
         receivableAccounts.reduce(0) { $0 + max(0, $1.balance) }
     }
 
+    /// The "Phòng cho thuê" section shows whenever the business has rental
+    /// rooms — and always on the seeded serviced-apartment stream so the
+    /// feature is discoverable before the first room exists.
+    private var showsRentals: Bool {
+        !(business.rentalUnits ?? []).isEmpty || business.name == "Căn hộ dịch vụ"
+    }
+
+    /// This business's rooms evaluated for the current month — occupancy
+    /// and the rent still to collect.
+    private var rentalBoard: RentalBoard {
+        RentalSnapshot.board(
+            units: (business.rentalUnits ?? []),
+            month: RentalSnapshot.monthStart(of: .now, calendar: AppCalendar.vietnam),
+            calendar: AppCalendar.vietnam
+        ).summary
+    }
+
     private var sections: [TransactionListDaySection] {
         TransactionListGrouping.sections(
             for: periodTransactions.map { TransactionListRow(transaction: $0) })
@@ -149,6 +166,40 @@ private struct BusinessHubDetailContent: View {
                 }
             } header: {
                 Text("Khoản ứng hộ khách")
+            }
+
+            if showsRentals {
+                Section {
+                    NavigationLink {
+                        RentalsView(business: business)
+                    } label: {
+                        HStack(spacing: 12) {
+                            IconBadge(
+                                symbol: "bed.double.fill",
+                                colorHex: "30B0C7", size: 32
+                            )
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Phòng cho thuê")
+                                Text(rentalBoard.total > 0
+                                     ? "Đang thuê \(rentalBoard.occupied)/\(rentalBoard.total) phòng"
+                                     : "Chưa có phòng")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if rentalBoard.remaining > 0 {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    AmountText(amount: rentalBoard.remaining)
+                                    Text("còn phải thu")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Phòng cho thuê")
+                }
             }
 
             BusinessHubDetailCategorySection(

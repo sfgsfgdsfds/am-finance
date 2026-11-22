@@ -25,6 +25,11 @@ final class Business {
     @Relationship(deleteRule: .nullify, inverse: \Account.business)
     var accounts: [Account]? = []
 
+    /// Rental rooms bound to this business ("Phòng cho thuê") — deleting a
+    /// business leaves them behind as personal rooms.
+    @Relationship(deleteRule: .nullify, inverse: \RentalUnit.business)
+    var rentalUnits: [RentalUnit]? = []
+
     init(
         id: UUID = UUID(),
         name: String,

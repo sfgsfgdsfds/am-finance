@@ -109,6 +109,11 @@ struct SettingsView: View {
                 } label: {
                     Label("Khoản ứng hộ khách", systemImage: "person.badge.clock.fill")
                 }
+                NavigationLink {
+                    LazyDestination { RentalsView() }
+                } label: {
+                    Label("Phòng cho thuê", systemImage: "bed.double.fill")
+                }
             }
 
             Section("Bảo mật") {

@@ -7,9 +7,10 @@ import SwiftData
 enum BackupCodec {
     /// The newest backup format this build writes; older files are accepted
     /// on read (v1 lacks `loanRateChanges`, v1/v2 lack
-    /// `budgets`/`recurringRules`, pre-v4 accounts lack `businessID` —
-    /// absent keys decode as empty lists or nil).
-    static let formatVersion = 4
+    /// `budgets`/`recurringRules`, pre-v4 accounts lack `businessID`,
+    /// pre-v5 files lack `rentalUnits`/`rentalLeases` and the transaction
+    /// rental fields — absent keys decode as empty lists or nil).
+    static let formatVersion = 5
 
     /// Version string stamped into every exported document.
     static var appVersion: String {
@@ -28,6 +29,8 @@ enum BackupCodec {
         loanRateChanges: [LoanRateChange],
         budgets: [Budget],
         recurringRules: [RecurringRule],
+        rentalUnits: [RentalUnit],
+        rentalLeases: [RentalLease],
         exportedAt: Date = .now,
         appVersion: String = appVersion
     ) -> BackupDocument {
@@ -64,7 +67,16 @@ enum BackupCodec {
                     ($0.title, $0.createdAt, $0.id.uuidString)
                         < ($1.title, $1.createdAt, $1.id.uuidString)
                 }
-                .map(BackupRecurringRule.init)
+                .map(BackupRecurringRule.init),
+            rentalUnits: rentalUnits
+                .sorted { ($0.sortOrder, $0.name) < ($1.sortOrder, $1.name) }
+                .map(BackupRentalUnit.init),
+            rentalLeases: rentalLeases
+                .sorted {
+                    ($0.startDate, $0.createdAt, $0.id.uuidString)
+                        < ($1.startDate, $1.createdAt, $1.id.uuidString)
+                }
+                .map(BackupRentalLease.init)
         )
     }
 
@@ -78,6 +90,8 @@ enum BackupCodec {
             loanRateChanges: try context.fetch(FetchDescriptor<LoanRateChange>()),
             budgets: try context.fetch(FetchDescriptor<Budget>()),
             recurringRules: try context.fetch(FetchDescriptor<RecurringRule>()),
+            rentalUnits: try context.fetch(FetchDescriptor<RentalUnit>()),
+            rentalLeases: try context.fetch(FetchDescriptor<RentalLease>()),
             exportedAt: exportedAt
         )
         return try encode(doc)
