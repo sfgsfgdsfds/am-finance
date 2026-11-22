@@ -351,42 +351,86 @@ struct DashboardTopCategoriesCard: View {
 
 /// Card 6: revenue, cost and profit per business for the month — only
 /// businesses with activity (the card is hidden when the list is empty).
+/// The header pushes `BusinessHubView`; each row pushes the stream's
+/// `BusinessHubDetailView`.
 struct DashboardBusinessCard: View {
     let results: [DashboardSnapshot.BusinessResult]
+    /// Resolves a result's business id back to its model — the detail
+    /// view's entry point.
+    let business: (UUID) -> Business?
 
     var body: some View {
-        DashboardCard("Kinh doanh") {
+        VStack(alignment: .leading, spacing: 12) {
+            NavigationLink {
+                BusinessHubView()
+            } label: {
+                HStack {
+                    Text("Kinh doanh")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .buttonStyle(.plain)
             VStack(spacing: 12) {
                 ForEach(results) { result in
-                    HStack(spacing: 10) {
-                        IconBadge(
-                            symbol: result.icon, colorHex: result.colorHex, size: 30
-                        )
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(result.name)
-                                .font(.subheadline)
-                                .lineLimit(1)
-                            Text(
-                                "Thu \(VND.compact(result.revenue)) · " +
-                                "Chi \(VND.compact(result.cost))"
-                            )
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        VStack(alignment: .trailing, spacing: 2) {
-                            Text(result.profit >= 0 ? "Lãi" : "Lỗ")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            AmountText(amount: result.profit)
-                                .font(.subheadline.weight(.semibold))
-                        }
-                    }
+                    rowView(result)
                 }
             }
         }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color(.secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 16)
+        )
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("dashboard.businessCard")
+    }
+
+    @ViewBuilder
+    private func rowView(_ result: DashboardSnapshot.BusinessResult) -> some View {
+        if let model = business(result.businessID) {
+            NavigationLink {
+                BusinessHubDetailView(business: model)
+            } label: {
+                row(result)
+            }
+            .buttonStyle(.plain)
+        } else {
+            row(result)
+        }
+    }
+
+    private func row(_ result: DashboardSnapshot.BusinessResult) -> some View {
+        HStack(spacing: 10) {
+            IconBadge(
+                symbol: result.icon, colorHex: result.colorHex, size: 30
+            )
+            VStack(alignment: .leading, spacing: 2) {
+                Text(result.name)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(
+                    "Thu \(VND.compact(result.revenue)) · " +
+                    "Chi \(VND.compact(result.cost))"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(result.profit >= 0 ? "Lãi" : "Lỗ")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                AmountText(amount: result.profit)
+                    .font(.subheadline.weight(.semibold))
+            }
+        }
     }
 }
 

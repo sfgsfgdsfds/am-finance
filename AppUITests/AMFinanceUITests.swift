@@ -4,11 +4,13 @@ import XCTest
 /// with `-uiTestInMemoryStore` — a throwaway, seeded in-memory SwiftData
 /// store — so real user data is never touched.
 ///
-/// The suite is grouped into three launches instead of one per flow — each
+/// The suite is grouped into four launches instead of one per flow — each
 /// launch costs ~10-15 s of simulator + app idle time, so steps that can share
 /// a store run together. Covers: the four tabs, quick-add (expense and
-/// income), edit/delete, settings screens, accounts/cards/loans, debts and
-/// reports. Vietnamese UI, VND amounts ("150.000 ₫").
+/// income), edit/delete, settings screens, accounts/cards/loans, debts,
+/// reports and the second-pass feature wiring (wallet link/sync, budgets,
+/// recurring, reminders, app lock, business hub, receivables, balance
+/// trend). Vietnamese UI, VND amounts ("150.000 ₫").
 ///
 /// Reliability rules used throughout:
 /// - wait for `exists AND hittable` before tapping anything that may sit
@@ -296,6 +298,261 @@ final class AMFinanceUITests: XCTestCase {
         assertVisible(transferRow, "card payment missing in transactions")
     }
 
+    // MARK: - 4. Second-pass feature wiring
+
+    /// Every screen wired in the second integration pass: the wallet
+    /// bank/link rows, budgets, recurring, reminders, app lock, the
+    /// business hub, client receivables and the balance-trend entry
+    /// points. One launch — the seeded in-memory store never signs in,
+    /// so wallet screens are checked in their signed-out/empty states.
+    func testWiredFeatureScreens() throws {
+        // An income tagged to a business: gives the dashboard a business
+        // P&L card and any transaction at all (the month card, the budget
+        // card and the business card hide behind the welcome state
+        // otherwise).
+        tapQuickAdd()
+        let incomeSegment = app.buttons["Thu"]
+        XCTAssertTrue(incomeSegment.waitForExistence(timeout: 4),
+                      "income segment missing")
+        incomeSegment.tap()
+        typeAmount(5_000_000)
+        pickCategory("Doanh thu dịch vụ")
+        pickBusiness("Làm web")
+        saveSheet()
+
+        // A credit card — the receivable advance is paid from it.
+        let netWorth = scopedElement("dashboard.netWorthCard")
+        XCTAssertTrue(netWorth.waitForExistence(timeout: 15),
+                      "net-worth card missing")
+        netWorth.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Tài khoản"]
+                .waitForExistence(timeout: 5),
+            "accounts screen missing")
+        addCreditCard(
+            name: "Thẻ Visa", debt: 1_000_000,
+            creditLimit: "30000000", statementDayIncrements: 0)
+
+        // Seeded cash account → the new "Số dư" section rows.
+        tapRowAny("Tiền mặt")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Tiền mặt"]
+                .waitForExistence(timeout: 5),
+            "cash detail missing")
+        tapOption("Lịch sử số dư")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Số dư"]
+                .waitForExistence(timeout: 5),
+            "balance-trend screen missing")
+        goBack(to: "Tiền mặt")
+        tapOption("Đặt số dư thực tế")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Đặt số dư thực tế"]
+                .waitForExistence(timeout: 5),
+            "anchor sheet missing")
+        let cancel = app.buttons["Huỷ"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 4), "sheet cancel missing")
+        cancel.tap()
+        goBack(to: "Tài khoản")
+        goBack(to: "Tổng quan")
+
+        // Settings → the new rows, top to bottom.
+        let gear = app.buttons["Cài đặt"]
+        XCTAssertTrue(waitReady(gear, timeout: 8), "settings gear missing")
+        gear.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Cài đặt"]
+                .waitForExistence(timeout: 5),
+            "settings screen missing")
+
+        // Wallet connection — signed out, so only the sign-in button and
+        // the unconfigured status show.
+        tapOption("Kết nối wallet.amx.vn")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Kết nối ví AMX"]
+                .waitForExistence(timeout: 5),
+            "wallet link screen missing")
+        XCTAssertTrue(
+            app.buttons["Đăng nhập AMX"].waitForExistence(timeout: 5),
+            "wallet link is not in the signed-out state")
+        goBack(to: "Cài đặt")
+
+        tapOption("Tài khoản liên kết & đồng bộ")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Đồng bộ ngân hàng"]
+                .waitForExistence(timeout: 5),
+            "sync accounts screen missing")
+        goBack(to: "Cài đặt")
+
+        // Inbox — nothing imported, so the empty state shows.
+        tapOption("Giao dịch chờ phân loại")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Chờ phân loại"]
+                .waitForExistence(timeout: 5),
+            "inbox screen missing")
+        assertVisible(app.staticTexts["Không còn gì chờ"],
+                      "inbox empty state missing")
+        goBack(to: "Cài đặt")
+
+        tapOption("Quy tắc tự phân loại")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Quy tắc tự động"]
+                .waitForExistence(timeout: 5),
+            "rules screen missing")
+        assertVisible(app.staticTexts["Chưa có quy tắc"],
+                      "rules empty state missing")
+        goBack(to: "Cài đặt")
+
+        // Budgets — create the overall monthly budget; it must land back
+        // on the dashboard card.
+        tapOption("Ngân sách")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Ngân sách"]
+                .waitForExistence(timeout: 5),
+            "budgets screen missing")
+        // Two buttons share this label — the toolbar plus and the empty
+        // state's action — so tap the first hittable one.
+        tapOption("Thêm ngân sách")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Ngân sách mới"]
+                .waitForExistence(timeout: 5),
+            "budget sheet missing")
+        typeAmount(5_000_000)
+        tapWhenReady(app.buttons["Thêm"], "budget save button missing")
+        assertVisible(app.staticTexts["Ngân sách chi tiêu cá nhân"],
+                      "newly created budget row missing")
+        goBack(to: "Cài đặt")
+
+        // Recurring — one monthly rule (frequency defaults to monthly),
+        // confirmed in the list.
+        tapOption("Giao dịch định kỳ")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Giao dịch lặp lại"]
+                .waitForExistence(timeout: 5),
+            "recurring screen missing")
+        tapWhenReady(app.buttons["Thêm quy tắc lặp lại"],
+                     "add-recurring button missing")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Quy tắc lặp lại mới"]
+                .waitForExistence(timeout: 5),
+            "recurring sheet missing")
+        fillField(app.textFields["Ví dụ: Tiền thuê phòng"], with: "Tiền thuê")
+        typeAmount(7_000_000)
+        saveSheet()
+        assertVisible(app.staticTexts["Tiền thuê"],
+                      "newly created recurring rule missing")
+        goBack(to: "Cài đặt")
+
+        // Reminders — the screen opens; the toggle must stay off so no
+        // permission prompt ever appears.
+        tapOption("Nhắc nhở")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Nhắc nhở"]
+                .waitForExistence(timeout: 5),
+            "reminders screen missing")
+        assertVisible(app.switches["Bật nhắc nhở"],
+                      "reminders master toggle missing")
+        goBack(to: "Cài đặt")
+
+        // Business hub → one business detail.
+        tapOption("Lãi lỗ theo mảng")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Mảng kinh doanh"]
+                .waitForExistence(timeout: 5),
+            "business hub missing")
+        tapRowAny("Làm web")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Làm web"]
+                .waitForExistence(timeout: 5),
+            "business detail missing")
+        goBack(to: "Mảng kinh doanh")
+        goBack(to: "Cài đặt")
+
+        // Client receivable: create "Khách A", advance 2.000.000 ₫ paid
+        // by the credit card, then read the outstanding amount.
+        tapOption("Khoản ứng hộ khách")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Khoản ứng hộ khách"]
+                .waitForExistence(timeout: 5),
+            "receivables screen missing")
+        // The toolbar plus and the empty-state action share this label —
+        // tap the first hittable one.
+        tapOption("Thêm khách hàng")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Khách hàng mới"]
+                .waitForExistence(timeout: 5),
+            "client sheet missing")
+        fillField(app.textFields["Tên khách hàng"], with: "Khách A")
+        tapWhenReady(app.buttons["Thêm"], "client save button missing")
+        // A fresh client owes nothing, so it sits inside the collapsed
+        // "Đã tất toán" group — expand it before the row exists.
+        tapRowAny("Đã tất toán")
+        tapRowAny("Khách A")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Khách A"]
+                .waitForExistence(timeout: 5),
+            "receivable detail missing")
+        tapOption("Ứng tiền cho khách")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Ứng tiền cho khách"]
+                .waitForExistence(timeout: 5),
+            "advance sheet missing")
+        typeAmount(2_000_000)
+        tapPickerRow("Trả từ")
+        tapRowAny("Thẻ Visa")
+        saveSheet()
+        assertVisible(app.staticTexts["Khách đang nợ"],
+                      "receivable outstanding header missing")
+        // AmountText signs a positive outstanding with a leading "+".
+        assertVisible(app.staticTexts["+2.000.000 ₫"],
+                      "outstanding amount does not show +2.000.000 ₫")
+        goBack(to: "Khoản ứng hộ khách")
+        goBack(to: "Cài đặt")
+
+        // App lock — the settings screen opens (lock itself stays off).
+        tapOption("Khoá ứng dụng")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Khoá ứng dụng"]
+                .waitForExistence(timeout: 5),
+            "app lock screen missing")
+        assertVisible(app.staticTexts["Khoá bằng Face ID"],
+                      "app lock toggle missing")
+        goBack(to: "Cài đặt")
+        goBack(to: "Tổng quan")
+
+        // Dashboard, top-down: the new budget card, then the business
+        // card's header link and row link.
+        assertVisible(app.staticTexts["Ngân sách chi tiêu cá nhân"],
+                      "dashboard budget card missing")
+
+        let businessCard = scopedElement("dashboard.businessCard")
+        XCTAssertTrue(businessCard.waitForExistence(timeout: 5),
+                      "business card missing")
+        // Card links surface as buttons whose combined label starts with
+        // the row title — the inner text alone is not always hittable.
+        let hubLink = hittableOrRevealed(businessCard
+            .descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "Kinh doanh")))
+        XCTAssertNotNil(hubLink, "business card header missing")
+        hubLink?.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Mảng kinh doanh"]
+                .waitForExistence(timeout: 5),
+            "business card header did not push the hub")
+        goBack(to: "Tổng quan")
+
+        let businessRow = hittableOrRevealed(scopedElement("dashboard.businessCard")
+            .descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "Làm web")))
+        XCTAssertNotNil(businessRow, "business card row missing")
+        businessRow?.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Làm web"]
+                .waitForExistence(timeout: 5),
+            "business card row did not push the detail")
+        goBack(to: "Tổng quan")
+    }
+
     // MARK: - Flow helpers
 
     /// Taps the floating "+" (identifier `root.quickAdd`) and waits for the
@@ -548,19 +805,22 @@ final class AMFinanceUITests: XCTestCase {
         element.tap()
     }
 
-    /// Frontmost hittable match of `query`; if none appears in time but
-    /// matches exist off-screen, scrolls the front list and retries once.
+    /// Frontmost hittable match of `query`; if none appears in time, swipes
+    /// the front list and re-checks — far-off-screen rows are not even in the
+    /// accessibility tree until they near the viewport.
     private func hittableOrRevealed(
         _ query: XCUIElementQuery
     ) -> XCUIElement? {
         if let element = firstHittableMatch(query, timeout: 5) {
             return element
         }
-        guard let anyMatch = query.allElementsBoundByIndex.first else {
-            return nil
+        for _ in 0..<10 {
+            frontScrollable().swipeUp()
+            if let element = firstHittableMatch(query, timeout: 0.5) {
+                return element
+            }
         }
-        _ = reveal(anyMatch, maxSwipes: 4)
-        return firstHittableMatch(query, timeout: 2)
+        return nil
     }
 
     /// Waits for a button to be present, hittable AND enabled, then taps it —
@@ -695,16 +955,18 @@ final class AMFinanceUITests: XCTestCase {
         return app
     }
 
-    /// Swipes up inside the front scrollable until `element` exists —
-    /// `LazyVStack`/`List` children only materialize on screen.
+    /// Swipes up inside the front scrollable until `element` is actually
+    /// hittable — `LazyVStack`/`List` children only materialize on screen, and
+    /// rows near the edges can exist in the tree yet sit off-screen or under
+    /// the floating tab bar, where a tap would land on the wrong element.
     @discardableResult
     private func reveal(_ element: XCUIElement, maxSwipes: Int = 8) -> Bool {
         var swipes = 0
-        while !element.exists && swipes < maxSwipes {
+        while !(element.exists && element.isHittable) && swipes < maxSwipes {
             frontScrollable().swipeUp()
             swipes += 1
         }
-        return element.exists
+        return element.exists && element.isHittable
     }
 
     /// Waits until `element` exists AND is hittable — taps must not land

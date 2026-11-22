@@ -24,7 +24,12 @@ struct DashboardView: View {
     /// are older than six months is not greeted with the empty-state card.
     @State private var transactionCount = 0
 
-    init() {
+    /// Shared coordinator from `AMFinanceApp`, forwarded to the sync
+    /// banner — nil under `-uiTestInMemoryStore`.
+    private let syncCoordinator: WalletSyncCoordinator?
+
+    init(syncCoordinator: WalletSyncCoordinator? = nil) {
+        self.syncCoordinator = syncCoordinator
         let calendar = AppCalendar.vietnam
         let monthStart = ReportSummary.monthInterval(
             containing: .now, calendar: calendar
@@ -47,6 +52,8 @@ struct DashboardView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(spacing: 16) {
+                    // Renders nothing until a bank account is linked.
+                    WalletSyncStatusBanner(coordinator: syncCoordinator)
                     if snapshot.isEmpty {
                         DashboardWelcomeCard(onAddTransaction: {
                             isCreating = true
@@ -55,6 +62,7 @@ struct DashboardView: View {
                     DashboardNetWorthCard(netWorth: snapshot.netWorth)
                     if !snapshot.isEmpty {
                         DashboardMonthCard(month: snapshot.month)
+                        BudgetsSummaryCard()
                         if !snapshot.accountChips.isEmpty {
                             DashboardAccountsCard(chips: snapshot.accountChips) { id in
                                 accounts.first { $0.id == id }
@@ -70,10 +78,19 @@ struct DashboardView: View {
                             DashboardTopCategoriesCard(rows: snapshot.topExpenseCategories)
                         }
                         if !snapshot.businessResults.isEmpty {
-                            DashboardBusinessCard(results: snapshot.businessResults)
+                            DashboardBusinessCard(results: snapshot.businessResults) { id in
+                                businesses.first { $0.id == id }
+                            }
                         }
-                        if snapshot.pendingReviewCount > 0 {
-                            DashboardPendingReviewBanner(count: snapshot.pendingReviewCount)
+                        // With a linked bank account the sync banner already
+                        // carries the pending count and the inbox link.
+                        if snapshot.pendingReviewCount > 0 && !hasLinkedBankAccounts {
+                            NavigationLink {
+                                WalletSyncInboxView()
+                            } label: {
+                                DashboardPendingReviewBanner(count: snapshot.pendingReviewCount)
+                            }
+                            .buttonStyle(.plain)
                         }
                         if !snapshot.recentItems.isEmpty {
                             DashboardRecentCard(items: snapshot.recentItems) { item in
@@ -114,6 +131,12 @@ struct DashboardView: View {
                 refreshTransactionCount()
             }
         }
+    }
+
+    /// At least one account linked to wallet.amx.vn — then the sync banner
+    /// owns the pending-review UI and the plain banner hides.
+    private var hasLinkedBankAccounts: Bool {
+        accounts.contains { $0.externalSource == WalletSyncEngine.externalSource }
     }
 
     /// Debt payments due within the next 14 days (overdue ones included) —

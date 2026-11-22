@@ -2,11 +2,45 @@ import SwiftUI
 import SwiftData
 
 struct RootTabView: View {
+    /// The shared wallet-sync coordinator created in `AMFinanceApp` — nil
+    /// under `-uiTestInMemoryStore`, where no sync may run.
+    let syncCoordinator: WalletSyncCoordinator?
+
+    @Environment(\.modelContext) private var context
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var quickAddShown = false
+    /// Last time the activation housekeeping ran — the once-a-minute cap.
+    @State private var lastActivationWork = Date.distantPast
+
+    init(syncCoordinator: WalletSyncCoordinator? = nil) {
+        self.syncCoordinator = syncCoordinator
+    }
 
     var body: some View {
+        syncedContent
+            .appLockProtected()
+            .onChange(of: scenePhase, initial: true) { _, phase in
+                guard phase == .active else { return }
+                runActivationWork()
+            }
+    }
+
+    /// The tabs with auto-refresh attached when a coordinator exists —
+    /// without one (UI tests) the modifier is left off entirely so nothing
+    /// wallet-related ever fires.
+    @ViewBuilder
+    private var syncedContent: some View {
+        if let syncCoordinator {
+            tabContent.walletSyncAutoRefresh(syncCoordinator)
+        } else {
+            tabContent
+        }
+    }
+
+    private var tabContent: some View {
         TabView {
-            DashboardView()
+            DashboardView(syncCoordinator: syncCoordinator)
                 .tabItem {
                     Label("Tổng quan", systemImage: "house.fill")
                 }
@@ -28,6 +62,22 @@ struct RootTabView: View {
         }
         .sheet(isPresented: $quickAddShown) {
             TransactionEditorView()
+        }
+    }
+
+    /// Once per activation (capped at one run a minute): post the due
+    /// recurring transactions, then rebuild the reminder queue. Every
+    /// failure is swallowed — housekeeping must never crash or block.
+    private func runActivationWork() {
+        let now = Date.now
+        guard now.timeIntervalSince(lastActivationWork) >= 60 else { return }
+        lastActivationWork = now
+        _ = try? RecurringGenerator.generateDueTransactions(in: context, now: now)
+        // UI tests must never touch the real notification center — a
+        // reschedule could schedule live requests on the device/simulator.
+        guard !AppLockSettingsStore.isUITestLaunch() else { return }
+        Task {
+            await ReminderScheduler().reschedule(context: context)
         }
     }
 
