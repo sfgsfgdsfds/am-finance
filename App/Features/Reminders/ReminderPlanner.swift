@@ -53,6 +53,28 @@ enum ReminderPlanner {
         var date: Date
     }
 
+    /// A room whose covering lease still has rent to collect — built by
+    /// `gather` out of `RentalSnapshot` month evaluations.
+    struct RentDue: Equatable, Sendable {
+        /// One month of unpaid rent, evaluated by `RentalSnapshot`.
+        struct Month: Equatable, Sendable {
+            /// First day of the month the rent belongs to.
+            var start: Date
+            /// The clamped due date inside the month.
+            var dueDate: Date
+            /// Rent still to collect (đồng > 0).
+            var remaining: Int64
+        }
+        var leaseID: UUID
+        /// Room display name ("Phòng 101").
+        var roomName: String
+        /// Tenant on the covering lease — shown in the body.
+        var tenantName: String
+        /// Unpaid months, oldest first: the current month, then the next
+        /// one when the same lease covers it and it isn't collected yet.
+        var months: [Month]
+    }
+
     /// A budget at warning or exceeded status for the current month.
     struct BudgetAlert: Equatable, Sendable {
         var budgetID: UUID
@@ -67,6 +89,7 @@ enum ReminderPlanner {
         var debts: [Debt] = []
         var recurring: [Recurring] = []
         var budgets: [BudgetAlert] = []
+        var rents: [RentDue] = []
         /// Budgets whose warning already went out this month — suppressed
         /// so each budget warns at most once per month.
         var warnedBudgetIDs: Set<UUID> = []
@@ -87,6 +110,7 @@ enum ReminderPlanner {
         var items = debtItems(input, settings: settings)
         items += recurringItems(input, settings: settings)
         items += budgetItems(input, settings: settings)
+        items += rentItems(input, settings: settings)
 
         items.sort { ($0.fireDate, $0.id) < ($1.fireDate, $1.id) }
         var seen = Set<String>()
@@ -227,6 +251,62 @@ enum ReminderPlanner {
         }
         let remaining = max(0, alert.monthlyLimit - alert.amountSpent)
         return "\(alert.name): còn \(VND.format(remaining)) trước khi đạt hạn mức"
+    }
+
+    // MARK: - Rent collection
+
+    /// "Thu tiền phòng": one notification on the payment day at the
+    /// notification hour and — while the month is still unpaid — a nag
+    /// three days after it. The oldest month is the current one; later
+    /// months (the next, when the lease covers it) get the payment-day
+    /// notification only. Both fire dates must still be ahead.
+    private static func rentItems(
+        _ input: Input, settings: ReminderSettings
+    ) -> [ReminderPlannedNotification] {
+        guard settings.rentCollection else { return [] }
+        let calendar = input.calendar
+        var items: [ReminderPlannedNotification] = []
+        for rent in input.rents {
+            let tenant = rent.tenantName.isEmpty ? "" : " · \(rent.tenantName)"
+            for (index, month) in rent.months.enumerated()
+            where month.remaining > 0 {
+                let key = monthKey(of: month.start, calendar: calendar)
+                let monthNumber = calendar.component(.month, from: month.start)
+                let id = "\(identifierPrefix)rent." +
+                    "\(rent.leaseID.uuidString).\(key)"
+                if let fire = atHour(
+                       month.dueDate, hour: settings.notificationHour,
+                       calendar: calendar),
+                   fire > input.now {
+                    items.append(ReminderPlannedNotification(
+                        id: "\(id).due",
+                        fireDate: fire,
+                        title: "Thu tiền phòng",
+                        body: "\(rent.roomName): thu " +
+                            "\(VND.format(month.remaining)) " +
+                            "tiền tháng \(monthNumber)\(tenant)",
+                        budgetID: nil))
+                }
+                // Only the current month nags — the next month's reminder
+                // is just its payment day.
+                guard index == 0,
+                      let day = calendar.date(
+                          byAdding: .day, value: 3, to: month.dueDate),
+                      let fire = atHour(
+                          day, hour: settings.notificationHour,
+                          calendar: calendar),
+                      fire > input.now else { continue }
+                items.append(ReminderPlannedNotification(
+                    id: "\(id).overdue",
+                    fireDate: fire,
+                    title: "Quá hạn 3 ngày",
+                    body: "\(rent.roomName): còn " +
+                        "\(VND.format(month.remaining)) " +
+                        "tiền tháng \(monthNumber) chưa thu\(tenant)",
+                    budgetID: nil))
+            }
+        }
+        return items
     }
 
     // MARK: - Fire dates & keys

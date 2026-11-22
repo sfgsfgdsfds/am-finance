@@ -238,6 +238,7 @@ extension ReminderPlanner.Input {
         let rules = (try? context.fetch(FetchDescriptor<RecurringRule>())) ?? []
         let budgets = (try? context.fetch(FetchDescriptor<Budget>())) ?? []
         let categories = (try? context.fetch(FetchDescriptor<LedgerCategory>())) ?? []
+        let units = (try? context.fetch(FetchDescriptor<RentalUnit>())) ?? []
 
         // This month's expenses — the same predicate `BudgetsView` uses.
         let interval = ReportSummary.monthInterval(
@@ -306,14 +307,62 @@ extension ReminderPlanner.Input {
                     isExceeded: row.progress.status == .exceeded)
             }
 
+        // Rooms whose covering lease still owes rent this month — the
+        // same `RentalSnapshot` evaluation the rentals board shows.
+        let rents = rentDues(units: units, now: now, calendar: calendar)
+
         return ReminderPlanner.Input(
             debts: debts,
             recurring: recurring,
             budgets: alerts,
+            rents: rents,
             warnedBudgetIDs: warnedBudgetIDs,
             settings: settings,
             now: now,
             calendar: calendar
         )
+    }
+
+    /// Maps each non-archived room through `RentalSnapshot`: an active
+    /// covering lease with rent still to collect this month becomes a
+    /// `RentDue` carrying the current month plus — when the same lease
+    /// covers it and it isn't collected yet — the next month.
+    @MainActor
+    private static func rentDues(
+        units: [RentalUnit], now: Date, calendar: Calendar
+    ) -> [ReminderPlanner.RentDue] {
+        let currentMonth = RentalSnapshot.monthStart(of: now, calendar: calendar)
+        let nextMonth = calendar.date(
+            byAdding: .month, value: 1, to: currentMonth)
+        return units.compactMap { unit in
+            guard !unit.isArchived else { return nil }
+            let spans = RentalSnapshot.spans(of: unit)
+            let payments = RentalSnapshot.payments(of: unit)
+            let current = RentalSnapshot.make(
+                spans: spans, payments: payments,
+                month: currentMonth, calendar: calendar)
+            guard let leaseID = current.leaseID,
+                  let dueDate = current.dueDate,
+                  current.remaining > 0,
+                  spans.first(where: { $0.id == leaseID })?.isActive == true
+            else { return nil }
+            var months = [ReminderPlanner.RentDue.Month(
+                start: currentMonth, dueDate: dueDate,
+                remaining: current.remaining)]
+            if let nextMonth {
+                let next = RentalSnapshot.make(
+                    spans: spans, payments: payments,
+                    month: nextMonth, calendar: calendar)
+                if next.leaseID == leaseID, next.remaining > 0,
+                   let nextDue = next.dueDate {
+                    months.append(ReminderPlanner.RentDue.Month(
+                        start: nextMonth, dueDate: nextDue,
+                        remaining: next.remaining))
+                }
+            }
+            return ReminderPlanner.RentDue(
+                leaseID: leaseID, roomName: unit.name,
+                tenantName: current.tenantName ?? "", months: months)
+        }
     }
 }
