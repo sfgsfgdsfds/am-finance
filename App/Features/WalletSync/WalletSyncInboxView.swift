@@ -61,6 +61,7 @@ struct WalletSyncInboxView: View {
     @State private var editing: LedgerTransaction?
     @State private var transferTarget: LedgerTransaction?
     @State private var ruleTarget: LedgerTransaction?
+    @State private var showsAISuggest = false
     /// The loaded prefix of pending rows, newest first.
     @State private var pending: [LedgerTransaction] = []
     /// Total pending rows in the store — `pending.count < total` means
@@ -121,6 +122,20 @@ struct WalletSyncInboxView: View {
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Chờ phân loại")
+        .toolbar {
+            if totalPending > 0 {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showsAISuggest = true
+                    } label: {
+                        Label("Phân loại bằng AI", systemImage: "sparkles")
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showsAISuggest) {
+            AIInboxSuggestView()
+        }
         .overlay {
             if pending.isEmpty && totalPending == 0 {
                 EmptyStateView(

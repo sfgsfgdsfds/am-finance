@@ -61,6 +61,11 @@ struct DashboardView: View {
                     DashboardNetWorthCard(netWorth: snapshot.netWorth)
                     if !snapshot.isEmpty {
                         DashboardMonthCard(month: snapshot.month)
+                        SpendingShareCard(
+                            interval: ReportSummary.monthInterval(
+                                containing: .now,
+                                calendar: AppCalendar.vietnam),
+                            title: "Tỉ lệ chi tiêu tháng này")
                         BudgetsSummaryCard()
                         if !snapshot.accountChips.isEmpty {
                             DashboardAccountsCard(chips: snapshot.accountChips) { id in
@@ -73,9 +78,6 @@ struct DashboardView: View {
                             }
                         }
                         DashboardChartCard(months: snapshot.months)
-                        if !snapshot.topExpenseCategories.isEmpty {
-                            DashboardTopCategoriesCard(rows: snapshot.topExpenseCategories)
-                        }
                         if !snapshot.businessResults.isEmpty {
                             DashboardBusinessCard(results: snapshot.businessResults) { id in
                                 businesses.first { $0.id == id }
@@ -107,12 +109,20 @@ struct DashboardView: View {
             .navigationTitle("Tổng quan")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    NavigationLink {
-                        SettingsView()
-                    } label: {
-                        Image(systemName: "gearshape.fill")
+                    HStack(spacing: 16) {
+                        NavigationLink {
+                            AIChatView()
+                        } label: {
+                            Image(systemName: "sparkles")
+                        }
+                        .accessibilityLabel("Trợ lý AI")
+                        NavigationLink {
+                            SettingsView()
+                        } label: {
+                            Image(systemName: "gearshape.fill")
+                        }
+                        .accessibilityLabel("Cài đặt")
                     }
-                    .accessibilityLabel("Cài đặt")
                 }
             }
             .sheet(item: $editing) { transaction in
