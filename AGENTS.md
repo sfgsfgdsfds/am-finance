@@ -9,17 +9,28 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   `~/Library/Caches/amfinance-tools`, override with `AMFINANCE_TOOLS_DIR`) and
   regenerates `AMFinance.xcodeproj` from `project.yml`.
 - `swift test --package-path Packages/FinanceCore` — fast logic tests on macOS.
-- `./scripts/test-app.sh` — regenerates the project and runs `xcodebuild test`
-  on an auto-picked iPhone simulator (code signing off). App tests are
-  serialized across worktrees by a shared lock, so a check may wait for
-  another worker's run to finish; transient simulator failures retry once.
+- `./scripts/test-app.sh` — the default fast gate: regenerates the project and
+  runs only the `AMFinanceTests` unit tests via `xcodebuild test` on an
+  auto-picked iPhone simulator (code signing off; the `AMFinanceUITests`
+  target is neither built nor run). App tests are serialized across worktrees
+  by a shared lock, so a check may wait for another worker's run to finish;
+  transient simulator failures retry once.
+- `./scripts/test-ui.sh` — the slow UI gate: runs only the `AMFinanceUITests`
+  XCUITest smoke suite under the same lock and retry logic, on the dedicated
+  `AMFinanceUITests` scheme. Integration jobs run it, and it must pass before
+  device installs. If you change navigation, tab structure or a flow the smoke
+  tests cover, run it yourself and update `AppUITests`.
+- `scripts/lib-test.sh` — shared lock/simulator/retry helper sourced by both
+  test scripts; not meant to be run directly.
 - The generated `.xcodeproj` is a build artifact: git-ignored, never commit it.
 
 ## UI smoke tests
 
 - `AppUITests/` (`AMFinanceUITests`, XCTest + XCUITest) — end-to-end smoke:
   tabs, quick-add, income+business, edit/delete, settings, accounts/cards/
-  loans, debts, reports. Runs inside `./scripts/test-app.sh` with the unit tests.
+  loans, debts, reports. Runs via `./scripts/test-ui.sh` on its own
+  `AMFinanceUITests` scheme; the default `./scripts/test-app.sh` gate uses the
+  `AMFinance` scheme, which only contains the unit-test bundle.
 - Tests launch the app with `-uiTestInMemoryStore` → in-memory store + seed.
 - Row taps need `.onTapGesture` (List-row `Button` actions don't fire on
   iOS 26); assertions on off-screen list items must scroll first.
