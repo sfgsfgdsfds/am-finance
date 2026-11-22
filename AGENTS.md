@@ -82,15 +82,25 @@ workers know what already exists. Pushed views must not create their own
 - `Budgets/` — `BudgetsView`, `BudgetsEditSheet`, `BudgetsSummaryCard` (dashboard).
 - `BusinessHub/` — `BusinessHubView`, `BusinessHubDetailView(business:)`.
 - `CreditCards/` — `CreditCardDetailView(account:)`, `CreditCardPaymentSheet`.
+- `CSVImport/` — `CSVImportView` (Settings → Dữ liệu → "Nhập sao kê CSV"; pick file + account, map columns, confirm) + `CSVImportParser`/`Detector`/`Mapper`/`Importer`/`Deduper`.
 - `Dashboard/` — `DashboardView` ("Tổng quan" tab) + its card structs.
 - `Debts/` — `DebtsView` ("Nợ & Thẻ" tab).
 - `Loans/` — `LoanDetailView(account:)`, `LoanPaymentSheet`, `LoanPrepaymentSheet`, `LoanRateChangeSheet`.
 - `Receivables/` — `ReceivablesView(business:?)`, `ReceivableDetailView(account:)`, `ReceivableActionSheet` (advance/repayment/fee/write-off).
 - `Recurring/` — `RecurringListView`, `RecurringEditView`; `App/Models/RecurringGenerator` posts due occurrences on activation.
 - `Reminders/` — `ReminderSettingsView`; `ReminderScheduler.reschedule(context:)` runs on activation.
+- `Rentals/` — `RentalsView(business:?)`, `RentalUnitDetailView(unit:)`, `RentalUnitEditView`, `RentalLeaseEditView`, `RentalCollectSheet`; posting via `RentalActions`, month math in `RentalSnapshot`.
 - `Reports/` — `ReportsView` ("Báo cáo" tab) + section views.
 - `Settings/` — `SettingsView` (hub) + `CategoriesListView`, `BusinessesListView`, `BusinessEditView`, `CategoryEditView`.
 - `TransactionEditor/` — `TransactionEditorView` (quick-add and edit sheet).
 - `Transactions/` — `TransactionsView` ("Giao dịch" tab).
 - `WalletLink/` — `WalletLinkSettingsView` (OIDC sign-in to wallet.amx.vn via auth.amx.vn).
 - `WalletSync/` — `WalletSyncAccountsView`, `WalletSyncInboxView`, `WalletSyncRulesView`, `WalletSyncStatusBanner`, `.walletSyncAutoRefresh()` modifier; shared `WalletSyncCoordinator` created in `AMFinanceApp`.
+
+## Release
+
+- `scripts/archive.sh` builds and exports an IPA for TestFlight.
+- `scripts/upload-testflight.sh` uploads the IPA — only with
+  `--yes-upload`; without it the script is a dry run.
+- Both scripts must only run after `./scripts/test-app.sh` and
+  `./scripts/test-ui.sh` pass.

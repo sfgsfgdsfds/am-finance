@@ -4,13 +4,15 @@ import XCTest
 /// with `-uiTestInMemoryStore` — a throwaway, seeded in-memory SwiftData
 /// store — so real user data is never touched.
 ///
-/// The suite is grouped into four launches instead of one per flow — each
+/// The suite is grouped into five launches instead of one per flow — each
 /// launch costs ~10-15 s of simulator + app idle time, so steps that can share
 /// a store run together. Covers: the four tabs, quick-add (expense and
 /// income), edit/delete, settings screens, accounts/cards/loans, debts,
-/// reports and the second-pass feature wiring (wallet link/sync, budgets,
+/// reports, the second-pass feature wiring (wallet link/sync, budgets,
 /// recurring, reminders, app lock, business hub, receivables, balance
-/// trend). Vietnamese UI, VND amounts ("150.000 ₫").
+/// trend) and the third-pass features (room rentals, CSV import, the
+/// rent-collection and bank-transaction reminder switches). Vietnamese
+/// UI, VND amounts ("150.000 ₫").
 ///
 /// Reliability rules used throughout:
 /// - wait for `exists AND hittable` before tapping anything that may sit
@@ -553,6 +555,177 @@ final class AMFinanceUITests: XCTestCase {
         goBack(to: "Tổng quan")
     }
 
+    // MARK: - 5. Rentals, CSV import and the new reminder switches
+
+    /// Third-pass wiring end to end: the two new reminder switches, then
+    /// a serviced-apartment room, a lease, this month's rent collected
+    /// into the seeded cash account — the room flips to "Đã thu" and the
+    /// income lands on the dashboard's "Căn hộ dịch vụ" P&L row, whose
+    /// business detail is the second entry point to the room board —
+    /// and finally the CSV import's first step. Settings rows are
+    /// visited top-down because the reveal helpers only scroll up.
+    func testRentalsImportAndReminders() throws {
+        // Settings → Kế hoạch → Nhắc nhở: the rent-collection and
+        // bank-transaction switches exist; both stay off so no
+        // permission prompt ever appears.
+        let gear = app.buttons["Cài đặt"]
+        XCTAssertTrue(waitReady(gear, timeout: 15), "settings gear missing")
+        gear.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Cài đặt"]
+                .waitForExistence(timeout: 5),
+            "settings screen missing")
+
+        tapOption("Nhắc nhở")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Nhắc nhở"]
+                .waitForExistence(timeout: 5),
+            "reminders screen missing")
+        assertVisible(app.switches["Thu tiền phòng"],
+                      "rent-collection switch missing")
+        assertVisible(app.switches["Thông báo giao dịch ngân hàng mới"],
+                      "bank-transaction switch missing")
+        goBack(to: "Cài đặt")
+
+        // Phân loại → Phòng cho thuê.
+        tapOption("Phòng cho thuê")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Phòng cho thuê"]
+                .waitForExistence(timeout: 5),
+            "rentals screen missing")
+
+        // A room under the serviced-apartment business at 5.000.000 ₫ —
+        // the toolbar "+" and the empty-state action share the "Thêm
+        // phòng" label, so the first hittable one wins.
+        tapOption("Thêm phòng")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Phòng mới"]
+                .waitForExistence(timeout: 5),
+            "room sheet missing")
+        fillField(app.textFields["Tên phòng"], with: "Phòng 101")
+        // A "Mảng kinh doanh" row sits on the settings screen behind the
+        // sheet — only the frontmost hittable match may be tapped.
+        tapFrontPickerRow("Mảng kinh doanh")
+        tapOption("Căn hộ dịch vụ")
+        tapPickerRow("Giá niêm yết")
+        ensureKeypadVisible()
+        // The "000" key sits on the keypad's bottom row — reveal it too.
+        _ = reveal(app.buttons["000"], maxSwipes: 4)
+        typeAmount(5_000_000)
+        tapWhenReady(app.buttons["Thêm"], "room save button missing")
+        let newRoom = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Phòng 101"))
+            .firstMatch
+        assertVisible(newRoom, "new room row missing")
+
+        // Room detail → lease for a tenant; the rent defaults to the list
+        // price and the start date to today, so it covers this month.
+        tapRowAny("Phòng 101")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Phòng 101"]
+                .waitForExistence(timeout: 5),
+            "room detail missing")
+        tapOption("Hợp đồng mới")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Hợp đồng mới"]
+                .waitForExistence(timeout: 5),
+            "lease sheet missing")
+        fillField(app.textFields["Tên người thuê"], with: "Nguyễn Văn A")
+        tapWhenReady(app.buttons["Thêm"], "lease save button missing")
+        let tenantRow = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Nguyễn Văn A"))
+            .firstMatch
+        assertVisible(tenantRow, "tenant missing on room detail")
+
+        // Collect this month — the sheet pre-fills the outstanding rent
+        // and defaults the receiver to the only payable account, "Tiền
+        // mặt", so saving as-is records the rent into cash.
+        let collect = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label BEGINSWITH %@", "Thu tiền tháng"))
+            .firstMatch
+        if !reveal(collect, maxSwipes: 6) {
+            XCTAssertTrue(collect.waitForExistence(timeout: 3),
+                          "collect-rent action missing")
+        }
+        collect.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Thu tiền Phòng 101"]
+                .waitForExistence(timeout: 5),
+            "collect sheet missing")
+        saveSheet()
+
+        // The payment lands in the room's history, and the board row
+        // flips to "Đã thu" — scoped to the list because the month
+        // header's totals cell shares the word.
+        let historyRow = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "Tiền Phòng 101 tháng"))
+            .firstMatch
+        assertVisible(historyRow, "rent payment missing in room history")
+        goBack(to: "Phòng cho thuê")
+        XCTAssertTrue(paidRoomTagExists(),
+                      "room row not marked 'Đã thu'")
+        goBack(to: "Cài đặt")
+
+        // CSV import — the first step renders (file row, target-account
+        // picker); the system file picker is not driven.
+        tapOption("Nhập sao kê CSV")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Nhập sao kê CSV"]
+                .waitForExistence(timeout: 5),
+            "csv import screen missing")
+        assertVisible(app.buttons["Chọn tệp CSV…"],
+                      "csv file row missing")
+        let accountRow = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "Tài khoản nhận"))
+            .firstMatch
+        assertVisible(accountRow, "csv account picker missing")
+        goBack(to: "Cài đặt")
+        goBack(to: "Tổng quan")
+
+        // Dashboard: the collected rent lands on the serviced-apartment
+        // P&L row, and the row pushes the business detail whose own
+        // "Phòng cho thuê" entry reaches the same board.
+        let card = hittableOrRevealedInOuter(
+            app.descendants(matching: .any)
+                .matching(identifier: "dashboard.businessCard"))
+        XCTAssertNotNil(card, "business card missing")
+        let businessCard = scopedElement("dashboard.businessCard")
+        XCTAssertTrue(
+            businessCard.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS %@", "Căn hộ dịch vụ"))
+                .firstMatch.exists,
+            "P&L card does not show 'Căn hộ dịch vụ'")
+        XCTAssertTrue(
+            businessCard.descendants(matching: .any).matching(
+                NSPredicate(format: "label CONTAINS %@", "Thu 5 tr"))
+                .firstMatch.exists,
+            "P&L row does not show the 5.000.000 ₫ rent income")
+
+        let apartmentRow = hittableOrRevealedInOuter(businessCard
+            .descendants(matching: .any)
+            .matching(NSPredicate(
+                format: "label BEGINSWITH %@", "Căn hộ dịch vụ")))
+        XCTAssertNotNil(apartmentRow, "P&L row for 'Căn hộ dịch vụ' missing")
+        apartmentRow?.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Căn hộ dịch vụ"]
+                .waitForExistence(timeout: 5),
+            "business detail missing")
+        let roomsLink = hittableOrRevealedInOuter(
+            app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS %@", "Đang thuê")))
+        XCTAssertNotNil(roomsLink, "business-detail rentals row missing")
+        roomsLink?.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Phòng — Căn hộ dịch vụ"]
+                .waitForExistence(timeout: 5),
+            "scoped rentals screen missing")
+        XCTAssertTrue(paidRoomTagExists(),
+                      "scoped board does not show 'Đã thu'")
+        goBack(to: "Căn hộ dịch vụ")
+        goBack(to: "Tổng quan")
+    }
+
     // MARK: - Flow helpers
 
     /// Taps the floating "+" (identifier `root.quickAdd`) and waits for the
@@ -638,6 +811,34 @@ final class AMFinanceUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 3),
                       "picker '\(title)' missing")
         row.tap()
+    }
+
+    /// True when a room row carries the "Đã thu" status tag — the board's
+    /// month header uses the same word in its totals, so the check is
+    /// scoped to whichever list container type is on screen.
+    private func paidRoomTagExists() -> Bool {
+        for query in [app.collectionViews, app.scrollViews] {
+            if query.descendants(matching: .staticText)
+                .matching(NSPredicate(format: "label == %@", "Đã thu"))
+                .firstMatch.exists {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Like `tapPickerRow` but taps the frontmost *hittable* match —
+    /// needed inside a sheet when the screen underneath carries a row
+    /// with the same label prefix ("Mảng kinh doanh" sits on the
+    /// settings list behind the room sheet).
+    private func tapFrontPickerRow(_ title: String) {
+        let query = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH %@", title))
+        guard let element = hittableOrRevealed(query) else {
+            XCTFail("picker '\(title)' missing")
+            return
+        }
+        element.tap()
     }
 
     /// Taps the toolbar "Lưu" of the front sheet once it is enabled, then
