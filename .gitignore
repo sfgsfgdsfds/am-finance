@@ -4,3 +4,4 @@ DerivedData/
 .tools/
 xcuserdata/
 .DS_Store
+build/
