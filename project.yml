@@ -78,13 +78,24 @@ schemes:
       targets:
         AMFinance: all
         AMFinanceTests: [test]
-        AMFinanceUITests: [test]
     run:
       config: Debug
     test:
       config: Debug
       targets:
         - AMFinanceTests
+    archive:
+      config: Release
+  AMFinanceUITests:
+    build:
+      targets:
+        AMFinance: all
+        AMFinanceUITests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
         - AMFinanceUITests
     archive:
       config: Release
