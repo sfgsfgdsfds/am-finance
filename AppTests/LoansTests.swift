@@ -288,6 +288,22 @@ struct LoansTests {
         #expect(loan.balance == -120_000_000)
     }
 
+    /// A client receivable is not the owner's money — only cash, bank and
+    /// e-wallet accounts may pay a loan installment.
+    @Test func payingAccountPickerExcludesReceivablesAndLiabilities() {
+        let cash = Account(name: "Tiền mặt", kind: .cash)
+        let bank = Account(name: "Ngân hàng", kind: .bank)
+        let wallet = Account(name: "Momo", kind: .eWallet)
+        let client = Account(name: "Khách A", kind: .receivable)
+        let card = Account(name: "Thẻ", kind: .creditCard)
+        let otherLoan = Account(name: "Vay khác", kind: .loan)
+        let archived = Account(name: "Cũ", kind: .bank, isArchived: true)
+        let all = [cash, bank, wallet, client, card, otherLoan, archived]
+
+        let payers = LoanPayingAccountPicker.candidates(all)
+        #expect(Set(payers.map(\.id)) == Set([cash, bank, wallet].map(\.id)))
+    }
+
     // MARK: - Prepayment
 
     @Test func prepaymentRecordsSingleTransfer() throws {

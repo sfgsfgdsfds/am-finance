@@ -61,12 +61,24 @@ struct ReceivableActionSheet: View {
         }
     }
 
+    /// Overpaying a repayment is allowed — the excess becomes prepaid
+    /// credit ("khách ứng trước"), so the sheet says so up front.
+    private var overpaymentHint: Bool {
+        kind == .repayment && amount > outstanding
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 VStack(spacing: 8) {
                     quickChips
                     AmountKeypad(amount: $amount)
+                    if overpaymentHint {
+                        Text("Khách trả dư \(VND.format(amount - outstanding)), sẽ ghi là tiền khách ứng trước")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
                 }
                 .padding(.horizontal)
                 .padding(.top, 8)

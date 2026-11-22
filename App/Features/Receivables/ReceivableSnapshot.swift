@@ -18,13 +18,17 @@ struct ReceivableMovement: Equatable, Sendable {
 /// What one client receivable account looks like right now: how much is
 /// still owed, how much was ever advanced and settled, and which advance is
 /// the oldest still unpaid. Settlements consume advances oldest-first
-/// (FIFO), so partial repayments age correctly.
+/// (FIFO), so partial repayments age correctly — and an overpayment leaves
+/// prepaid credit ("khách ứng trước") that later advances consume first.
 ///
 /// Pure value type — `make(account:)` maps a live `Account` once so views
 /// and tests share the same numbers.
 struct ReceivableSnapshot: Equatable, Sendable {
     /// Still owed by the client (đồng ≥ 0).
     var outstanding: Int64
+    /// Credit the client prepaid beyond what they owed (đồng ≥ 0) —
+    /// shown as "Khách ứng trước"; future advances consume it.
+    var prepaid: Int64
     /// Sum of every advance ever recorded (đồng ≥ 0).
     var totalAdvanced: Int64
     /// Sum of every settlement — repayments plus write-offs (đồng ≥ 0).
@@ -33,8 +37,11 @@ struct ReceivableSnapshot: Equatable, Sendable {
     /// nil when nothing is owed.
     var oldestUnpaidDate: Date?
 
-    /// True when the client owes nothing.
+    /// True when the client owes nothing (prepaid credit counts as
+    /// settled — nothing to collect).
     var isSettled: Bool { outstanding == 0 }
+    /// True when the client paid ahead — the account sits in credit.
+    var hasPrepaid: Bool { prepaid > 0 }
 
     /// Builds the snapshot from dated movements. Order does not matter —
     /// advances are sorted by date before the FIFO pass.
@@ -58,11 +65,13 @@ struct ReceivableSnapshot: Equatable, Sendable {
         }
 
         let outstanding = max(Int64(0), totalAdvanced - totalRepaid)
+        let prepaid = max(Int64(0), totalRepaid - totalAdvanced)
         let oldestUnpaid = zip(ordered, unpaid)
             .first { $0.1 > 0 }?
             .0.date
         return ReceivableSnapshot(
             outstanding: outstanding,
+            prepaid: prepaid,
             totalAdvanced: totalAdvanced,
             totalRepaid: totalRepaid,
             oldestUnpaidDate: outstanding > 0 ? oldestUnpaid : nil
@@ -72,13 +81,19 @@ struct ReceivableSnapshot: Equatable, Sendable {
     /// Maps a live receivable `Account`. Advances are the positive opening
     /// balance (dated at `createdAt`), incoming transfers and income rows;
     /// settlements are outgoing transfers and expense rows (write-offs and
-    /// balance adjustments down).
+    /// balance adjustments down). A negative opening balance is credit the
+    /// client prepaid — it counts as a settlement.
     static func make(account: Account) -> ReceivableSnapshot {
         var advances: [ReceivableMovement] = []
         var settlements: [ReceivableMovement] = []
         if account.openingBalance > 0 {
             advances.append(ReceivableMovement(
                 date: account.createdAt, amount: account.openingBalance))
+        } else if account.openingBalance < 0 {
+            settlements.append(ReceivableMovement(
+                date: account.createdAt,
+                amount: account.openingBalance == Int64.min
+                    ? Int64.max : -account.openingBalance))
         }
         for transaction in account.incomingTransfers ?? [] {
             advances.append(ReceivableMovement(
