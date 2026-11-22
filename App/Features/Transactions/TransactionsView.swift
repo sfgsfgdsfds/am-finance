@@ -421,6 +421,8 @@ struct TransactionListContent: View {
     private func rowButton(_ row: TransactionListRow) -> some View {
         TransactionListRowView(row: row)
         .contentShape(Rectangle())
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("txList.row.\(row.title)")
         .onTapGesture {
             guard let transaction = transactionsByID[row.id] else { return }
             onEdit(transaction)
