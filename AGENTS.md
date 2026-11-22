@@ -34,3 +34,16 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
 - SwiftData models must stay CloudKit-compatible: every property optional or
   with a default value, relationships optional with inverses, no unique
   constraints.
+
+## Shared UI kit
+
+Feature screens must use these instead of re-implementing them; use List/Form
+with the system inset-grouped style. All in `App/Shared/`:
+
+- `AppCalendar.vietnam` + `AppDateFormat` — day headers, `22/11`, `Tháng 11/2026`, `14:05`.
+- `Color(hex:)` + `AppTheme` — income/expense/transfer colors, 12-color palette, ~40 symbols.
+- `AmountText(amount:kind:compact:)` — signed, colored VND, monospaced digits.
+- `IconBadge(symbol:colorHex:size:)` — SF Symbol on a colored circle.
+- `AmountKeypad` + `AmountKeypadState` — đồng keypad; pure reducer, 13-digit cap.
+- `IconPickerGrid` + `ColorHexPickerGrid` — icon and color pickers for edit forms.
+- `EmptyStateView` — empty-list placeholder with optional action.
