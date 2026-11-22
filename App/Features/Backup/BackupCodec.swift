@@ -5,8 +5,9 @@ import SwiftData
 /// Dates are ISO 8601 with fractional seconds so `updatedAt` ordering and
 /// `createdAt` equality survive a round trip.
 enum BackupCodec {
-    /// The only backup format this build reads and writes.
-    static let formatVersion = 1
+    /// The newest backup format this build writes; files at version 1 or 2
+    /// are accepted on read (v1 lacks `loanRateChanges`, decoded as empty).
+    static let formatVersion = 2
 
     /// Version string stamped into every exported document.
     static var appVersion: String {
@@ -22,6 +23,7 @@ enum BackupCodec {
         categories: [LedgerCategory],
         businesses: [Business],
         transactions: [LedgerTransaction],
+        loanRateChanges: [LoanRateChange],
         exportedAt: Date = .now,
         appVersion: String = appVersion
     ) -> BackupDocument {
@@ -40,7 +42,13 @@ enum BackupCodec {
                 .map(BackupBusiness.init),
             transactions: transactions
                 .sorted { ($0.date, $0.createdAt, $0.id.uuidString) < ($1.date, $1.createdAt, $1.id.uuidString) }
-                .map(BackupTransaction.init)
+                .map(BackupTransaction.init),
+            loanRateChanges: loanRateChanges
+                .sorted {
+                    ($0.account?.id.uuidString ?? "", $0.fromInstallment, $0.id.uuidString)
+                        < ($1.account?.id.uuidString ?? "", $1.fromInstallment, $1.id.uuidString)
+                }
+                .map(BackupLoanRateChange.init)
         )
     }
 
@@ -51,6 +59,7 @@ enum BackupCodec {
             categories: try context.fetch(FetchDescriptor<LedgerCategory>()),
             businesses: try context.fetch(FetchDescriptor<Business>()),
             transactions: try context.fetch(FetchDescriptor<LedgerTransaction>()),
+            loanRateChanges: try context.fetch(FetchDescriptor<LoanRateChange>()),
             exportedAt: exportedAt
         )
         return try encode(doc)

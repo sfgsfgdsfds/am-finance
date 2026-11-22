@@ -31,14 +31,11 @@ struct SettingsView: View {
             }
 
             Section("Dữ liệu") {
-                HStack {
+                NavigationLink {
+                    BackupView()
+                } label: {
                     Label("Sao lưu & khôi phục", systemImage: "icloud.fill")
-                    Spacer()
-                    Text("Sắp có")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
                 }
-                .foregroundStyle(.secondary)
             }
 
             Section("Giới thiệu") {

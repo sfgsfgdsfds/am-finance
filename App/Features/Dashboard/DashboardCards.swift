@@ -458,6 +458,47 @@ struct DashboardRecentCard: View {
     }
 }
 
+// MARK: - Upcoming debt payments
+
+/// Card: debt payments due within the next days — card statements and loan
+/// installments sorted by due date. Hidden by the caller when the list is
+/// empty; tapping a row pushes the matching detail view.
+struct DashboardUpcomingCard: View {
+    let items: [DebtsUpcomingItem]
+    /// Resolves an item's account id back to its model for the row's icon
+    /// and name and for the navigation destination.
+    let account: (UUID) -> Account?
+
+    var body: some View {
+        DashboardCard("Sắp đến hạn") {
+            VStack(spacing: 0) {
+                ForEach(items) { item in
+                    if let model = account(item.accountID) {
+                        NavigationLink {
+                            destination(item, account: model)
+                        } label: {
+                            DebtsUpcomingRow(item: item, account: model)
+                        }
+                        .buttonStyle(.plain)
+                        if item.id != items.last?.id {
+                            Divider()
+                                .padding(.leading, 48)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func destination(_ item: DebtsUpcomingItem, account: Account) -> some View {
+        switch item.kind {
+        case .creditCard: CreditCardDetailView(account: account)
+        case .loan: LoanDetailView(account: account)
+        }
+    }
+}
+
 // MARK: - Welcome (fresh install)
 
 /// Shown instead of the data cards when there is no transaction at all:

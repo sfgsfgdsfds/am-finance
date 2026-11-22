@@ -106,6 +106,11 @@ struct AccountDetailView: View {
                 Text("Chưa có thông tin hạn mức hay chu kỳ sao kê.")
                     .foregroundStyle(.secondary)
             }
+            NavigationLink {
+                CreditCardDetailView(account: account)
+            } label: {
+                Label("Sao kê & thanh toán thẻ", systemImage: "doc.text.magnifyingglass")
+            }
         }
     }
 
@@ -135,6 +140,11 @@ struct AccountDetailView: View {
             if let methodRaw = account.loanMethodRaw,
                let method = LoanMethod(rawValue: methodRaw) {
                 LabeledContent("Phương thức", value: method.displayName)
+            }
+            NavigationLink {
+                LoanDetailView(account: account)
+            } label: {
+                Label("Lịch trả nợ", systemImage: "calendar")
             }
         }
     }
