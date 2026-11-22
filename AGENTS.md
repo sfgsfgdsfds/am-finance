@@ -10,7 +10,9 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   regenerates `AMFinance.xcodeproj` from `project.yml`.
 - `swift test --package-path Packages/FinanceCore` — fast logic tests on macOS.
 - `./scripts/test-app.sh` — regenerates the project and runs `xcodebuild test`
-  on an auto-picked iPhone simulator (code signing off).
+  on an auto-picked iPhone simulator (code signing off). App tests are
+  serialized across worktrees by a shared lock, so a check may wait for
+  another worker's run to finish; transient simulator failures retry once.
 - The generated `.xcodeproj` is a build artifact: git-ignored, never commit it.
 
 ## Layout
