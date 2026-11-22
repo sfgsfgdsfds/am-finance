@@ -242,7 +242,26 @@ struct CreditCardsTests {
         let all = try context.fetch(FetchDescriptor<Account>())
         let payers = CreditCardPayment.eligiblePayers(all, paying: card)
         #expect(payers.map(\.name).sorted() == ["Momo", "Ngân hàng", "Tiền mặt"])
-        #expect(payers.allSatisfy { !$0.isArchived && !$0.kind.isLiability })
+        #expect(payers.allSatisfy { !$0.isArchived && $0.kind.canPay })
+    }
+
+    /// A client receivable is not money the owner holds — it cannot pay a
+    /// card bill even though it is not a liability.
+    @Test func eligiblePayersExcludesReceivables() throws {
+        let context = try makeContext()
+        let bank = Account(name: "Ngân hàng", kind: .bank)
+        let client = Account(name: "Khách A", kind: .receivable)
+        let card = Account(name: "Thẻ Visa", kind: .creditCard)
+        for account in [bank, client, card] { context.insert(account) }
+        try context.save()
+
+        let all = try context.fetch(FetchDescriptor<Account>())
+        let payers = CreditCardPayment.eligiblePayers(all, paying: card)
+        #expect(payers.map(\.id) == [bank.id])
+        #expect(!AccountKind.receivable.canPay)
+        #expect(AccountKind.cash.canPay && AccountKind.bank.canPay
+                && AccountKind.eWallet.canPay)
+        #expect(!AccountKind.creditCard.canPay && !AccountKind.loan.canPay)
     }
 
     @Test func paymentPlanPrefill() {

@@ -589,6 +589,109 @@ struct WalletSyncTests {
         #expect(row.needsReview == true)
     }
 
+    /// A row the user moved to another account in the editor still counts
+    /// as imported — dedupe is global, not per linked account, so a rescan
+    /// must not insert a duplicate back on the bank account.
+    @Test func rescanDoesNotDuplicateImportMovedToAnotherAccount() async throws {
+        let context = try makeContext()
+        let bank = linkedAccount(in: context)
+        let cash = Account(name: "Tiền mặt", kind: .cash)
+        context.insert(cash)
+        let api = WalletSyncFakeAPI()
+        api.items[Self.sessionA] = [
+            bankTransaction(1, amount: -100),
+            bankTransaction(2, amount: 200),
+        ]
+        let states = WalletSyncInMemoryStateStore()
+        let engine = makeEngine(api: api, states: states, context: context)
+        _ = try await engine.syncAll()
+
+        // The user edits the row and files it under another account.
+        let moved = try #require(try allTransactions(in: context).first {
+            $0.externalID == Self.txID(1)
+        })
+        moved.account = cash
+        try context.save()
+        #expect(bank.transactions?.count == 1)
+
+        let rescan = try await engine.syncAll(fullRescan: true)
+
+        #expect(rescan.totalInserted == 0)
+        #expect(rescan.accounts[0].skippedExisting == 2)
+        #expect(try allTransactions(in: context).count == 2)
+        #expect(
+            Set(try allTransactions(in: context).compactMap(\.externalID)).count == 2)
+    }
+
+    /// Deleting an imported row must not bring it back on the next daily
+    /// rescan: the delete records a tombstone the dedupe honours.
+    @Test func rescanDoesNotResurrectDeletedImport() async throws {
+        let context = try makeContext()
+        linkedAccount(in: context)
+        let api = WalletSyncFakeAPI()
+        api.items[Self.sessionA] = [
+            bankTransaction(1, amount: -100),
+            bankTransaction(2, amount: 200),
+        ]
+        let states = WalletSyncInMemoryStateStore()
+        let engine = makeEngine(api: api, states: states, context: context)
+        _ = try await engine.syncAll()
+
+        let doomed = try #require(try allTransactions(in: context).first {
+            $0.externalID == Self.txID(1)
+        })
+        LedgerTransactionDeletion.delete(
+            doomed, in: context, tombstones: states)
+        try context.save()
+        #expect(try allTransactions(in: context).count == 1)
+
+        let rescan = try await engine.syncAll(fullRescan: true)
+
+        #expect(rescan.totalInserted == 0)
+        let rows = try allTransactions(in: context)
+        #expect(rows.count == 1)
+        #expect(rows.compactMap(\.externalID) == [Self.txID(2)])
+    }
+
+    /// A tombstone is per external source and survives unlinking the
+    /// account — a relink never re-imports what the user deleted.
+    @Test func unlinkKeepsTombstones() async throws {
+        let context = try makeContext()
+        let account = linkedAccount(in: context)
+        let api = WalletSyncFakeAPI()
+        api.items[Self.sessionA] = [bankTransaction(1, amount: -100)]
+        let states = WalletSyncInMemoryStateStore()
+        let engine = makeEngine(api: api, states: states, context: context)
+        _ = try await engine.syncAll()
+
+        let row = try #require(try allTransactions(in: context).first)
+        LedgerTransactionDeletion.delete(row, in: context, tombstones: states)
+        try context.save()
+
+        // Unlink exactly like the accounts screen does.
+        account.externalSource = nil
+        account.externalAccountID = nil
+        states.removeState(for: Self.sessionA)
+
+        #expect(
+            states.tombstonedIDs(source: WalletSyncEngine.externalSource)
+                == [Self.txID(1)])
+    }
+
+    /// The tombstone list is capped — only the newest ids are kept.
+    @Test func tombstonesAreBounded() {
+        let states = WalletSyncInMemoryStateStore()
+        let source = WalletSyncEngine.externalSource
+        let cap = WalletSyncStateStore.tombstoneCap
+        let ids = (0..<(cap + 10)).map { "id-\($0)" }
+        states.recordTombstones(ids, source: source)
+
+        let kept = states.tombstonedIDs(source: source)
+        #expect(kept.count == cap)
+        #expect(!kept.contains("id-0"))
+        #expect(kept.contains("id-\(cap + 9)"))
+    }
+
     // MARK: - Unlink
 
     @Test func unlinkKeepsImportedTransactions() async throws {

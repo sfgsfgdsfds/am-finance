@@ -73,6 +73,97 @@ struct ReceivablesTests {
         #expect(snapshot.oldestUnpaidDate == nil)
     }
 
+    /// A repayment larger than the outstanding amount is legitimate —
+    /// the excess is prepaid credit ("khách ứng trước"), not a negative
+    /// "đang nợ", and it can never look "quá 30 ngày".
+    @Test func snapshotOverpaymentBecomesPrepaidCredit() {
+        let snapshot = ReceivableSnapshot.make(
+            advances: [
+                ReceivableMovement(date: day(2026, 9, 1), amount: 5_000_000),
+            ],
+            settlements: [
+                ReceivableMovement(date: day(2026, 11, 1), amount: 7_000_000),
+            ]
+        )
+        #expect(snapshot.outstanding == 0)
+        #expect(snapshot.prepaid == 2_000_000)
+        #expect(snapshot.hasPrepaid)
+        #expect(snapshot.isSettled)
+        #expect(snapshot.oldestUnpaidDate == nil)
+        #expect(!snapshot.isOverdue(now: day(2026, 11, 22), calendar: calendar))
+    }
+
+    /// Credit consumes later advances too: 7M settled against a 5M
+    /// advance 50 days ago leaves 2M prepaid; a new 4M advance is eaten by
+    /// that credit first, so only 2M remains — aged from the new advance,
+    /// not the old one.
+    @Test func snapshotPrepaidCreditConsumesLaterAdvances() {
+        let snapshot = ReceivableSnapshot.make(
+            advances: [
+                ReceivableMovement(date: day(2026, 10, 1), amount: 5_000_000),
+                ReceivableMovement(date: day(2026, 11, 20), amount: 4_000_000),
+            ],
+            settlements: [
+                ReceivableMovement(date: day(2026, 11, 10), amount: 7_000_000),
+            ]
+        )
+        #expect(snapshot.outstanding == 2_000_000)
+        #expect(snapshot.prepaid == 0)
+        #expect(snapshot.oldestUnpaidDate == day(2026, 11, 20))
+        #expect(snapshot.oldestUnpaidAgeDays(now: day(2026, 11, 22), calendar: calendar) == 2)
+        #expect(!snapshot.isOverdue(now: day(2026, 11, 22), calendar: calendar))
+    }
+
+    /// A client created with a negative opening balance starts in credit.
+    @Test func snapshotMapsNegativeOpeningBalanceToPrepaid() throws {
+        let context = try makeContext()
+        let client = Account(
+            name: "Khách", kind: .receivable, openingBalance: -3_000_000)
+        client.createdAt = day(2026, 10, 1)
+        context.insert(client)
+        try context.save()
+
+        let snapshot = ReceivableSnapshot.make(account: client)
+        #expect(snapshot.outstanding == 0)
+        #expect(snapshot.prepaid == 3_000_000)
+        #expect(snapshot.prepaid == -client.balance)
+    }
+
+    /// An overpayment on a live account: the ledger balance goes negative
+    /// and the snapshot reports prepaid credit equal to -balance.
+    @Test func repaymentBeyondOutstandingBecomesPrepaid() throws {
+        let context = try makeContext()
+        let cash = Account(name: "Tiền mặt", kind: .cash)
+        let client = Account(name: "Khách A", kind: .receivable)
+        context.insert(cash)
+        context.insert(client)
+        context.insert(ReceivableActions.advance(
+            receivable: client, from: cash,
+            amount: 5_000_000, date: day(2026, 9, 1), note: ""))
+        try context.save()
+
+        context.insert(ReceivableActions.repayment(
+            receivable: client, to: cash,
+            amount: 7_000_000, date: day(2026, 11, 1), note: ""))
+        try context.save()
+
+        #expect(client.balance == -2_000_000)
+        let snapshot = ReceivableSnapshot.make(account: client)
+        #expect(snapshot.outstanding == 0)
+        #expect(snapshot.prepaid == 2_000_000)
+        #expect(snapshot.isSettled)
+        #expect(!snapshot.isOverdue(now: day(2026, 11, 22), calendar: calendar))
+
+        // The next advance consumes the credit before creating new debt.
+        context.insert(ReceivableActions.advance(
+            receivable: client, from: cash,
+            amount: 1_500_000, date: day(2026, 11, 21), note: ""))
+        try context.save()
+        let after = ReceivableSnapshot.make(account: client)
+        #expect(after.outstanding == 0)
+        #expect(after.prepaid == 500_000)
+    }
+
     @Test func snapshotAgeAndOverdueThreshold() {
         let snapshot = ReceivableSnapshot.make(
             advances: [ReceivableMovement(date: day(2026, 10, 1), amount: 3_000_000)],

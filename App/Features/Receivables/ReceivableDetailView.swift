@@ -34,6 +34,13 @@ struct ReceivableDetailView: View {
                 LabeledContent("Đã thu / xoá") {
                     AmountText(amount: snapshot.totalRepaid)
                 }
+                if snapshot.hasPrepaid {
+                    LabeledContent("Khách ứng trước") {
+                        Text(VND.format(snapshot.prepaid))
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 LabeledContent(
                     "Khoản ứng cũ nhất",
                     value: oldestUnpaidText
@@ -82,11 +89,18 @@ struct ReceivableDetailView: View {
             Text(account.business?.name ?? "Cá nhân")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            AmountText(amount: snapshot.outstanding)
-                .font(.title.bold())
-            Text("Khách đang nợ")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if snapshot.hasPrepaid {
+                Text("Khách ứng trước: \(VND.format(snapshot.prepaid))")
+                    .font(.title.bold())
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            } else {
+                AmountText(amount: snapshot.outstanding)
+                    .font(.title.bold())
+                Text("Khách đang nợ")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

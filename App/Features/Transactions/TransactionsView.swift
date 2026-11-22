@@ -105,7 +105,7 @@ struct TransactionsView: View {
     }
 
     private func delete(_ transaction: LedgerTransaction) {
-        modelContext.delete(transaction)
+        LedgerTransactionDeletion.delete(transaction, in: modelContext)
         try? modelContext.save()
         pendingDelete = nil
     }
