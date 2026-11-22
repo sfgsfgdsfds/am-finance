@@ -454,6 +454,7 @@ struct WalletSyncLinkSheet: View {
     .modelContainer(container)
 }
 
+#if DEBUG
 #Preview("Đã đăng nhập") {
     let container = try! AppModelContainer.make(inMemory: true)
     let context = ModelContext(container)
@@ -489,3 +490,4 @@ struct WalletSyncLinkSheet: View {
     }
     .modelContainer(container)
 }
+#endif

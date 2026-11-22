@@ -89,6 +89,7 @@ struct AppLockSettingsView: View {
     }
 }
 
+#if DEBUG
 #Preview {
     let container = try! AppModelContainer.make(inMemory: true)
     try! SeedData.seedIfNeeded(context: ModelContext(container))
@@ -101,3 +102,4 @@ struct AppLockSettingsView: View {
     }
     .modelContainer(container)
 }
+#endif

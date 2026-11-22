@@ -39,6 +39,7 @@ extension View {
     }
 }
 
+#if DEBUG
 #Preview {
     let defaults = UserDefaults(suiteName: "AppLockProtection.preview")!
     let controller = AppLockController(
@@ -48,3 +49,4 @@ extension View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .appLockProtected(controller: controller)
 }
+#endif
