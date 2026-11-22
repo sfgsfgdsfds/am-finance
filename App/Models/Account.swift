@@ -49,6 +49,14 @@ final class Account {
     @Relationship(deleteRule: .nullify, inverse: \LoanRateChange.account)
     var loanRateChanges: [LoanRateChange]? = []
 
+    /// Recurring rules drawing from this account.
+    @Relationship(deleteRule: .nullify, inverse: \RecurringRule.account)
+    var recurringRules: [RecurringRule]? = []
+
+    /// Recurring transfer rules paying into this account.
+    @Relationship(deleteRule: .nullify, inverse: \RecurringRule.toAccount)
+    var incomingRecurringRules: [RecurringRule]? = []
+
     init(
         id: UUID = UUID(),
         name: String,

@@ -39,10 +39,14 @@ enum BackupRestorer {
             var businesses: [UUID: Business]
             var transactions: [UUID: LedgerTransaction]
             var rateChanges: [UUID: LoanRateChange]
+            var budgets: [UUID: Budget]
+            var recurringRules: [UUID: RecurringRule]
 
             if mode == .replace {
                 for row in try context.fetch(FetchDescriptor<LedgerTransaction>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<LoanRateChange>()) { context.delete(row) }
+                for row in try context.fetch(FetchDescriptor<Budget>()) { context.delete(row) }
+                for row in try context.fetch(FetchDescriptor<RecurringRule>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<Account>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<LedgerCategory>()) { context.delete(row) }
                 for row in try context.fetch(FetchDescriptor<Business>()) { context.delete(row) }
@@ -51,6 +55,8 @@ enum BackupRestorer {
                 businesses = [:]
                 transactions = [:]
                 rateChanges = [:]
+                budgets = [:]
+                recurringRules = [:]
             } else {
                 accounts = try context.fetch(FetchDescriptor<Account>())
                     .reduce(into: [:]) { $0[$1.id] = $1 }
@@ -61,6 +67,10 @@ enum BackupRestorer {
                 transactions = try context.fetch(FetchDescriptor<LedgerTransaction>())
                     .reduce(into: [:]) { $0[$1.id] = $1 }
                 rateChanges = try context.fetch(FetchDescriptor<LoanRateChange>())
+                    .reduce(into: [:]) { $0[$1.id] = $1 }
+                budgets = try context.fetch(FetchDescriptor<Budget>())
+                    .reduce(into: [:]) { $0[$1.id] = $1 }
+                recurringRules = try context.fetch(FetchDescriptor<RecurringRule>())
                     .reduce(into: [:]) { $0[$1.id] = $1 }
             }
 
@@ -137,6 +147,40 @@ enum BackupRestorer {
                     apply(dto, to: change, accounts: accounts)
                     context.insert(change)
                     rateChanges[dto.id] = change
+                    result.inserted += 1
+                }
+            }
+
+            // Budgets re-link their watched category; recurring rules
+            // re-link accounts, category and business — like transactions,
+            // they come after the parent passes.
+            for dto in document.budgets {
+                if let existing = budgets[dto.id] {
+                    apply(dto, to: existing, categories: categories)
+                    result.updated += 1
+                } else {
+                    let budget = Budget(id: dto.id, monthlyLimit: 0)
+                    apply(dto, to: budget, categories: categories)
+                    context.insert(budget)
+                    budgets[dto.id] = budget
+                    result.inserted += 1
+                }
+            }
+
+            for dto in document.recurringRules {
+                if let existing = recurringRules[dto.id] {
+                    apply(dto, to: existing, accounts: accounts,
+                          categories: categories, businesses: businesses)
+                    result.updated += 1
+                } else {
+                    let rule = RecurringRule(
+                        id: dto.id, title: "", kind: .expense, amount: 0,
+                        frequency: .monthly, startDate: .now
+                    )
+                    apply(dto, to: rule, accounts: accounts,
+                          categories: categories, businesses: businesses)
+                    context.insert(rule)
+                    recurringRules[dto.id] = rule
                     result.inserted += 1
                 }
             }
@@ -228,5 +272,48 @@ enum BackupRestorer {
         transaction.externalID = dto.externalID
         transaction.createdAt = dto.createdAt
         transaction.updatedAt = dto.updatedAt
+    }
+
+    /// The watched category is re-linked to a live object; an id that
+    /// exists neither in the backup nor in the store becomes nil — the
+    /// budget then reads as the overall monthly one.
+    private static func apply(
+        _ dto: BackupBudget,
+        to budget: Budget,
+        categories: [UUID: LedgerCategory]
+    ) {
+        budget.monthlyLimit = dto.monthlyLimit
+        budget.isActive = dto.isActive
+        budget.note = dto.note
+        budget.createdAt = dto.createdAt
+        budget.category = dto.categoryID.flatMap { categories[$0] }
+    }
+
+    /// `kindRaw`/`frequencyRaw` are assigned directly so a value this build
+    /// does not know still round-trips verbatim.
+    private static func apply(
+        _ dto: BackupRecurringRule,
+        to rule: RecurringRule,
+        accounts: [UUID: Account],
+        categories: [UUID: LedgerCategory],
+        businesses: [UUID: Business]
+    ) {
+        rule.title = dto.title
+        rule.kindRaw = dto.kindRaw
+        rule.amount = dto.amount
+        rule.note = dto.note
+        rule.account = dto.accountID.flatMap { accounts[$0] }
+        rule.toAccount = dto.toAccountID.flatMap { accounts[$0] }
+        rule.category = dto.categoryID.flatMap { categories[$0] }
+        rule.business = dto.businessID.flatMap { businesses[$0] }
+        rule.frequencyRaw = dto.frequencyRaw
+        rule.interval = dto.interval
+        rule.startDate = dto.startDate
+        rule.endDate = dto.endDate
+        rule.maximumOccurrences = dto.maximumOccurrences
+        rule.lastGeneratedDate = dto.lastGeneratedDate
+        rule.autoCreate = dto.autoCreate
+        rule.isActive = dto.isActive
+        rule.createdAt = dto.createdAt
     }
 }

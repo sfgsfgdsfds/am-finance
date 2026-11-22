@@ -334,6 +334,197 @@ struct BackupTests {
         #expect(newChange.account?.id == newLoanID)
     }
 
+    // MARK: - Budgets and recurring rules
+
+    @Test func replaceRestoreRoundTripsBudgetsAndRecurringRules() throws {
+        let context = try makeContext()
+        let bank = Account(name: "Ngân hàng", kind: .bank, openingBalance: 5_000_000)
+        let wallet = Account(name: "Ví", kind: .eWallet)
+        let food = LedgerCategory(name: "Ăn uống", kind: .expense)
+        let web = Business(name: "Làm web")
+        context.insert(bank)
+        context.insert(wallet)
+        context.insert(food)
+        context.insert(web)
+
+        let overall = Budget(monthlyLimit: 10_000_000, note: "Tổng chi")
+        overall.createdAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let foodBudget = Budget(monthlyLimit: 3_000_000, isActive: false,
+                                note: "Ăn uống", category: food)
+        foodBudget.createdAt = Date(timeIntervalSince1970: 1_700_000_100)
+        context.insert(overall)
+        context.insert(foodBudget)
+
+        let rule = RecurringRule(
+            title: "Thuê nhà", kind: .expense, amount: 7_000_000,
+            note: "Trả định kỳ", account: bank, category: food, business: web,
+            frequency: .monthly, interval: 2,
+            startDate: day(2026, 1, 5), endDate: day(2027, 1, 5),
+            maximumOccurrences: 12,
+            lastGeneratedDate: day(2026, 9, 5),
+            autoCreate: true, isActive: true
+        )
+        rule.createdAt = Date(timeIntervalSince1970: 1_700_000_200)
+        let topUp = RecurringRule(
+            title: "Nạp ví", kind: .transfer, amount: 500_000,
+            account: bank, toAccount: wallet,
+            frequency: .weekly,
+            startDate: day(2026, 11, 2),
+            autoCreate: false, isActive: false
+        )
+        topUp.createdAt = Date(timeIntervalSince1970: 1_700_000_300)
+        context.insert(rule)
+        context.insert(topUp)
+        try context.save()
+
+        let overallID = overall.id, foodBudgetID = foodBudget.id
+        let ruleID = rule.id, topUpID = topUp.id
+        let bankID = bank.id, walletID = wallet.id
+        let foodID = food.id, webID = web.id
+
+        let data = try BackupCodec.encode(
+            context: context, exportedAt: Date(timeIntervalSince1970: 1_763_791_500)
+        )
+        let document = try BackupCodec.decode(data)
+        #expect(document.budgets.count == 2)
+        #expect(document.recurringRules.count == 2)
+
+        let result = try BackupRestorer.restore(document, mode: .replace, into: context)
+        #expect(result.inserted == 2 + 1 + 1 + 2 + 2) // accounts+category+business+budgets+rules
+
+        let budgets = try fetchAll(Budget.self, in: context)
+        #expect(budgets.count == 2)
+        let rOverall = try #require(budgets.first { $0.id == overallID })
+        #expect(rOverall.monthlyLimit == 10_000_000)
+        #expect(rOverall.isActive)
+        #expect(rOverall.note == "Tổng chi")
+        #expect(rOverall.category == nil)
+        #expect(rOverall.createdAt == Date(timeIntervalSince1970: 1_700_000_000))
+
+        let rFoodBudget = try #require(budgets.first { $0.id == foodBudgetID })
+        #expect(rFoodBudget.monthlyLimit == 3_000_000)
+        #expect(!rFoodBudget.isActive)
+        #expect(rFoodBudget.category?.id == foodID)
+
+        let rules = try fetchAll(RecurringRule.self, in: context)
+        #expect(rules.count == 2)
+        let rRule = try #require(rules.first { $0.id == ruleID })
+        #expect(rRule.title == "Thuê nhà")
+        #expect(rRule.kindRaw == "expense")
+        #expect(rRule.amount == 7_000_000)
+        #expect(rRule.note == "Trả định kỳ")
+        #expect(rRule.account?.id == bankID)
+        #expect(rRule.toAccount == nil)
+        #expect(rRule.category?.id == foodID)
+        #expect(rRule.business?.id == webID)
+        #expect(rRule.frequencyRaw == "monthly")
+        #expect(rRule.interval == 2)
+        #expect(rRule.startDate == day(2026, 1, 5))
+        #expect(rRule.endDate == day(2027, 1, 5))
+        #expect(rRule.maximumOccurrences == 12)
+        #expect(rRule.lastGeneratedDate == day(2026, 9, 5))
+        #expect(rRule.autoCreate)
+        #expect(rRule.isActive)
+        #expect(rRule.createdAt == Date(timeIntervalSince1970: 1_700_000_200))
+
+        let rTopUp = try #require(rules.first { $0.id == topUpID })
+        #expect(rTopUp.kindRaw == "transfer")
+        #expect(rTopUp.account?.id == bankID)
+        #expect(rTopUp.toAccount?.id == walletID)
+        #expect(rTopUp.frequencyRaw == "weekly")
+        #expect(rTopUp.interval == 1)
+        #expect(rTopUp.endDate == nil)
+        #expect(rTopUp.maximumOccurrences == nil)
+        #expect(rTopUp.lastGeneratedDate == nil)
+        #expect(!rTopUp.autoCreate)
+        #expect(!rTopUp.isActive)
+    }
+
+    @Test func mergeUpsertsBudgetsAndRecurringRulesAndRelinks() throws {
+        let context = try makeContext()
+        let food = LedgerCategory(name: "Ăn uống", kind: .expense)
+        let bank = Account(name: "Ngân hàng", kind: .bank)
+        context.insert(food)
+        context.insert(bank)
+
+        let budget = Budget(monthlyLimit: 1_000_000, category: food)
+        let rule = RecurringRule(
+            title: "Gói mềm", kind: .expense, amount: 100_000,
+            account: bank, category: food,
+            frequency: .monthly, startDate: day(2026, 1, 5)
+        )
+        context.insert(budget)
+        context.insert(rule)
+        try context.save()
+
+        let newCategoryID = UUID()
+        let newBudgetID = UUID()
+        let newRuleID = UUID()
+
+        var updatedBudget = BackupBudget(budget)
+        updatedBudget.monthlyLimit = 2_000_000
+        updatedBudget.isActive = false
+        updatedBudget.note = "đổi"
+
+        var updatedRule = BackupRecurringRule(rule)
+        updatedRule.title = "Gói mềm mới"
+        updatedRule.amount = 150_000
+        updatedRule.frequencyRaw = "weekly"
+        updatedRule.maximumOccurrences = 8
+
+        var insertedBudget = BackupBudget(
+            Budget(id: newBudgetID, monthlyLimit: 5_000_000)
+        )
+        insertedBudget.categoryID = newCategoryID
+
+        var insertedRule = BackupRecurringRule(
+            RecurringRule(id: newRuleID, title: "Mới", kind: .income,
+                          amount: 9_000_000, frequency: .yearly,
+                          startDate: day(2026, 1, 1))
+        )
+        insertedRule.categoryID = newCategoryID
+        insertedRule.accountID = UUID() // dangling — must restore as nil
+
+        let document = BackupDocument(
+            formatVersion: 3, exportedAt: .now, appVersion: "test",
+            accounts: [BackupAccount(bank)],
+            categories: [
+                BackupCategory(food),
+                BackupCategory(LedgerCategory(id: newCategoryID, name: "Mới", kind: .expense)),
+            ],
+            businesses: [], transactions: [],
+            budgets: [updatedBudget, insertedBudget],
+            recurringRules: [updatedRule, insertedRule]
+        )
+
+        let result = try BackupRestorer.restore(document, mode: .merge, into: context)
+
+        #expect(result.inserted == 3) // new category + budget + rule
+        #expect(result.updated == 4)  // account + category + budget + rule
+
+        #expect(budget.monthlyLimit == 2_000_000)
+        #expect(!budget.isActive)
+        #expect(budget.note == "đổi")
+        #expect(budget.category?.id == food.id)
+
+        #expect(rule.title == "Gói mềm mới")
+        #expect(rule.amount == 150_000)
+        #expect(rule.frequencyRaw == "weekly")
+        #expect(rule.maximumOccurrences == 8)
+        #expect(rule.account?.id == bank.id)
+
+        let budgets = try fetchAll(Budget.self, in: context)
+        let rBudget = try #require(budgets.first { $0.id == newBudgetID })
+        #expect(rBudget.monthlyLimit == 5_000_000)
+        #expect(rBudget.category?.id == newCategoryID)
+
+        let rules = try fetchAll(RecurringRule.self, in: context)
+        let rRule = try #require(rules.first { $0.id == newRuleID })
+        #expect(rRule.frequencyRaw == "yearly")
+        #expect(rRule.category?.id == newCategoryID)
+        #expect(rRule.account == nil)
+    }
+
     /// The backup covers every model type in the schema — this fails the
     /// moment a new `@Model` lands in `AppSchema.allModels` without backup
     /// support, so one can never be forgotten.
@@ -365,6 +556,8 @@ struct BackupTests {
         let document = try BackupCodec.decode(Data(json.utf8))
         #expect(document.formatVersion == 1)
         #expect(document.loanRateChanges.isEmpty)
+        #expect(document.budgets.isEmpty)
+        #expect(document.recurringRules.isEmpty)
 
         let result = try BackupRestorer.restore(document, mode: .merge, into: context)
         #expect(result.inserted == 1)
@@ -375,15 +568,43 @@ struct BackupTests {
         #expect(restored.openingBalance == -1_500_000)
     }
 
+    /// A v2 file has `loanRateChanges` but no `budgets`/`recurringRules`
+    /// keys — it still decodes and restores with both read as empty.
+    @Test func version2FileStillDecodesAndRestores() throws {
+        let context = try makeContext()
+        let json = """
+        {"formatVersion": 2,
+         "exportedAt": "2026-11-10T00:00:00Z",
+         "appVersion": "1.0",
+         "accounts": [{
+            "id": "5EED0000-0000-4000-8000-00000000BB01",
+            "name": "Tiền mặt", "kindRaw": "cash",
+            "openingBalance": 500000, "icon": "banknote.fill",
+            "colorHex": "34C759", "note": "", "sortOrder": 0,
+            "isArchived": false,
+            "createdAt": "2026-01-01T00:00:00Z"}],
+         "categories": [], "businesses": [], "transactions": [],
+         "loanRateChanges": []}
+        """
+        let document = try BackupCodec.decode(Data(json.utf8))
+        #expect(document.formatVersion == 2)
+        #expect(document.budgets.isEmpty)
+        #expect(document.recurringRules.isEmpty)
+
+        let result = try BackupRestorer.restore(document, mode: .merge, into: context)
+        #expect(result.inserted == 1)
+        #expect(try fetchAll(Account.self, in: context).count == 1)
+    }
+
     // MARK: - Rejected files
 
     @Test func decodeRejectsNewerFormatVersion() throws {
         let json = """
-        {"formatVersion": 3, "exportedAt": "2026-11-22T07:05:00Z",
+        {"formatVersion": 4, "exportedAt": "2026-11-22T07:05:00Z",
          "appVersion": "9", "accounts": [], "categories": [],
          "businesses": [], "transactions": [], "loanRateChanges": []}
         """
-        #expect(throws: BackupError.unsupportedVersion(found: 3)) {
+        #expect(throws: BackupError.unsupportedVersion(found: 4)) {
             _ = try BackupCodec.decode(Data(json.utf8))
         }
     }
@@ -412,10 +633,10 @@ struct BackupTests {
         let context = try makeContext()
         try SeedData.seedIfNeeded(context: context)
         let future = BackupDocument(
-            formatVersion: 3, exportedAt: .now, appVersion: "x",
+            formatVersion: 4, exportedAt: .now, appVersion: "x",
             accounts: [], categories: [], businesses: [], transactions: []
         )
-        #expect(throws: BackupError.unsupportedVersion(found: 3)) {
+        #expect(throws: BackupError.unsupportedVersion(found: 4)) {
             _ = try BackupRestorer.restore(future, mode: .replace, into: context)
         }
         // Even in replace mode nothing was deleted or inserted.

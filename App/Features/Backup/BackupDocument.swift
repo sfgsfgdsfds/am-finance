@@ -7,8 +7,9 @@ import Foundation
 ///
 /// Version history:
 /// - 1: accounts, categories, businesses, transactions.
-/// - 2: adds `loanRateChanges`. v1 files still decode — the absent key is
-///   read as an empty list.
+/// - 2: adds `loanRateChanges`.
+/// - 3: adds `budgets` and `recurringRules`. Older files still decode —
+///   absent keys are read as empty lists.
 struct BackupDocument: Codable, Equatable, Sendable {
     var formatVersion: Int
     var exportedAt: Date
@@ -18,6 +19,8 @@ struct BackupDocument: Codable, Equatable, Sendable {
     var businesses: [BackupBusiness]
     var transactions: [BackupTransaction]
     var loanRateChanges: [BackupLoanRateChange]
+    var budgets: [BackupBudget]
+    var recurringRules: [BackupRecurringRule]
 
     init(
         formatVersion: Int,
@@ -27,7 +30,9 @@ struct BackupDocument: Codable, Equatable, Sendable {
         categories: [BackupCategory],
         businesses: [BackupBusiness],
         transactions: [BackupTransaction],
-        loanRateChanges: [BackupLoanRateChange] = []
+        loanRateChanges: [BackupLoanRateChange] = [],
+        budgets: [BackupBudget] = [],
+        recurringRules: [BackupRecurringRule] = []
     ) {
         self.formatVersion = formatVersion
         self.exportedAt = exportedAt
@@ -37,9 +42,12 @@ struct BackupDocument: Codable, Equatable, Sendable {
         self.businesses = businesses
         self.transactions = transactions
         self.loanRateChanges = loanRateChanges
+        self.budgets = budgets
+        self.recurringRules = recurringRules
     }
 
-    /// `loanRateChanges` is the only field a v1 file may lack.
+    /// Fields added after v1 are optional on read: a v1 file lacks
+    /// `loanRateChanges`, v1/v2 files lack `budgets`/`recurringRules`.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         formatVersion = try container.decode(Int.self, forKey: .formatVersion)
@@ -51,6 +59,12 @@ struct BackupDocument: Codable, Equatable, Sendable {
         transactions = try container.decode([BackupTransaction].self, forKey: .transactions)
         loanRateChanges = try container.decodeIfPresent(
             [BackupLoanRateChange].self, forKey: .loanRateChanges
+        ) ?? []
+        budgets = try container.decodeIfPresent(
+            [BackupBudget].self, forKey: .budgets
+        ) ?? []
+        recurringRules = try container.decodeIfPresent(
+            [BackupRecurringRule].self, forKey: .recurringRules
         ) ?? []
     }
 }
@@ -174,6 +188,75 @@ extension BackupLoanRateChange {
         fromInstallment = change.fromInstallment
         annualRatePercent = change.annualRatePercent
         accountID = change.account?.id
+    }
+}
+
+/// Stored fields of `Budget` (added in formatVersion 3). The watched
+/// category travels as `categoryID` and is re-linked on restore; nil is the
+/// overall monthly budget.
+struct BackupBudget: Codable, Equatable, Sendable {
+    var id: UUID
+    var monthlyLimit: Int64
+    var isActive: Bool
+    var note: String
+    var createdAt: Date
+    var categoryID: UUID?
+}
+
+extension BackupBudget {
+    init(_ budget: Budget) {
+        id = budget.id
+        monthlyLimit = budget.monthlyLimit
+        isActive = budget.isActive
+        note = budget.note
+        createdAt = budget.createdAt
+        categoryID = budget.category?.id
+    }
+}
+
+/// Stored fields of `RecurringRule` (added in formatVersion 3).
+/// Relationships travel as UUIDs and are re-linked on restore.
+struct BackupRecurringRule: Codable, Equatable, Sendable {
+    var id: UUID
+    var title: String
+    var kindRaw: String
+    var amount: Int64
+    var note: String
+    var accountID: UUID?
+    var toAccountID: UUID?
+    var categoryID: UUID?
+    var businessID: UUID?
+    var frequencyRaw: String
+    var interval: Int
+    var startDate: Date
+    var endDate: Date?
+    var maximumOccurrences: Int?
+    var lastGeneratedDate: Date?
+    var autoCreate: Bool
+    var isActive: Bool
+    var createdAt: Date
+}
+
+extension BackupRecurringRule {
+    init(_ rule: RecurringRule) {
+        id = rule.id
+        title = rule.title
+        kindRaw = rule.kindRaw
+        amount = rule.amount
+        note = rule.note
+        accountID = rule.account?.id
+        toAccountID = rule.toAccount?.id
+        categoryID = rule.category?.id
+        businessID = rule.business?.id
+        frequencyRaw = rule.frequencyRaw
+        interval = rule.interval
+        startDate = rule.startDate
+        endDate = rule.endDate
+        maximumOccurrences = rule.maximumOccurrences
+        lastGeneratedDate = rule.lastGeneratedDate
+        autoCreate = rule.autoCreate
+        isActive = rule.isActive
+        createdAt = rule.createdAt
     }
 }
 

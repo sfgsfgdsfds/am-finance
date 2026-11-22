@@ -16,6 +16,9 @@ final class Business {
     @Relationship(deleteRule: .nullify, inverse: \LedgerTransaction.business)
     var transactions: [LedgerTransaction]? = []
 
+    @Relationship(deleteRule: .nullify, inverse: \RecurringRule.business)
+    var recurringRules: [RecurringRule]? = []
+
     init(
         id: UUID = UUID(),
         name: String,
