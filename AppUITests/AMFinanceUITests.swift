@@ -530,7 +530,7 @@ final class AMFinanceUITests: XCTestCase {
                       "business card missing")
         // Card links surface as buttons whose combined label starts with
         // the row title — the inner text alone is not always hittable.
-        let hubLink = hittableOrRevealed(businessCard
+        let hubLink = hittableOrRevealedInOuter(businessCard
             .descendants(matching: .any)
             .matching(NSPredicate(format: "label BEGINSWITH %@", "Kinh doanh")))
         XCTAssertNotNil(hubLink, "business card header missing")
@@ -541,7 +541,7 @@ final class AMFinanceUITests: XCTestCase {
             "business card header did not push the hub")
         goBack(to: "Tổng quan")
 
-        let businessRow = hittableOrRevealed(scopedElement("dashboard.businessCard")
+        let businessRow = hittableOrRevealedInOuter(scopedElement("dashboard.businessCard")
             .descendants(matching: .any)
             .matching(NSPredicate(format: "label BEGINSWITH %@", "Làm web")))
         XCTAssertNotNil(businessRow, "business card row missing")
@@ -817,6 +817,28 @@ final class AMFinanceUITests: XCTestCase {
         for _ in 0..<10 {
             frontScrollable().swipeUp()
             if let element = firstHittableMatch(query, timeout: 0.5) {
+                return element
+            }
+        }
+        return nil
+    }
+
+    /// Like `hittableOrRevealed` but swipes the tallest scroll view on
+    /// screen — on the dashboard that is the outer ScrollView, whereas
+    /// `frontScrollable()` can land on the accounts card's small
+    /// horizontal scroller, whose gestures leak to the floating tab bar.
+    private func hittableOrRevealedInOuter(
+        _ query: XCUIElementQuery
+    ) -> XCUIElement? {
+        if let element = firstHittableMatch(query, timeout: 3) {
+            return element
+        }
+        let scroller = app.scrollViews.allElementsBoundByIndex
+            .max(by: { $0.frame.height < $1.frame.height })
+            ?? (app as XCUIElement)
+        for _ in 0..<12 {
+            scroller.swipeUp()
+            if let element = firstHittableMatch(query, timeout: 0.4) {
                 return element
             }
         }
