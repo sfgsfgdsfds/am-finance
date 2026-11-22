@@ -10,6 +10,9 @@ struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var quickAddShown = false
+    /// Selected tab — "Tổng quan" (0) by default, which is also where a
+    /// rebuilt tree lands after the data reset.
+    @State private var selectedTab = 0
     /// Last time the activation housekeeping ran — the once-a-minute cap.
     @State private var lastActivationWork = Date.distantPast
 
@@ -39,23 +42,27 @@ struct RootTabView: View {
     }
 
     private var tabContent: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             DashboardView(syncCoordinator: syncCoordinator)
                 .tabItem {
                     Label("Tổng quan", systemImage: "house.fill")
                 }
+                .tag(0)
             TransactionsView()
                 .tabItem {
                     Label("Giao dịch", systemImage: "arrow.left.arrow.right")
                 }
+                .tag(1)
             DebtsView()
                 .tabItem {
                     Label("Nợ & Thẻ", systemImage: "creditcard.fill")
                 }
+                .tag(2)
             ReportsView()
                 .tabItem {
                     Label("Báo cáo", systemImage: "chart.bar.fill")
                 }
+                .tag(3)
         }
         .overlay(alignment: .bottom) {
             quickAddButton

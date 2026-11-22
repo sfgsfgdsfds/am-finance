@@ -202,8 +202,19 @@ struct LoanInterestBasisStore {
         defaults.set(basis.rawValue, forKey: Self.key(for: accountID))
     }
 
+    /// Drops every stored basis choice — the "Xoá tất cả" reset uses it.
+    /// Keys are per-account, so the removal scans for the prefix.
+    func removeAll() {
+        for key in defaults.dictionaryRepresentation().keys
+        where key.hasPrefix(Self.keyPrefix) {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    private static let keyPrefix = "loanInterestBasis."
+
     private static func key(for accountID: UUID) -> String {
-        "loanInterestBasis.\(accountID.uuidString)"
+        "\(keyPrefix)\(accountID.uuidString)"
     }
 }
 

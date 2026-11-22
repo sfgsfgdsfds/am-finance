@@ -45,15 +45,7 @@ enum BackupRestorer {
             var rentalLeases: [UUID: RentalLease]
 
             if mode == .replace {
-                for row in try context.fetch(FetchDescriptor<LedgerTransaction>()) { context.delete(row) }
-                for row in try context.fetch(FetchDescriptor<LoanRateChange>()) { context.delete(row) }
-                for row in try context.fetch(FetchDescriptor<Budget>()) { context.delete(row) }
-                for row in try context.fetch(FetchDescriptor<RecurringRule>()) { context.delete(row) }
-                for row in try context.fetch(FetchDescriptor<RentalLease>()) { context.delete(row) }
-                for row in try context.fetch(FetchDescriptor<RentalUnit>()) { context.delete(row) }
-                for row in try context.fetch(FetchDescriptor<Account>()) { context.delete(row) }
-                for row in try context.fetch(FetchDescriptor<LedgerCategory>()) { context.delete(row) }
-                for row in try context.fetch(FetchDescriptor<Business>()) { context.delete(row) }
+                try deleteAllRows(in: context)
                 accounts = [:]
                 categories = [:]
                 businesses = [:]
@@ -234,6 +226,24 @@ enum BackupRestorer {
             context.rollback()
             throw error
         }
+    }
+
+    /// Deletes every row of every model in `AppSchema` — children before
+    /// parents so relationship nullification never fights the deletes.
+    /// Nothing is saved here: the caller's `save()` commits the deletions
+    /// together with whatever it does next (`.replace` restore inserts,
+    /// the data reset's reseed). Shared by `.replace` restores and the
+    /// "Xoá tất cả" reset.
+    static func deleteAllRows(in context: ModelContext) throws {
+        for row in try context.fetch(FetchDescriptor<LedgerTransaction>()) { context.delete(row) }
+        for row in try context.fetch(FetchDescriptor<LoanRateChange>()) { context.delete(row) }
+        for row in try context.fetch(FetchDescriptor<Budget>()) { context.delete(row) }
+        for row in try context.fetch(FetchDescriptor<RecurringRule>()) { context.delete(row) }
+        for row in try context.fetch(FetchDescriptor<RentalLease>()) { context.delete(row) }
+        for row in try context.fetch(FetchDescriptor<RentalUnit>()) { context.delete(row) }
+        for row in try context.fetch(FetchDescriptor<Account>()) { context.delete(row) }
+        for row in try context.fetch(FetchDescriptor<LedgerCategory>()) { context.delete(row) }
+        for row in try context.fetch(FetchDescriptor<Business>()) { context.delete(row) }
     }
 
     // MARK: - Applying DTOs

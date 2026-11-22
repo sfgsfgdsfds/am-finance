@@ -210,6 +210,71 @@ final class AMFinanceUITests: XCTestCase {
                            dialogTitle: "Xoá giao dịch này?")
         waitForDisappearance(app.staticTexts["Di chuyển"],
                              message: "deleted row still visible")
+
+        // Settings → Xoá dữ liệu → level A wipes the remaining rows,
+        // rebuilds the root onto "Tổng quan", leaves "Giao dịch" on its
+        // empty state and still opens an account detail without crashing.
+        openTab("Tổng quan")
+        let settingsGear = app.buttons["Cài đặt"]
+        XCTAssertTrue(waitReady(settingsGear, timeout: 8),
+                      "settings gear missing")
+        settingsGear.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Cài đặt"]
+                .waitForExistence(timeout: 5),
+            "settings screen missing")
+        tapOption("Xoá dữ liệu")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Xoá dữ liệu"]
+                .waitForExistence(timeout: 5),
+            "data reset screen missing")
+        tapOption("Xoá toàn bộ giao dịch")
+
+        // First confirmation step — the dialog button carries the count.
+        confirmDestructive(label: "Xoá 3 giao dịch",
+                           dialogTitle: "Xoá dữ liệu?")
+
+        // Second step — the destructive button only enables after
+        // typing XOA into the alert's field.
+        let typeField = app.alerts.textFields.firstMatch
+        XCTAssertTrue(typeField.waitForExistence(timeout: 5),
+                      "typed-confirmation field missing")
+        typeField.tap()
+        typeField.typeText("XOA")
+        tapWhenReady(app.alerts.buttons["Xoá"],
+                     "typed-confirmation delete button missing")
+        // Success notice — dismissing it rebuilds the root view.
+        XCTAssertTrue(
+            app.alerts["Đã xoá dữ liệu"].waitForExistence(timeout: 8),
+            "reset success alert missing")
+        tapWhenReady(app.alerts.buttons["OK"], "success OK missing")
+
+        XCTAssertTrue(
+            app.staticTexts["Tài sản ròng"].waitForExistence(timeout: 10),
+            "dashboard did not come back after reset")
+        openTab("Giao dịch")
+        XCTAssertTrue(
+            app.staticTexts["Chưa có giao dịch"].waitForExistence(timeout: 5),
+            "transactions empty state missing after reset")
+
+        // The seeded cash account's detail must still open — no screen
+        // may hold a reference to a deleted object.
+        openTab("Tổng quan")
+        let netWorthAfter = scopedElement("dashboard.netWorthCard")
+        XCTAssertTrue(netWorthAfter.waitForExistence(timeout: 8),
+                      "net-worth card missing after reset")
+        netWorthAfter.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Tài khoản"]
+                .waitForExistence(timeout: 5),
+            "accounts screen missing after reset")
+        tapRowAny("Tiền mặt")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Tiền mặt"]
+                .waitForExistence(timeout: 5),
+            "account detail missing after reset")
+        goBack(to: "Tài khoản")
+        goBack(to: "Tổng quan")
     }
 
     // MARK: - 3. Accounts, cards, loans, debts
@@ -1016,7 +1081,7 @@ final class AMFinanceUITests: XCTestCase {
             return element
         }
         for _ in 0..<10 {
-            frontScrollable().swipeUp()
+            swipeUpIfAlive(frontScrollable())
             if let element = firstHittableMatch(query, timeout: 0.5) {
                 return element
             }
@@ -1038,7 +1103,7 @@ final class AMFinanceUITests: XCTestCase {
             .max(by: { $0.frame.height < $1.frame.height })
             ?? (app as XCUIElement)
         for _ in 0..<12 {
-            scroller.swipeUp()
+            swipeUpIfAlive(scroller)
             if let element = firstHittableMatch(query, timeout: 0.4) {
                 return element
             }
@@ -1186,10 +1251,20 @@ final class AMFinanceUITests: XCTestCase {
     private func reveal(_ element: XCUIElement, maxSwipes: Int = 8) -> Bool {
         var swipes = 0
         while !(element.exists && element.isHittable) && swipes < maxSwipes {
-            frontScrollable().swipeUp()
+            swipeUpIfAlive(frontScrollable())
             swipes += 1
         }
         return element.exists && element.isHittable
+    }
+
+    /// Swipes only when the element still resolves — `frontScrollable()`
+    /// returns an index-bound element and a push that settles between the
+    /// pick and the swipe can drop one of the two lists, turning the
+    /// gesture into an unrecoverable "no matches" failure.
+    private func swipeUpIfAlive(_ element: XCUIElement) {
+        if element.exists {
+            element.swipeUp()
+        }
     }
 
     /// Waits until `element` exists AND is hittable — taps must not land

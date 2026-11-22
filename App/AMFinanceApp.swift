@@ -7,6 +7,10 @@ struct AMFinanceApp: App {
     /// The one shared coordinator behind `walletSyncAutoRefresh` and the
     /// dashboard banner — nil during UI tests, so no wallet sync ever runs.
     private let syncCoordinator: WalletSyncCoordinator?
+    /// Rebuilt when "Xoá dữ liệu" finishes: a fresh view identity drops
+    /// every screen's references to deleted SwiftData objects and returns
+    /// every navigation stack to its root.
+    @State private var dataResetToken = UUID()
 
     init() {
         do {
@@ -38,6 +42,12 @@ struct AMFinanceApp: App {
                 RootTabView(syncCoordinator: syncCoordinator)
                     .modelContainer(container)
                     .backgroundRefreshOnScenePhase()
+                    .id(dataResetToken)
+                    .onReceive(NotificationCenter.default.publisher(
+                        for: .dataResetCompleted
+                    )) { _ in
+                        dataResetToken = UUID()
+                    }
             } else {
                 Text("Không thể mở dữ liệu. Vui lòng khởi động lại ứng dụng.")
                     .multilineTextAlignment(.center)

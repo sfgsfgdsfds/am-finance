@@ -117,6 +117,8 @@ struct CSVImportSavedMapping: Equatable, Codable, Sendable {
 protocol CSVImportMappingStoring: Sendable {
     func mapping(for accountID: UUID) -> CSVImportSavedMapping?
     func saveMapping(_ mapping: CSVImportSavedMapping, for accountID: UUID)
+    /// Drops every remembered mapping — the "Xoá tất cả" reset uses it.
+    func removeAllMappings()
 }
 
 /// One JSON blob `[accountUUID: mapping]` in UserDefaults.
@@ -151,6 +153,10 @@ final class CSVImportMappingStore: CSVImportMappingStoring, @unchecked Sendable 
         copy[accountID.uuidString] = mapping
         all = copy
     }
+
+    func removeAllMappings() {
+        defaults.removeObject(forKey: Self.key)
+    }
 }
 
 /// Volatile `CSVImportMappingStoring` for tests and previews.
@@ -167,5 +173,9 @@ final class CSVImportInMemoryMappingStore: CSVImportMappingStoring, @unchecked S
 
     func saveMapping(_ mapping: CSVImportSavedMapping, for accountID: UUID) {
         saved[accountID] = mapping
+    }
+
+    func removeAllMappings() {
+        saved = [:]
     }
 }
