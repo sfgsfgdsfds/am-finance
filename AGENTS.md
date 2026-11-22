@@ -105,8 +105,22 @@ workers know what already exists. Pushed views must not create their own
   Views must read `LedgerBalanceStores.shared(for: container)` (e.g.
   `ledger.balance(of:)`), not the per-account relationship walks;
   `Account.balance` stays the fallback for non-UI callers and stale reads.
-- Invalidation is automatic: `ModelContext.didSave` bumps a version, and a
-  `LedgerAggregateFetcher` model actor recomputes off-main. Any write that
+- Invalidation is defence-in-depth — on iOS 17 SwiftData does not post
+  `ModelContext.didSave` reliably (fixed in iOS 18), so three layers work
+  together: (1) the store observes `ModelContext.didSave` plus the Core
+  Data notifications still emitted underneath it on iOS 17
+  (`NSManagedObjectContextDidSave`, `NSPersistentStoreRemoteChange`);
+  (2) `ledger.refreshIfStale()` runs a cheap `LedgerFingerprint`
+  (transaction count + newest `updatedAt`, account count + an
+  opening-balance checksum — `fetchCount` and limit-1 fetches only) on
+  every read, throttled to once a second, plus on `.active` scene phase
+  in `AMFinanceApp` and inside `ledger.saveAndCheck(context)` for
+  app-side saves; (3) while stale or merely suspected stale (fingerprint
+  mismatch or pending unsaved writes on `mainContext`), reads fall back
+  to `account.balance` et al. — never a stale cached number. A
+  `LedgerAggregateFetcher` model actor recomputes off-main.
+- Every in-place `LedgerTransaction` edit must stamp `updatedAt = .now` —
+  the fingerprint's newest-stamp check depends on it. Any write that
   bypasses `save()` must call `ledger.invalidate()` manually.
 - The 30k-row benchmark suite is `PerformanceBenchmark` in
   `AppTests/PerformanceTests.swift` — gated off by default; enable by

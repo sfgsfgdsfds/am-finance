@@ -41,7 +41,7 @@ struct AMFinanceApp: App {
             if let container {
                 RootTabView(syncCoordinator: syncCoordinator)
                     .modelContainer(container)
-                    .backgroundRefreshOnScenePhase()
+                    .appScenePhaseHooks(container: container)
                     .id(dataResetToken)
                     .onReceive(NotificationCenter.default.publisher(
                         for: .dataResetCompleted
@@ -63,23 +63,37 @@ struct AMFinanceApp: App {
     }
 }
 
-/// Keeps one refresh request outstanding: every time the scene goes to
-/// the background the next `vn.amx.finance.refresh` is submitted ~15
-/// minutes out (the run itself also re-arms when it finishes). Read at
-/// view level — the App struct's own environment carries no scenePhase.
-private struct BackgroundRefreshPhaseModifier: ViewModifier {
+/// Scene-phase hooks owned by the App struct:
+/// - `.background`: keep one `vn.amx.finance.refresh` request outstanding,
+///   submitted ~15 minutes out (the run itself also re-arms when it
+///   finishes).
+/// - `.active`: force the ledger fingerprint check — on iOS 17 a write can
+///   commit without any save notification reaching the balance store, and
+///   returning to the foreground is the last moment a stale aggregate
+///   could hide behind the throttle.
+/// Read at view level — the App struct's own environment carries no
+/// scenePhase.
+private struct AppScenePhaseModifier: ViewModifier {
     @Environment(\.scenePhase) private var scenePhase
+    let container: ModelContainer
 
     func body(content: Content) -> some View {
         content.onChange(of: scenePhase) { _, phase in
-            guard phase == .background else { return }
-            BackgroundRefreshScheduler.scheduleNext()
+            switch phase {
+            case .active:
+                LedgerBalanceStores.shared(for: container)
+                    .refreshIfStale(force: true)
+            case .background:
+                BackgroundRefreshScheduler.scheduleNext()
+            default:
+                break
+            }
         }
     }
 }
 
 extension View {
-    fileprivate func backgroundRefreshOnScenePhase() -> some View {
-        modifier(BackgroundRefreshPhaseModifier())
+    fileprivate func appScenePhaseHooks(container: ModelContainer) -> some View {
+        modifier(AppScenePhaseModifier(container: container))
     }
 }

@@ -70,6 +70,24 @@ enum PerfOps {
         }
     }
 
+    /// The notification-free staleness check behind `refreshIfStale`:
+    /// two `fetchCount`s, one limit-1 sorted fetch and the small account
+    /// scan. Runs inside view bodies throttled to once a second, so it
+    /// must stay a single-digit-millisecond query burst.
+    static func fingerprintRead(
+        _ ds: PerformanceSeeder.Dataset, tag: String
+    ) throws {
+        var fingerprint = LedgerFingerprint()
+        let ms = PerfClock.ms("\(tag).fingerprint.read.x10") {
+            for _ in 0..<10 {
+                fingerprint = try! LedgerFingerprint.read(in: ds.context)
+            }
+        }
+        #expect(fingerprint.transactionCount == ds.transactionCount)
+        #expect(fingerprint.accountCount == ds.accounts.count)
+        #expect(ms < 500)
+    }
+
     /// Old: card / receivable / loan detail inputs walk relationships.
     static func accountDetailInputs(
         _ ds: PerformanceSeeder.Dataset, tag: String
@@ -388,6 +406,10 @@ struct PerformanceTests {
         try PerfOps.balances(dataset(), tag: "guard")
     }
 
+    @Test func fingerprintRead() throws {
+        try PerfOps.fingerprintRead(dataset(), tag: "guard")
+    }
+
     @Test func accountDetailInputs() throws {
         try PerfOps.accountDetailInputs(dataset(), tag: "guard")
     }
@@ -516,6 +538,10 @@ struct PerformanceBenchmark {
 
     @Test func balanceReads() throws {
         try PerfOps.balances(dataset(), tag: "bench")
+    }
+
+    @Test func fingerprintRead() throws {
+        try PerfOps.fingerprintRead(dataset(), tag: "bench")
     }
 
     @Test func accountDetailInputs() throws {

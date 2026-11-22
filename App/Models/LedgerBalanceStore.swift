@@ -1,3 +1,4 @@
+import CoreData
 import Foundation
 import SwiftData
 import FinanceCore
@@ -38,12 +39,70 @@ struct LedgerAggregate: Equatable, Sendable {
     var activeIDs: Set<UUID> = []
 }
 
+/// A cheap, notification-free fingerprint of the two inputs the aggregate
+/// reads: the transaction table (row count + newest `updatedAt`) and the
+/// account table (row count + an order-free fold of each account's id,
+/// opening balance and created stamp). Everything is read through
+/// `fetchCount` and limit-1 fetches plus the (small) account table scan,
+/// so the check stays O(accounts) even on a 30k-row ledger.
+///
+/// Coverage: every in-place edit path stamps `updatedAt` (editor, inbox
+/// accept, sync rules and transfer conversion, AI suggestions, backup
+/// restore), inserts/deletes move the row count, and opening-balance
+/// edits move `accountChecksum`. One residual is documented for the
+/// report: a merge-restore that overwrites a row whose backup stamp is
+/// not the table's newest leaves the fingerprint unchanged — the save
+/// notifications cover that case.
+struct LedgerFingerprint: Equatable, Sendable {
+    var transactionCount = 0
+    /// `max(LedgerTransaction.updatedAt)` — `.distantPast` on an empty table.
+    var newestTransactionStamp = Date.distantPast
+    var accountCount = 0
+    /// Order-free fold of `id` + `openingBalance` + `createdAt` over the
+    /// account table — catches inserts, deletes and opening-balance edits.
+    var accountChecksum: Int64 = 0
+
+    /// Reads the fingerprint off `context`. Fetches see pending changes
+    /// on that context, so unsaved edits count too — a pending mutation
+    /// already makes the committed aggregate stale for readers on the
+    /// same context.
+    static func read(in context: ModelContext) throws -> LedgerFingerprint {
+        var fingerprint = LedgerFingerprint()
+        fingerprint.transactionCount = try context.fetchCount(
+            FetchDescriptor<LedgerTransaction>())
+        var newest = FetchDescriptor<LedgerTransaction>(
+            sortBy: [SortDescriptor(
+                \LedgerTransaction.updatedAt, order: .reverse)])
+        newest.fetchLimit = 1
+        if let stamp = try context.fetch(newest).first?.updatedAt {
+            fingerprint.newestTransactionStamp = stamp
+        }
+        fingerprint.accountCount = try context.fetchCount(
+            FetchDescriptor<Account>())
+        var checksum: Int64 = 0
+        for account in try context.fetch(FetchDescriptor<Account>()) {
+            checksum &+= account.openingBalance &* 31
+                &+ Int64(account.id.hashValue)
+                &+ Int64(
+                    truncatingIfNeeded:
+                        account.createdAt.timeIntervalSince1970.bitPattern)
+        }
+        fingerprint.accountChecksum = checksum
+        return fingerprint
+    }
+}
+
 /// Computes a `LedgerAggregate` off the main actor on its own context —
 /// the standard `ModelActor` pattern keeps the store responsive while a
 /// large ledger re-aggregates.
 @ModelActor
 private actor LedgerAggregateFetcher {
-    func compute() throws -> LedgerAggregate {
+    func compute() throws -> (LedgerAggregate, LedgerFingerprint) {
+        // The fingerprint is read BEFORE the walk: a save landing mid-pass
+        // leaves the stamp describing an older state than the aggregate
+        // may already contain, so the next `refreshIfStale` re-triggers
+        // instead of signing off on half-read data.
+        let fingerprint = try LedgerFingerprint.read(in: modelContext)
         var aggregate = LedgerAggregate()
         for account in try modelContext.fetch(FetchDescriptor<Account>()) {
             aggregate.balances[account.id] = account.openingBalance
@@ -107,7 +166,7 @@ private actor LedgerAggregateFetcher {
                 }
             }
         }
-        return aggregate
+        return (aggregate, fingerprint)
     }
 }
 
@@ -137,10 +196,23 @@ private final class LedgerVersion: @unchecked Sendable {
 /// relationship arrays with one pass over the transaction table, recomputed
 /// off the main actor.
 ///
-/// Reads are always correct: while the cached aggregate is stale (any save
-/// bumps the ledger version synchronously) accessors fall back to the
-/// straightforward per-relationship computation, so no view ever shows a
-/// wrong number.
+/// Reads are always correct: while the cached aggregate is stale — or
+/// merely suspected stale, since the data can move without a notification
+/// reaching us — accessors fall back to the straightforward
+/// per-relationship computation, so no view ever shows a wrong number.
+///
+/// Invalidation is three-layered (iOS 17's SwiftData posts no
+/// `ModelContext.didSave` reliably — fixed in iOS 18 — and the owner's
+/// phone runs 17.6.1):
+/// 1. Notifications: `ModelContext.didSave`, plus the Core Data
+///    notifications SwiftData's store still emits on iOS 17 —
+///    `NSManagedObjectContextDidSave` and `NSPersistentStoreRemoteChange`.
+/// 2. `refreshIfStale`: a cheap `LedgerFingerprint` comparison — row
+///    counts, newest `updatedAt`, an opening-balance checksum — run on
+///    every read (throttled to `fingerprintInterval`), on scene
+///    activation, and after app-side saves through `saveAndCheck`.
+/// 3. Fallback: any suspected-stale read returns `account.balance` et al.
+///    until a fresh aggregate lands — never the old cached value.
 @MainActor @Observable
 final class LedgerBalanceStore {
     /// The aggregate snapshot views render from — observed so views
@@ -156,7 +228,7 @@ final class LedgerBalanceStore {
     /// Mutable housekeeping kept off the observation surface — reads
     /// happen inside view bodies, and mutating a tracked property there
     /// would trigger "modifying state during view update" warnings.
-    /// Also holds the two things `deinit` releases, since a nonisolated
+    /// Also holds the things `deinit` releases, since a nonisolated
     /// deinit cannot touch MainActor-isolated state.
     private let housekeeping: Housekeeping
 
@@ -164,10 +236,28 @@ final class LedgerBalanceStore {
     /// coalesces the per-page saves of a large import into one pass.
     var debounceNanos: UInt64 = 150_000_000
 
+    /// Minimum spacing between automatic fingerprint checks — reads call
+    /// `refreshIfStale` unconditionally and this keeps the cost at one
+    /// small query burst a second. Tests set `.zero` so every read checks.
+    var fingerprintInterval: Duration = .seconds(1)
+
     private final class Housekeeping: @unchecked Sendable {
         var refreshTask: Task<Void, Never>?
-        var saveObserver: NSObjectProtocol?
+        var saveObservers: [NSObjectProtocol] = []
         var aggregatedVersion = -1
+        /// The fingerprint the current `aggregate` was built from —
+        /// `refreshIfStale` compares the live table against it.
+        var aggregatedFingerprint: LedgerFingerprint?
+        /// A fingerprint seen that does not match `aggregatedFingerprint`
+        /// — non-nil means the cache is suspect even when no notification
+        /// ever bumped `ledgerVersion` (the iOS 17 blind spot).
+        var suspectFingerprint: LedgerFingerprint?
+        /// `mainContext.hasChanges` at the last check — unsaved writes on
+        /// the UI context make the committed aggregate stale for readers
+        /// on that context regardless of what the store-level queries see.
+        var pendingSuspect = false
+        /// Throttle stamp for `refreshIfStale`.
+        var lastFingerprintCheck: ContinuousClock.Instant?
         let container: ModelContainer
         let fetcher: LedgerAggregateFetcher
 
@@ -177,31 +267,66 @@ final class LedgerBalanceStore {
         }
     }
 
-    init(container: ModelContainer) {
+    /// `observesSaveNotifications` is the iOS-17 simulation seam: tests
+    /// pass false so only the fingerprint path can catch mutations —
+    /// exactly what the owner's phone sees when SwiftData stays silent.
+    init(container: ModelContainer, observesSaveNotifications: Bool = true) {
         self.housekeeping = Housekeeping(container: container)
         let container = self.housekeeping.container
         let ledgerVersion = self.ledgerVersion
-        housekeeping.saveObserver = NotificationCenter.default.addObserver(
-            forName: ModelContext.didSave,
-            object: nil,
-            queue: nil
-        ) { [weak self] notification in
-            // `didSave` posts on the saving context's actor; only saves on
-            // this container's contexts matter. The version bump is
-            // synchronous so a read between `save()` and the MainActor hop
-            // already sees the cache as stale.
-            guard let context = notification.object as? ModelContext,
-                  context.container === container else { return }
-            ledgerVersion.bump()
-            Task { @MainActor [weak self] in
-                self?.noteSave()
-            }
-        }
+        guard observesSaveNotifications else { return }
+        // Channel 1 — SwiftData's own notification (unreliable on iOS 17,
+        // fixed in iOS 18). `didSave` posts on the saving context's actor;
+        // only saves on this container's contexts matter, and the version
+        // bump is synchronous so a read between `save()` and the
+        // MainActor hop already sees the cache as stale.
+        housekeeping.saveObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: ModelContext.didSave,
+                object: nil,
+                queue: nil
+            ) { [weak self] notification in
+                guard let context = notification.object as? ModelContext,
+                      context.container === container else { return }
+                ledgerVersion.bump()
+                Task { @MainActor [weak self] in
+                    self?.noteSave()
+                }
+            })
+        // Channel 2 — the Core Data save notification SwiftData's
+        // underlying contexts still post on iOS 17. Its object is an
+        // `NSManagedObjectContext`, not a `ModelContext`, so it cannot be
+        // matched to this container: any in-process save bumps every
+        // store, and the extra pass is simply coalesced away.
+        housekeeping.saveObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: .NSManagedObjectContextDidSave,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                ledgerVersion.bump()
+                Task { @MainActor [weak self] in
+                    self?.noteSave()
+                }
+            })
+        // Channel 3 — store-level remote changes (persistent history /
+        // CloudKit if it is ever switched on; inert otherwise).
+        housekeeping.saveObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: .NSPersistentStoreRemoteChange,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                ledgerVersion.bump()
+                Task { @MainActor [weak self] in
+                    self?.noteSave()
+                }
+            })
     }
 
     deinit {
         housekeeping.refreshTask?.cancel()
-        if let observer = housekeeping.saveObserver {
+        for observer in housekeeping.saveObservers {
             NotificationCenter.default.removeObserver(observer)
         }
     }
@@ -226,6 +351,69 @@ final class LedgerBalanceStore {
     private var isFresh: Bool {
         aggregate != nil
             && housekeeping.aggregatedVersion == ledgerVersion.current
+            && housekeeping.suspectFingerprint == nil
+            && !housekeeping.pendingSuspect
+    }
+
+    /// The notification-free staleness check: re-read the fingerprint and
+    /// compare it with the one the current aggregate was built from. A
+    /// mismatch marks the cache suspect *synchronously* — the very next
+    /// read already falls back to the relationship walk — and schedules
+    /// one re-aggregation; a match clears any earlier suspicion (a
+    /// rolled-back pending change looks identical to a reverted store).
+    ///
+    /// Runs on `mainContext`, so pending unsaved edits on the UI context
+    /// count too. Called from every read path (throttled to
+    /// `fingerprintInterval`), from the scene-activation hook and after
+    /// `saveAndCheck`. Pass `force: true` to skip the throttle. Returns
+    /// true when a fingerprint was actually read.
+    @discardableResult
+    func refreshIfStale(force: Bool = false) -> Bool {
+        let now = ContinuousClock.now
+        if !force,
+           let last = housekeeping.lastFingerprintCheck,
+           now - last < fingerprintInterval { return false }
+        housekeeping.lastFingerprintCheck = now
+        let context = housekeeping.container.mainContext
+        housekeeping.pendingSuspect = context.hasChanges
+        guard housekeeping.aggregatedFingerprint != nil else { return true }
+        guard let fingerprint = try? LedgerFingerprint.read(in: context)
+        else {
+            // Unverifiable is suspect: `transactionCount: -1` can never
+            // match a real fingerprint, so `isFresh` stays false until a
+            // check succeeds and the walk keeps answering reads.
+            if housekeeping.suspectFingerprint == nil {
+                housekeeping.suspectFingerprint =
+                    LedgerFingerprint(transactionCount: -1)
+                ledgerVersion.bump()
+                scheduleRefresh()
+            }
+            return true
+        }
+        if fingerprint == housekeeping.aggregatedFingerprint {
+            housekeeping.suspectFingerprint = nil
+        } else if housekeeping.suspectFingerprint != fingerprint {
+            // First sighting of this new table state — mark + schedule.
+            // `changeCount`/`aggregate` are observed state, so the
+            // observable side (`noteSave`) hops to the next main-actor
+            // turn; `isFresh` is already false via `suspectFingerprint`.
+            housekeeping.suspectFingerprint = fingerprint
+            ledgerVersion.bump()
+            Task { @MainActor [weak self] in
+                self?.noteSave()
+            }
+        }
+        return true
+    }
+
+    /// Saves `context`, then runs the fingerprint check inline — the
+    /// post-save trigger for writes the app's own code performs through
+    /// a context on this store's container. The check only invalidates
+    /// when ledger data actually moved, so a save touching unrelated
+    /// models stays free.
+    func saveAndCheck(_ context: ModelContext) throws {
+        try context.save()
+        refreshIfStale(force: true)
     }
 
     private func scheduleRefresh() {
@@ -247,16 +435,24 @@ final class LedgerBalanceStore {
         guard !Task.isCancelled,
               let computed = try? await housekeeping.fetcher.compute()
         else { return }
-        aggregate = computed
+        aggregate = computed.0
+        housekeeping.aggregatedFingerprint = computed.1
         housekeeping.aggregatedVersion = version
+        if housekeeping.suspectFingerprint == computed.1 {
+            // The flagged table state is exactly what this pass read.
+            housekeeping.suspectFingerprint = nil
+        }
         if ledgerVersion.current != version {
             scheduleRefresh()
         }
     }
 
     /// Synchronous refresh on the caller's context — tests measure and
-    /// assert against this exact single-pass computation.
+    /// assert against this exact single-pass computation. The fingerprint
+    /// is taken before the walk for the same mid-pass-save safety the
+    /// fetcher uses.
     func refresh(context: ModelContext) throws {
+        let fingerprint = try LedgerFingerprint.read(in: context)
         var aggregate = LedgerAggregate()
         for account in try context.fetch(FetchDescriptor<Account>()) {
             aggregate.balances[account.id] = account.openingBalance
@@ -315,7 +511,11 @@ final class LedgerBalanceStore {
             }
         }
         self.aggregate = aggregate
+        housekeeping.aggregatedFingerprint = fingerprint
         housekeeping.aggregatedVersion = ledgerVersion.current
+        if housekeeping.suspectFingerprint == fingerprint {
+            housekeeping.suspectFingerprint = nil
+        }
     }
 
     // MARK: - Reads
@@ -323,6 +523,7 @@ final class LedgerBalanceStore {
     /// The account's ledger balance: cached when fresh, the old
     /// relationship walk while stale — identical numbers either way.
     func balance(of account: Account) -> Int64 {
+        refreshIfStale()
         guard isFresh else {
             scheduleRefresh()
             return account.balance
@@ -333,6 +534,7 @@ final class LedgerBalanceStore {
     /// Cached balance for an account id, or nil while stale — for callers
     /// that already resolved the id and have their own fallback.
     func cachedBalance(of accountID: UUID) -> Int64? {
+        refreshIfStale()
         guard isFresh else {
             scheduleRefresh()
             return nil
@@ -343,6 +545,7 @@ final class LedgerBalanceStore {
     /// Deduplicated non-zero entries — same values `creditCardEntries`
     /// and `balanceTrendEntries` produced by walking the relationships.
     func entries(of account: Account) -> [LedgerAccountEntry] {
+        refreshIfStale()
         guard isFresh else {
             scheduleRefresh()
             return account.fallbackLedgerEntries
@@ -353,6 +556,7 @@ final class LedgerBalanceStore {
     /// Every role entry including self-transfer duplicates and zero-delta
     /// rows — the input `ReceivableSnapshot` semantics require.
     func movements(of account: Account) -> [LedgerAccountEntry] {
+        refreshIfStale()
         guard isFresh else {
             scheduleRefresh()
             return account.fallbackLedgerMovements
@@ -362,6 +566,7 @@ final class LedgerBalanceStore {
 
     /// `AccountGrouping.canDelete` from the cache.
     func hasActivity(of account: Account) -> Bool {
+        refreshIfStale()
         guard isFresh else {
             scheduleRefresh()
             return !AccountGrouping.canDelete(account)
