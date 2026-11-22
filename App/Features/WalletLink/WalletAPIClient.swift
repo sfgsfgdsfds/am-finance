@@ -84,25 +84,31 @@ enum WalletAPIError: LocalizedError, Equatable {
     }
 }
 
-/// GET /api/v1/admin/bank/accounts row.
+/// GET /api/v1/admin/bank/accounts row. `id` is the session UUID string —
+/// it becomes `Account.externalAccountID` when linked. `holderName` and
+/// `accountNumberMasked` are null when the session has no name or the
+/// account number has no digits to mask.
 struct WalletAPIBankAccount: Decodable, Equatable, Sendable {
-    var id: Int
+    var id: String
     var bank: String
-    var accountNumberMasked: String
-    var holderName: String
+    var accountNumberMasked: String?
+    var holderName: String?
     var status: String
     var lastListenerActivityAt: Date?
     var lastTransactionAt: Date?
     var transactionsCount: Int
 }
 
-/// GET /api/v1/admin/bank/transactions row. `amount` is a signed VND
-/// integer — negative means money out (the server's own convention).
-/// Property names are camelCase so `convertFromSnakeCase` maps every key.
+/// GET /api/v1/admin/bank/transactions row. `id` is a UUID string — it
+/// becomes `LedgerTransaction.externalID` on import. `amount` is a signed
+/// VND integer — negative means money out (the server's own convention).
+/// `bankTransactionId` is the listener's md5 dedupe key, not a real bank
+/// reference. Property names are camelCase so `convertFromSnakeCase` maps
+/// every key.
 struct WalletAPIBankTransaction: Decodable, Equatable, Sendable {
-    var id: Int
-    var sessionId: Int
-    var bankTransactionId: String
+    var id: String
+    var sessionId: String
+    var bankTransactionId: String?
     var amount: Int64
     var currency: String
     var transactionDate: Date
@@ -111,9 +117,11 @@ struct WalletAPIBankTransaction: Decodable, Equatable, Sendable {
     var createdAt: Date?
 }
 
-/// Paging cursor returned beside a transaction page.
+/// Paging cursor returned beside a transaction page. `nextAfterId` is an
+/// opaque string — the `id` of the last row, or the `after_id` that was
+/// sent when the page is empty ("0" for a first read).
 struct WalletAPIPageMeta: Decodable, Equatable, Sendable {
-    var nextAfterId: Int?
+    var nextAfterId: String
     var hasMore: Bool
     var serverTime: Date?
 }
@@ -148,14 +156,15 @@ struct WalletAPIClient: Sendable {
         return try decode(Envelope<[WalletAPIBankAccount]>.self, from: data).data
     }
 
-    /// GET /api/v1/admin/bank/transactions — one page, ascending by id.
+    /// GET /api/v1/admin/bank/transactions — one page, ascending by id
+    /// string. `afterID` is the opaque cursor — "0" reads from the start.
     /// `limit` is clamped to the server's 500 maximum.
     func transactions(
-        sessionID: Int, afterID: Int = 0, limit: Int = 500
+        sessionID: String, afterID: String = "0", limit: Int = 500
     ) async throws -> WalletAPITransactionPage {
         let data = try await get(path: "api/v1/admin/bank/transactions", query: [
-            URLQueryItem(name: "session_id", value: String(sessionID)),
-            URLQueryItem(name: "after_id", value: String(afterID)),
+            URLQueryItem(name: "session_id", value: sessionID),
+            URLQueryItem(name: "after_id", value: afterID),
             URLQueryItem(name: "limit", value: String(min(max(limit, 1), 500))),
         ])
         let page = try decode(PagedEnvelope<[WalletAPIBankTransaction]>.self, from: data)
@@ -166,7 +175,7 @@ struct WalletAPIClient: Sendable {
     /// `has_more` is false. A non-advancing cursor would page forever, so the
     /// loop also stops when the next cursor does not move forward.
     func allTransactions(
-        sessionID: Int, afterID: Int = 0
+        sessionID: String, afterID: String = "0"
     ) async throws -> [WalletAPIBankTransaction] {
         var collected: [WalletAPIBankTransaction] = []
         var cursor = afterID
@@ -175,8 +184,8 @@ struct WalletAPIClient: Sendable {
                 sessionID: sessionID, afterID: cursor, limit: 500)
             collected.append(contentsOf: page.items)
             guard page.meta.hasMore else { return collected }
-            guard let next = page.meta.nextAfterId ?? page.items.last?.id,
-                  next > cursor else { return collected }
+            let next = page.meta.nextAfterId
+            guard next > cursor else { return collected }
             cursor = next
         }
     }
