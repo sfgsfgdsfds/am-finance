@@ -63,6 +63,17 @@ enum RecurringGenerator {
             }
         }
         try context.save()
+        if created > 0 {
+            // The ledger moved: force the balance store's fingerprint
+            // check so the new rows invalidate even where the OS posts no
+            // save notification (iOS 17). A hop — this runs on whatever
+            // actor the caller used.
+            let container = context.container
+            Task { @MainActor in
+                LedgerBalanceStores.shared(for: container)
+                    .refreshIfStale(force: true)
+            }
+        }
         return created
     }
 }
