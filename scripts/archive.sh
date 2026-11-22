@@ -52,14 +52,6 @@ print_signing_hints() {
   fi
 }
 
-# Release still typechecks `#Preview` bodies, but the stubs they use
-# (AppLockPreviewAuthenticator, WalletSyncPreviewAPI) are `#if DEBUG`-gated,
-# so a plain Release compile fails. Expose DEBUG for the archive: the only
-# DEBUG-gated code in the app is those two preview stubs, dead code in the
-# shipped binary. Proper fix is guarding the `#Preview` blocks or ungating
-# the stubs — App/ sources are out of scope here.
-ARCHIVE_SWIFT_FLAGS="SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG"
-
 echo "archive: archiving AMFinance — Release, generic iOS, build $BUILD_NUMBER"
 ARCHIVE_LOG="$(mktemp -t amfinance-archive)"
 if xcodebuild archive \
@@ -71,7 +63,6 @@ if xcodebuild archive \
     -derivedDataPath "$ROOT/DerivedData" \
     -allowProvisioningUpdates \
     CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
-    $ARCHIVE_SWIFT_FLAGS \
     >"$ARCHIVE_LOG" 2>&1; then
   echo "archive: archive succeeded -> $ARCHIVE_PATH"
 else
