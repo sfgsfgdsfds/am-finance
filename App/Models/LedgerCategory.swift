@@ -17,6 +17,15 @@ final class LedgerCategory {
     @Relationship(deleteRule: .nullify, inverse: \LedgerTransaction.category)
     var transactions: [LedgerTransaction]? = []
 
+    /// `.nullify` keeps the schema CloudKit-compatible — cascade deletes
+    /// can't sync — so a deleted category leaves its budgets behind with
+    /// `category == nil` (they then read as overall budgets).
+    @Relationship(deleteRule: .nullify, inverse: \Budget.category)
+    var budgets: [Budget]? = []
+
+    @Relationship(deleteRule: .nullify, inverse: \RecurringRule.category)
+    var recurringRules: [RecurringRule]? = []
+
     init(
         id: UUID = UUID(),
         name: String,

@@ -14,5 +14,7 @@ enum BackupCoverage {
         Business.self,
         LedgerTransaction.self,
         LoanRateChange.self,
+        Budget.self,
+        RecurringRule.self,
     ]
 }

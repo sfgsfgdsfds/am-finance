@@ -6,8 +6,9 @@ import SwiftData
 /// `createdAt` equality survive a round trip.
 enum BackupCodec {
     /// The newest backup format this build writes; files at version 1 or 2
-    /// are accepted on read (v1 lacks `loanRateChanges`, decoded as empty).
-    static let formatVersion = 2
+    /// are accepted on read (v1 lacks `loanRateChanges`, v1/v2 lack
+    /// `budgets`/`recurringRules` — absent keys decode as empty lists).
+    static let formatVersion = 3
 
     /// Version string stamped into every exported document.
     static var appVersion: String {
@@ -24,6 +25,8 @@ enum BackupCodec {
         businesses: [Business],
         transactions: [LedgerTransaction],
         loanRateChanges: [LoanRateChange],
+        budgets: [Budget],
+        recurringRules: [RecurringRule],
         exportedAt: Date = .now,
         appVersion: String = appVersion
     ) -> BackupDocument {
@@ -48,7 +51,19 @@ enum BackupCodec {
                     ($0.account?.id.uuidString ?? "", $0.fromInstallment, $0.id.uuidString)
                         < ($1.account?.id.uuidString ?? "", $1.fromInstallment, $1.id.uuidString)
                 }
-                .map(BackupLoanRateChange.init)
+                .map(BackupLoanRateChange.init),
+            budgets: budgets
+                .sorted {
+                    ($0.category?.id.uuidString ?? "", $0.createdAt, $0.id.uuidString)
+                        < ($1.category?.id.uuidString ?? "", $1.createdAt, $1.id.uuidString)
+                }
+                .map(BackupBudget.init),
+            recurringRules: recurringRules
+                .sorted {
+                    ($0.title, $0.createdAt, $0.id.uuidString)
+                        < ($1.title, $1.createdAt, $1.id.uuidString)
+                }
+                .map(BackupRecurringRule.init)
         )
     }
 
@@ -60,6 +75,8 @@ enum BackupCodec {
             businesses: try context.fetch(FetchDescriptor<Business>()),
             transactions: try context.fetch(FetchDescriptor<LedgerTransaction>()),
             loanRateChanges: try context.fetch(FetchDescriptor<LoanRateChange>()),
+            budgets: try context.fetch(FetchDescriptor<Budget>()),
+            recurringRules: try context.fetch(FetchDescriptor<RecurringRule>()),
             exportedAt: exportedAt
         )
         return try encode(doc)
