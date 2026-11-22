@@ -5,9 +5,10 @@ import Foundation
 protocol WalletSyncAPI: Sendable {
     /// GET /api/v1/admin/bank/accounts — the bank accounts on the server.
     func accounts() async throws -> [WalletAPIBankAccount]
-    /// One page of bank transactions, ascending by id, after `afterID`.
+    /// One page of bank transactions, ascending by id string, after the
+    /// opaque cursor `afterID` ("0" reads from the start).
     func transactions(
-        sessionID: Int, afterID: Int, limit: Int
+        sessionID: String, afterID: String, limit: Int
     ) async throws -> WalletAPITransactionPage
 }
 
@@ -30,7 +31,7 @@ enum WalletSyncError: LocalizedError, Equatable {
 /// Canned responses for `#Preview` screens — never used by the app itself.
 final class WalletSyncPreviewAPI: WalletSyncAPI, @unchecked Sendable {
     var accountsResult: [WalletAPIBankAccount] = []
-    var items: [Int: [WalletAPIBankTransaction]] = [:]
+    var items: [String: [WalletAPIBankTransaction]] = [:]
     var error: (any Error)?
 
     init() {}
@@ -41,7 +42,7 @@ final class WalletSyncPreviewAPI: WalletSyncAPI, @unchecked Sendable {
     }
 
     func transactions(
-        sessionID: Int, afterID: Int, limit: Int
+        sessionID: String, afterID: String, limit: Int
     ) async throws -> WalletAPITransactionPage {
         if let error { throw error }
         let all = (items[sessionID] ?? [])
@@ -51,7 +52,7 @@ final class WalletSyncPreviewAPI: WalletSyncAPI, @unchecked Sendable {
         return WalletAPITransactionPage(
             items: slice,
             meta: WalletAPIPageMeta(
-                nextAfterId: slice.last?.id,
+                nextAfterId: slice.last?.id ?? afterID,
                 hasMore: all.count > slice.count,
                 serverTime: nil
             )

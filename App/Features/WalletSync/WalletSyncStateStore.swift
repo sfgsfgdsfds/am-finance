@@ -1,14 +1,22 @@
 import Foundation
 
 /// Per-bank-account sync progress, persisted as JSON in UserDefaults.
-/// `cursor` is the last imported server transaction id — the `after_id`
-/// parameter of the next fetch.
+/// `cursor` is the opaque `after_id` cursor — the last imported server
+/// transaction UUID, or "0" before anything was read (the server's own
+/// start-of-table cursor; every UUID sorts after it).
 struct WalletSyncAccountState: Codable, Equatable, Sendable {
-    var cursor: Int = 0
+    /// Cursor meaning "read from the start" — the server's `after_id`
+    /// default.
+    static let startCursor = "0"
+
+    var cursor: String = WalletSyncAccountState.startCursor
     /// Only transactions on/after this date are imported; nil = full history.
     /// Captured once at link time so "Từ hôm nay" does not drift.
     var importFrom: Date?
     var lastSyncAt: Date?
+    /// Last time a full rescan from "0" completed — throttles the
+    /// self-healing rescan to once a day.
+    var lastFullRescanAt: Date?
 }
 
 /// The three "import from" choices offered when linking a bank account.
@@ -41,11 +49,11 @@ enum WalletSyncImportFrom: String, Codable, CaseIterable, Sendable {
 }
 
 /// Storage seam for per-session sync state — UserDefaults in the app,
-/// in-memory in tests.
+/// in-memory in tests. `sessionID` is the server session UUID string.
 protocol WalletSyncStateStoring: Sendable {
-    func state(for sessionID: Int) -> WalletSyncAccountState
-    func setState(_ state: WalletSyncAccountState, for sessionID: Int)
-    func removeState(for sessionID: Int)
+    func state(for sessionID: String) -> WalletSyncAccountState
+    func setState(_ state: WalletSyncAccountState, for sessionID: String)
+    func removeState(for sessionID: String)
     /// Most recent `lastSyncAt` across all sessions; nil if never synced.
     var lastSyncAt: Date? { get }
 }
@@ -78,26 +86,26 @@ final class WalletSyncStateStore: WalletSyncStateStoring, @unchecked Sendable {
         all.values.compactMap(\.lastSyncAt).max()
     }
 
-    func state(for sessionID: Int) -> WalletSyncAccountState {
-        all[String(sessionID)] ?? WalletSyncAccountState()
+    func state(for sessionID: String) -> WalletSyncAccountState {
+        all[sessionID] ?? WalletSyncAccountState()
     }
 
-    func setState(_ state: WalletSyncAccountState, for sessionID: Int) {
+    func setState(_ state: WalletSyncAccountState, for sessionID: String) {
         var copy = all
-        copy[String(sessionID)] = state
+        copy[sessionID] = state
         all = copy
     }
 
-    func removeState(for sessionID: Int) {
+    func removeState(for sessionID: String) {
         var copy = all
-        copy.removeValue(forKey: String(sessionID))
+        copy.removeValue(forKey: sessionID)
         all = copy
     }
 }
 
 /// Volatile `WalletSyncStateStoring` for tests and previews.
 final class WalletSyncInMemoryStateStore: WalletSyncStateStoring, @unchecked Sendable {
-    private var states: [Int: WalletSyncAccountState] = [:]
+    private var states: [String: WalletSyncAccountState] = [:]
 
     init() {}
 
@@ -105,15 +113,15 @@ final class WalletSyncInMemoryStateStore: WalletSyncStateStoring, @unchecked Sen
         states.values.compactMap(\.lastSyncAt).max()
     }
 
-    func state(for sessionID: Int) -> WalletSyncAccountState {
+    func state(for sessionID: String) -> WalletSyncAccountState {
         states[sessionID] ?? WalletSyncAccountState()
     }
 
-    func setState(_ state: WalletSyncAccountState, for sessionID: Int) {
+    func setState(_ state: WalletSyncAccountState, for sessionID: String) {
         states[sessionID] = state
     }
 
-    func removeState(for sessionID: Int) {
+    func removeState(for sessionID: String) {
         states.removeValue(forKey: sessionID)
     }
 }

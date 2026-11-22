@@ -6,7 +6,7 @@ import FinanceCore
 /// dialog plumbing.
 struct WalletSyncLinkRequest: Identifiable {
     let server: WalletAPIBankAccount
-    var id: Int { server.id }
+    var id: String { server.id }
 }
 
 /// Links bank accounts on wallet.amx.vn to ledger accounts: create a new
@@ -136,9 +136,11 @@ struct WalletSyncAccountsView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(WalletSyncNaming.accountName(
                     bank: server.bank, maskedNumber: server.accountNumberMasked))
-                Text(server.holderName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if let holderName = server.holderName {
+                    Text(holderName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 if let linked {
                     Label("Đã liên kết: \(linked.name)", systemImage: "link")
                         .font(.caption)
@@ -180,6 +182,12 @@ struct WalletSyncAccountsView: View {
                 }
             }
             .disabled(coordinator?.isSyncing == true || linkedAccounts.isEmpty)
+            Button {
+                Task { await syncNow(fullRescan: true) }
+            } label: {
+                Label("Đồng bộ lại toàn bộ", systemImage: "arrow.counterclockwise")
+            }
+            .disabled(coordinator?.isSyncing == true || linkedAccounts.isEmpty)
             if let message = coordinator?.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
@@ -192,7 +200,7 @@ struct WalletSyncAccountsView: View {
         } header: {
             Text("Đồng bộ")
         } footer: {
-            Text("Chỉ các giao dịch mới trên máy chủ được nhập; giao dịch đã có không bị thay đổi.")
+            Text("Chỉ các giao dịch mới trên máy chủ được nhập; giao dịch đã có không bị thay đổi. \"Đồng bộ lại toàn bộ\" rà soát lại từ đầu để bắt các giao dịch xuất hiện trễ.")
         }
     }
 
@@ -236,7 +244,7 @@ struct WalletSyncAccountsView: View {
     private func linkedAccount(for server: WalletAPIBankAccount) -> Account? {
         appAccounts.first {
             $0.externalSource == WalletSyncEngine.externalSource
-                && $0.externalAccountID == String(server.id)
+                && $0.externalAccountID == server.id
         }
     }
 
@@ -284,8 +292,8 @@ struct WalletSyncAccountsView: View {
         }
     }
 
-    private func syncNow() async {
-        await ensureCoordinator().syncNow()
+    private func syncNow(fullRescan: Bool = false) async {
+        await ensureCoordinator().syncNow(fullRescan: fullRescan)
         refreshCounts()
     }
 
@@ -308,14 +316,12 @@ struct WalletSyncAccountsView: View {
             sortOrder: (appAccounts.map(\.sortOrder).max() ?? -1) + 1
         )
         account.externalSource = WalletSyncEngine.externalSource
-        account.externalAccountID = String(server.id)
+        account.externalAccountID = server.id
         context.insert(account)
         try? context.save()
         stateStore.setState(
             WalletSyncAccountState(
-                cursor: 0,
-                importFrom: importFrom.startDate(now: .now),
-                lastSyncAt: nil),
+                importFrom: importFrom.startDate(now: .now)),
             for: server.id)
         Task { await syncNow() }
     }
@@ -326,13 +332,11 @@ struct WalletSyncAccountsView: View {
         importFrom: WalletSyncImportFrom
     ) {
         account.externalSource = WalletSyncEngine.externalSource
-        account.externalAccountID = String(server.id)
+        account.externalAccountID = server.id
         try? context.save()
         stateStore.setState(
             WalletSyncAccountState(
-                cursor: 0,
-                importFrom: importFrom.startDate(now: .now),
-                lastSyncAt: nil),
+                importFrom: importFrom.startDate(now: .now)),
             for: server.id)
         Task { await syncNow() }
     }
@@ -373,9 +377,11 @@ struct WalletSyncLinkSheet: View {
                             Text(WalletSyncNaming.accountName(
                                 bank: serverAccount.bank,
                                 maskedNumber: serverAccount.accountNumberMasked))
-                            Text(serverAccount.holderName)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            if let holderName = serverAccount.holderName {
+                                Text(holderName)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
@@ -466,12 +472,14 @@ struct WalletSyncLinkSheet: View {
     let api = WalletSyncPreviewAPI()
     api.accountsResult = [
         WalletAPIBankAccount(
-            id: 12, bank: "VPBank", accountNumberMasked: "*1234",
+            id: "11111111-1111-4111-8111-111111111111", bank: "VPBank",
+            accountNumberMasked: "*1234",
             holderName: "NGUYEN VAN A", status: "active",
             lastListenerActivityAt: .now, lastTransactionAt: nil,
             transactionsCount: 128),
         WalletAPIBankAccount(
-            id: 13, bank: "VPBank", accountNumberMasked: "*5678",
+            id: "22222222-2222-4222-8222-222222222222", bank: "VPBank",
+            accountNumberMasked: "*5678",
             holderName: "NGUYEN VAN A", status: "active",
             lastListenerActivityAt: .now, lastTransactionAt: nil,
             transactionsCount: 42),

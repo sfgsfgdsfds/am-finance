@@ -118,7 +118,7 @@ struct WalletSyncStatusBanner: View {
         name: "VPBank *1234", kind: .bank,
         icon: "building.columns.fill", colorHex: "0A84FF")
     bank.externalSource = "wallet.amx.vn"
-    bank.externalAccountID = "12"
+    bank.externalAccountID = "11111111-1111-4111-8111-111111111111"
     context.insert(bank)
     context.insert(LedgerTransaction(
         kind: .expense, amount: 155_000,

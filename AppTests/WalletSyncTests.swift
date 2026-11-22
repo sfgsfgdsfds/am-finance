@@ -16,17 +16,18 @@ struct WalletSyncTests {
     // MARK: - Test scaffolding
 
     /// Canned wallet API: `items[sessionID]` is the server's table,
-    /// ascending by id. Entries in `failOnAfterIDs` throw once — the call
-    /// that carries that `after_id` — then recover, mimicking a flaky page.
+    /// ascending by id string. Entries in `failOnAfterIDs` throw once — the
+    /// call that carries that `after_id` — then recover, mimicking a flaky
+    /// page.
     private final class WalletSyncFakeAPI: WalletSyncAPI, @unchecked Sendable {
         struct Call: Equatable {
-            var sessionID: Int
-            var afterID: Int
+            var sessionID: String
+            var afterID: String
         }
 
         var accountsResult: [WalletAPIBankAccount] = []
-        var items: [Int: [WalletAPIBankTransaction]] = [:]
-        var failOnAfterIDs: Set<Int> = []
+        var items: [String: [WalletAPIBankTransaction]] = [:]
+        var failOnAfterIDs: Set<String> = []
         var error: WalletAPIError = .network("fake")
         private(set) var calls: [Call] = []
 
@@ -35,7 +36,7 @@ struct WalletSyncTests {
         }
 
         func transactions(
-            sessionID: Int, afterID: Int, limit: Int
+            sessionID: String, afterID: String, limit: Int
         ) async throws -> WalletAPITransactionPage {
             calls.append(Call(sessionID: sessionID, afterID: afterID))
             if failOnAfterIDs.contains(afterID) {
@@ -49,7 +50,7 @@ struct WalletSyncTests {
             return WalletAPITransactionPage(
                 items: slice,
                 meta: WalletAPIPageMeta(
-                    nextAfterId: slice.last?.id,
+                    nextAfterId: slice.last?.id ?? afterID,
                     hasMore: all.count > slice.count,
                     serverTime: nil
                 )
@@ -62,6 +63,15 @@ struct WalletSyncTests {
         var value = 0
     }
 
+    /// The session UUID fixtures use — matches the doc's example.
+    private static let sessionA = "11111111-1111-4111-8111-111111111111"
+
+    /// A sortable UUID-shaped transaction id — `txID(1) < txID(2) < …`
+    /// under plain string order, like the server's id ordering.
+    private static func txID(_ n: Int) -> String {
+        String(format: "00000000-0000-4000-8000-%012d", n)
+    }
+
     private func makeContext() throws -> ModelContext {
         ModelContext(try AppModelContainer.make(inMemory: true))
     }
@@ -69,20 +79,20 @@ struct WalletSyncTests {
     private let baseDate = Date(timeIntervalSince1970: 1_763_900_000)
 
     private func bankTransaction(
-        _ id: Int,
-        sessionID: Int = 12,
+        _ n: Int,
+        sessionID: String = sessionA,
         amount: Int64,
         dayOffset: Int = 0,
         note: String? = nil
     ) -> WalletAPIBankTransaction {
         WalletAPIBankTransaction(
-            id: id,
+            id: Self.txID(n),
             sessionId: sessionID,
-            bankTransactionId: "FT\(id)",
+            bankTransactionId: String(format: "%032d", n),
             amount: amount,
             currency: "VND",
             transactionDate: baseDate.addingTimeInterval(
-                Double(dayOffset) * 86_400 + Double(id)),
+                Double(dayOffset) * 86_400 + Double(n)),
             note: note,
             counterpartyAccountMasked: nil,
             createdAt: nil
@@ -92,13 +102,13 @@ struct WalletSyncTests {
     @discardableResult
     private func linkedAccount(
         in context: ModelContext,
-        sessionID: Int = 12,
+        sessionID: String = sessionA,
         openingBalance: Int64 = 0
     ) -> Account {
         let account = Account(
             name: "VPBank *1234", kind: .bank, openingBalance: openingBalance)
         account.externalSource = WalletSyncEngine.externalSource
-        account.externalAccountID = String(sessionID)
+        account.externalAccountID = sessionID
         context.insert(account)
         return account
     }
@@ -129,7 +139,7 @@ struct WalletSyncTests {
         let context = try makeContext()
         let account = linkedAccount(in: context)
         let api = WalletSyncFakeAPI()
-        api.items[12] = [
+        api.items[Self.sessionA] = [
             bankTransaction(1, amount: 500_000, note: "LUONG THANG 11"),
             bankTransaction(2, amount: -150_000, note: nil),
             bankTransaction(3, amount: 100, note: "lãi"),
@@ -142,7 +152,7 @@ struct WalletSyncTests {
 
         #expect(summary.totalInserted == 3)
         #expect(summary.accounts.count == 1)
-        #expect(summary.accounts[0].sessionID == 12)
+        #expect(summary.accounts[0].sessionID == Self.sessionA)
 
         let rows = try allTransactions(in: context)
         #expect(rows.count == 3)
@@ -153,7 +163,7 @@ struct WalletSyncTests {
         #expect(income.note == "LUONG THANG 11")
         #expect(income.needsReview == true)
         #expect(income.externalSource == "wallet.amx.vn")
-        #expect(income.externalID == "1")
+        #expect(income.externalID == Self.txID(1))
         #expect(income.account?.id == account.id)
         #expect(income.category == nil)
 
@@ -166,8 +176,8 @@ struct WalletSyncTests {
         #expect(account.balance == 350_100)
 
         // Cursor persisted to the last row, sync stamped.
-        #expect(states.state(for: 12).cursor == 3)
-        #expect(states.state(for: 12).lastSyncAt != nil)
+        #expect(states.state(for: Self.sessionA).cursor == Self.txID(3))
+        #expect(states.state(for: Self.sessionA).lastSyncAt != nil)
         #expect(WalletSyncEngine.importedCount(context: context) == 3)
         #expect(WalletSyncEngine.pendingReviewCount(context: context) == 3)
     }
@@ -176,7 +186,7 @@ struct WalletSyncTests {
         let context = try makeContext()
         linkedAccount(in: context)
         let api = WalletSyncFakeAPI()
-        api.items[12] = [
+        api.items[Self.sessionA] = [
             bankTransaction(1, amount: 100),
             bankTransaction(2, amount: -200),
         ]
@@ -190,7 +200,7 @@ struct WalletSyncTests {
         #expect(again.totalInserted == 0)
         #expect(again.totalSkipped == 0)
         #expect(try allTransactions(in: context).count == 2)
-        #expect(api.calls.map(\.afterID) == [0, 2])
+        #expect(api.calls.map(\.afterID) == ["0", Self.txID(2)])
     }
 
     @Test func cursorResetSkipsAlreadyImportedRows() async throws {
@@ -199,7 +209,7 @@ struct WalletSyncTests {
         let context = try makeContext()
         linkedAccount(in: context)
         let api = WalletSyncFakeAPI()
-        api.items[12] = [
+        api.items[Self.sessionA] = [
             bankTransaction(1, amount: 100),
             bankTransaction(2, amount: -200),
             bankTransaction(3, amount: 300),
@@ -208,8 +218,8 @@ struct WalletSyncTests {
         let engine = makeEngine(api: api, states: states, context: context)
         _ = try await engine.syncAll()
 
-        states.removeState(for: 12)
-        api.items[12]!.append(bankTransaction(4, amount: 400))
+        states.removeState(for: Self.sessionA)
+        api.items[Self.sessionA]!.append(bankTransaction(4, amount: 400))
         let summary = try await engine.syncAll()
 
         #expect(summary.totalInserted == 1)
@@ -222,13 +232,13 @@ struct WalletSyncTests {
         let context = try makeContext()
         linkedAccount(in: context)
         let api = WalletSyncFakeAPI()
-        api.items[12] = [
+        api.items[Self.sessionA] = [
             bankTransaction(1, amount: 10),
             bankTransaction(2, amount: 20),
             bankTransaction(3, amount: 30),
         ]
-        // The page-2 request (after_id = 2) fails once.
-        api.failOnAfterIDs = [2]
+        // The page-2 request fails once.
+        api.failOnAfterIDs = [Self.txID(2)]
         let states = WalletSyncInMemoryStateStore()
         let engine = makeEngine(
             api: api, states: states, context: context, pageSize: 2)
@@ -242,21 +252,27 @@ struct WalletSyncTests {
 
         // Page 1 is committed and the cursor stopped at its end — page 2's
         // data is neither skipped nor duplicated.
-        #expect(states.state(for: 12).cursor == 2)
-        #expect(try allTransactions(in: context).compactMap(\.externalID) == ["1", "2"])
+        #expect(states.state(for: Self.sessionA).cursor == Self.txID(2))
+        #expect(try allTransactions(in: context).compactMap(\.externalID) == [Self.txID(1), Self.txID(2)])
 
+        // The failed rescan never stamped lastFullRescanAt, so recovery
+        // re-reads from the start — dedupe absorbs the repeated page.
         let recovered = try await engine.syncAll()
         #expect(recovered.totalInserted == 1)
+        #expect(recovered.accounts[0].skippedExisting == 2)
         let rows = try allTransactions(in: context)
-        #expect(rows.compactMap(\.externalID) == ["1", "2", "3"])
-        #expect(states.state(for: 12).cursor == 3)
+        #expect(rows.compactMap(\.externalID) == [Self.txID(1), Self.txID(2), Self.txID(3)])
+        #expect(states.state(for: Self.sessionA).cursor == Self.txID(3))
+        #expect(
+            api.calls.map(\.afterID)
+                == ["0", Self.txID(2), "0", Self.txID(2)])
     }
 
     @Test func importFromDateFiltersOldRows() async throws {
         let context = try makeContext()
         linkedAccount(in: context)
         let api = WalletSyncFakeAPI()
-        api.items[12] = [
+        api.items[Self.sessionA] = [
             bankTransaction(1, amount: 10, dayOffset: -40),
             bankTransaction(2, amount: 20, dayOffset: -5),
             bankTransaction(3, amount: 30, dayOffset: 0),
@@ -266,17 +282,17 @@ struct WalletSyncTests {
         let cutoff = AppCalendar.vietnam.startOfDay(
             for: baseDate.addingTimeInterval(-10 * 86_400))
         states.setState(
-            WalletSyncAccountState(cursor: 0, importFrom: cutoff, lastSyncAt: nil),
-            for: 12)
+            WalletSyncAccountState(importFrom: cutoff),
+            for: Self.sessionA)
         let engine = makeEngine(api: api, states: states, context: context)
 
         let summary = try await engine.syncAll()
 
         #expect(summary.totalInserted == 2)
         #expect(summary.accounts[0].skippedTooOld == 1)
-        #expect(try allTransactions(in: context).compactMap(\.externalID) == ["2", "3"])
+        #expect(try allTransactions(in: context).compactMap(\.externalID) == [Self.txID(2), Self.txID(3)])
         // …but the cursor still advanced past everything it saw.
-        #expect(states.state(for: 12).cursor == 3)
+        #expect(states.state(for: Self.sessionA).cursor == Self.txID(3))
     }
 
     @Test func syncWithoutLinkedAccountThrows() async throws {
@@ -291,6 +307,115 @@ struct WalletSyncTests {
             #expect(error == .noLinkedAccounts)
         }
         #expect(api.calls.isEmpty)
+    }
+
+    // MARK: - Self-healing rescan
+
+    /// The self-healing case: a row that becomes visible on the server
+    /// with an id *behind* the stored cursor (two writers, same
+    /// millisecond) can only be picked up by a rescan from "0" — and the
+    /// rescan must not duplicate the rows already imported.
+    @Test func rescanPicksUpLateOutOfOrderRowWithoutDuplicates() async throws {
+        let context = try makeContext()
+        linkedAccount(in: context)
+        let api = WalletSyncFakeAPI()
+        api.items[Self.sessionA] = [
+            bankTransaction(1, amount: 100),
+            bankTransaction(3, amount: 300),
+        ]
+        let states = WalletSyncInMemoryStateStore()
+        let engine = makeEngine(api: api, states: states, context: context)
+        let t0 = baseDate
+        _ = try await engine.syncAll(now: t0)
+
+        // A new server row appears with an id before the stored cursor.
+        api.items[Self.sessionA]!.append(bankTransaction(2, amount: 200))
+
+        // An ordinary sync inside the 24h window stays incremental and
+        // cannot see it.
+        let incremental = try await engine.syncAll(now: t0.addingTimeInterval(3600))
+        #expect(incremental.totalInserted == 0)
+        #expect(api.calls.map(\.afterID) == ["0", Self.txID(3)])
+
+        // The forced rescan re-reads from "0" and picks it up.
+        let rescan = try await engine.syncAll(
+            now: t0.addingTimeInterval(3600), fullRescan: true)
+        #expect(rescan.totalInserted == 1)
+        #expect(rescan.accounts[0].skippedExisting == 2)
+
+        let rows = try allTransactions(in: context)
+        #expect(rows.compactMap(\.externalID) == [Self.txID(1), Self.txID(2), Self.txID(3)])
+        #expect(Set(rows.compactMap(\.externalID)).count == 3)
+        #expect(api.calls.map(\.afterID) == ["0", Self.txID(3), "0"])
+    }
+
+    /// The automatic rescan runs at most once every 24h per linked
+    /// account: the second sync in the window is incremental, a sync past
+    /// the window rescans, and the one after that is incremental again.
+    @Test func autoRescanRunsAtMostOncePerDay() async throws {
+        let context = try makeContext()
+        linkedAccount(in: context)
+        let api = WalletSyncFakeAPI()
+        api.items[Self.sessionA] = [
+            bankTransaction(1, amount: 100),
+            bankTransaction(3, amount: 300),
+        ]
+        let states = WalletSyncInMemoryStateStore()
+        let engine = makeEngine(api: api, states: states, context: context)
+        let t0 = baseDate
+        _ = try await engine.syncAll(now: t0)
+        api.items[Self.sessionA]!.append(bankTransaction(2, amount: 200))
+
+        // 1h later: inside the window — incremental only.
+        _ = try await engine.syncAll(now: t0.addingTimeInterval(3_600))
+        #expect(api.calls.map(\.afterID) == ["0", Self.txID(3)])
+        #expect(try allTransactions(in: context).count == 2)
+
+        // 25h after the first rescan: the rescan fires and finds the
+        // late row.
+        let t1 = t0.addingTimeInterval(25 * 3_600)
+        let rescan = try await engine.syncAll(now: t1)
+        #expect(rescan.totalInserted == 1)
+        #expect(api.calls.map(\.afterID) == ["0", Self.txID(3), "0"])
+
+        // Right after it: back to incremental — no second "0" call.
+        _ = try await engine.syncAll(now: t1.addingTimeInterval(60))
+        #expect(api.calls.map(\.afterID) == ["0", Self.txID(3), "0", Self.txID(3)])
+        #expect(states.state(for: Self.sessionA).lastFullRescanAt == t1)
+    }
+
+    /// The import-from cutoff still applies during a rescan: a late row
+    /// older than the link's start date is skipped, not imported.
+    @Test func rescanStillRespectsImportFrom() async throws {
+        let context = try makeContext()
+        linkedAccount(in: context)
+        let api = WalletSyncFakeAPI()
+        api.items[Self.sessionA] = [
+            bankTransaction(1, amount: 10, dayOffset: -40),
+            bankTransaction(3, amount: 30, dayOffset: 0),
+        ]
+        let states = WalletSyncInMemoryStateStore()
+        let cutoff = AppCalendar.vietnam.startOfDay(
+            for: baseDate.addingTimeInterval(-10 * 86_400))
+        states.setState(
+            WalletSyncAccountState(importFrom: cutoff),
+            for: Self.sessionA)
+        let engine = makeEngine(api: api, states: states, context: context)
+        _ = try await engine.syncAll(now: baseDate)
+        #expect(try allTransactions(in: context).count == 1)
+
+        // A late row appears behind the cursor — but it is also too old.
+        api.items[Self.sessionA]!.append(
+            bankTransaction(2, amount: 20, dayOffset: -40))
+        let rescan = try await engine.syncAll(
+            now: baseDate, fullRescan: true)
+
+        #expect(rescan.totalInserted == 0)
+        #expect(rescan.accounts[0].skippedTooOld == 2)
+        #expect(rescan.accounts[0].skippedExisting == 1)
+        #expect(
+            try allTransactions(in: context).compactMap(\.externalID)
+                == [Self.txID(3)])
     }
 
     // MARK: - Rules
@@ -324,7 +449,7 @@ struct WalletSyncTests {
         let food = try context.fetch(FetchDescriptor<LedgerCategory>())
             .first { $0.name == "Ăn uống" }!
         let api = WalletSyncFakeAPI()
-        api.items[12] = [
+        api.items[Self.sessionA] = [
             bankTransaction(1, amount: -155_000, note: "an uong trua"),
             bankTransaction(2, amount: -50_000, note: "ca phe"),
         ]
@@ -354,7 +479,7 @@ struct WalletSyncTests {
         let food = categories.first { $0.name == "Ăn uống" }!
         let travel = categories.first { $0.name == "Di chuyển" }!
         let api = WalletSyncFakeAPI()
-        api.items[12] = [bankTransaction(1, amount: -100, note: "an uong")]
+        api.items[Self.sessionA] = [bankTransaction(1, amount: -100, note: "an uong")]
         let rules = WalletSyncInMemoryRuleStore(rules: [
             // Dead target — the category id no longer exists.
             WalletSyncRule(
@@ -383,7 +508,7 @@ struct WalletSyncTests {
             name: "Tiền mặt", kind: .cash, openingBalance: 0)
         context.insert(cash)
         let api = WalletSyncFakeAPI()
-        api.items[12] = [
+        api.items[Self.sessionA] = [
             bankTransaction(1, amount: -500_000, note: "RUT TIEN MAT"),
             bankTransaction(2, amount: 5_000_000, note: "CK NOI BO"),
         ]
@@ -426,7 +551,7 @@ struct WalletSyncTests {
         let business = try context.fetch(FetchDescriptor<Business>())
             .first { $0.name == "Căn hộ dịch vụ" }!
         let api = WalletSyncFakeAPI()
-        api.items[12] = [
+        api.items[Self.sessionA] = [
             bankTransaction(1, amount: 6_000_000, note: "TIEN PHONG T11"),
         ]
         let rules = WalletSyncInMemoryRuleStore(rules: [
@@ -448,7 +573,7 @@ struct WalletSyncTests {
         let context = try makeContext()
         linkedAccount(in: context)
         let api = WalletSyncFakeAPI()
-        api.items[12] = [bankTransaction(1, amount: -100, note: "an uong")]
+        api.items[Self.sessionA] = [bankTransaction(1, amount: -100, note: "an uong")]
         let rules = WalletSyncInMemoryRuleStore(rules: [
             WalletSyncRule(
                 keyword: "an uong", direction: .any,
@@ -470,7 +595,7 @@ struct WalletSyncTests {
         let context = try makeContext()
         let account = linkedAccount(in: context)
         let api = WalletSyncFakeAPI()
-        api.items[12] = [
+        api.items[Self.sessionA] = [
             bankTransaction(1, amount: -100),
             bankTransaction(2, amount: 200),
         ]
@@ -482,7 +607,7 @@ struct WalletSyncTests {
         account.externalSource = nil
         account.externalAccountID = nil
         try context.save()
-        states.removeState(for: 12)
+        states.removeState(for: Self.sessionA)
 
         let rows = try allTransactions(in: context)
         #expect(rows.count == 2)
@@ -506,19 +631,20 @@ struct WalletSyncTests {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = WalletSyncStateStore(defaults: defaults)
-        #expect(store.state(for: 12) == WalletSyncAccountState())
+        #expect(store.state(for: Self.sessionA) == WalletSyncAccountState())
 
         let when = Date(timeIntervalSince1970: 1_700_000_000)
         store.setState(
-            WalletSyncAccountState(cursor: 42, importFrom: when, lastSyncAt: when),
-            for: 12)
-        let reloaded = WalletSyncStateStore(defaults: defaults).state(for: 12)
-        #expect(reloaded.cursor == 42)
+            WalletSyncAccountState(cursor: Self.txID(42), importFrom: when, lastSyncAt: when, lastFullRescanAt: when),
+            for: Self.sessionA)
+        let reloaded = WalletSyncStateStore(defaults: defaults).state(for: Self.sessionA)
+        #expect(reloaded.cursor == Self.txID(42))
+        #expect(reloaded.lastFullRescanAt == when)
         #expect(reloaded.importFrom == when)
         #expect(store.lastSyncAt == when)
 
-        store.removeState(for: 12)
-        #expect(store.state(for: 12) == WalletSyncAccountState())
+        store.removeState(for: Self.sessionA)
+        #expect(store.state(for: Self.sessionA) == WalletSyncAccountState())
     }
 
     @Test func ruleStoreRoundTripsThroughUserDefaults() throws {
@@ -557,13 +683,13 @@ struct WalletSyncTests {
         signedIn: Bool = true,
         linked: Bool = true,
         counter: WalletSyncCounter,
-        runSync: (@MainActor () async throws -> WalletSyncSummary)? = nil,
+        runSync: (@MainActor (Bool) async throws -> WalletSyncSummary)? = nil,
         lastSyncAt: Date? = nil
     ) -> WalletSyncCoordinator {
         WalletSyncCoordinator(
             isSignedIn: { signedIn },
             hasLinkedAccounts: { linked },
-            runSync: runSync ?? {
+            runSync: runSync ?? { _ in
                 counter.value += 1
                 return WalletSyncSummary()
             },
@@ -576,7 +702,7 @@ struct WalletSyncTests {
         let counter = WalletSyncCounter()
         let coordinator = makeCoordinator(
             counter: counter,
-            runSync: {
+            runSync: { _ in
                 counter.value += 1
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 return WalletSyncSummary()
@@ -638,7 +764,7 @@ struct WalletSyncTests {
         let counter = WalletSyncCounter()
         let coordinator = makeCoordinator(
             counter: counter,
-            runSync: { throw WalletAPIError.notSignedIn })
+            runSync: { _ in throw WalletAPIError.notSignedIn })
         let ran = await coordinator.syncNow()
         #expect(ran == false)
         if case .failed(let message) = coordinator.syncState {

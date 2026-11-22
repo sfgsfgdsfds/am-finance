@@ -23,14 +23,14 @@ final class WalletSyncCoordinator {
 
     private let isSignedIn: @Sendable () async -> Bool
     private let hasLinkedAccounts: @MainActor () -> Bool
-    private let runSync: @MainActor () async throws -> WalletSyncSummary
+    private let runSync: @MainActor (Bool) async throws -> WalletSyncSummary
     private let countPendingReview: @MainActor () -> Int
     private var inFlight: Task<Bool, Never>?
 
     init(
         isSignedIn: @escaping @Sendable () async -> Bool,
         hasLinkedAccounts: @escaping @MainActor () -> Bool,
-        runSync: @escaping @MainActor () async throws -> WalletSyncSummary,
+        runSync: @escaping @MainActor (Bool) async throws -> WalletSyncSummary,
         countPendingReview: @escaping @MainActor () -> Int,
         lastSyncAt: Date? = nil
     ) {
@@ -57,11 +57,12 @@ final class WalletSyncCoordinator {
 
     /// Starts a sync unless one is already running; concurrent callers get
     /// the in-flight run's result. Returns false without side effects when
-    /// signed out or nothing is linked.
+    /// signed out or nothing is linked. `fullRescan` re-reads every linked
+    /// account from the start cursor — the manual "Đồng bộ lại toàn bộ".
     @discardableResult
-    func syncNow() async -> Bool {
+    func syncNow(fullRescan: Bool = false) async -> Bool {
         if let inFlight { return await inFlight.value }
-        let task = Task { await performSync() }
+        let task = Task { await performSync(fullRescan: fullRescan) }
         inFlight = task
         defer { inFlight = nil }
         return await task.value
@@ -77,11 +78,11 @@ final class WalletSyncCoordinator {
         return await syncNow()
     }
 
-    private func performSync() async -> Bool {
+    private func performSync(fullRescan: Bool) async -> Bool {
         guard await isSignedIn(), hasLinkedAccounts() else { return false }
         syncState = .syncing
         do {
-            let summary = try await runSync()
+            let summary = try await runSync(fullRescan)
             lastSummary = summary
             lastSyncAt = .now
             syncState = .idle
@@ -113,7 +114,7 @@ extension WalletSyncCoordinator {
             hasLinkedAccounts: {
                 !WalletSyncEngine.linkedAccounts(context: context).isEmpty
             },
-            runSync: {
+            runSync: { fullRescan in
                 let client: any WalletSyncAPI
                 if let api {
                     client = api
@@ -128,7 +129,7 @@ extension WalletSyncCoordinator {
                     stateStore: stateStore,
                     ruleStore: ruleStore,
                     context: context
-                ).syncAll()
+                ).syncAll(fullRescan: fullRescan)
             },
             countPendingReview: {
                 WalletSyncEngine.pendingReviewCount(context: context)

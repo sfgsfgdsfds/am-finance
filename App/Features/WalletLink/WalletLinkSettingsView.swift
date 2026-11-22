@@ -124,10 +124,14 @@ struct WalletLinkSettingsView: View {
                     IconBadge(
                         symbol: "building.columns.fill", colorHex: "0A84FF", size: 36)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(account.holderName)
-                        Text("\(account.bank) · \(account.accountNumberMasked)")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
+                        Text(WalletSyncNaming.accountName(
+                            bank: account.bank,
+                            maskedNumber: account.accountNumberMasked))
+                        if let holderName = account.holderName {
+                            Text(holderName)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
                         if let activity = account.lastListenerActivityAt {
                             Text(
                                 "Hoạt động: \(AppDateFormat.shortDate(activity)) \(AppDateFormat.time(activity))"

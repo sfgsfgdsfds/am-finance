@@ -506,10 +506,17 @@ struct WalletLinkTests {
     @Test func decodesAccountsResponse() async throws {
         let server = StubServer { request in
             self.jsonResponse(url: request.url!, json: """
-            {"data":[{"id":12,"bank":"VPBank","account_number_masked":"*1234",\
-            "holder_name":"NGUYEN VAN A","status":"active",\
-            "last_listener_activity_at":"2026-11-22T10:15:00+07:00",\
-            "last_transaction_at":null,"transactions_count":345}]}
+            {"data":[\
+            {"id":"11111111-1111-4111-8111-111111111111","bank":"VPBank",\
+            "account_number_masked":"*7890","holder_name":"NGUYEN VAN A",\
+            "status":"active",\
+            "last_listener_activity_at":"2026-11-22T16:30:00+07:00",\
+            "last_transaction_at":"2026-11-21T10:00:00+07:00",\
+            "transactions_count":2},\
+            {"id":"22222222-2222-4222-8222-222222222222","bank":"VPBank",\
+            "account_number_masked":null,"holder_name":null,"status":"paused",\
+            "last_listener_activity_at":null,"last_transaction_at":null,\
+            "transactions_count":0}]}
             """)
         }
         let accounts = try await makeClient(server: server).accounts()
@@ -518,56 +525,83 @@ struct WalletLinkTests {
         #expect(request.url?.absoluteString == "https://wallet.amx.vn/api/v1/admin/bank/accounts")
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-token")
 
-        let account = try #require(accounts.first)
-        #expect(accounts.count == 1)
-        #expect(account.id == 12)
+        #expect(accounts.count == 2)
+        let account = accounts[0]
+        #expect(account.id == "11111111-1111-4111-8111-111111111111")
         #expect(account.bank == "VPBank")
-        #expect(account.accountNumberMasked == "*1234")
+        #expect(account.accountNumberMasked == "*7890")
         #expect(account.holderName == "NGUYEN VAN A")
         #expect(account.status == "active")
-        #expect(account.transactionsCount == 345)
-        #expect(account.lastTransactionAt == nil)
+        #expect(account.transactionsCount == 2)
+        #expect(account.lastTransactionAt != nil)
 
-        // "+07:00" parsed correctly — 10:15 Vietnam is 03:15 UTC.
+        // Nullable fields survive as nil.
+        #expect(accounts[1].accountNumberMasked == nil)
+        #expect(accounts[1].holderName == nil)
+        #expect(accounts[1].lastListenerActivityAt == nil)
+
+        // "+07:00" parsed correctly — 16:30 Vietnam is 09:30 UTC.
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = TimeZone(identifier: "UTC")!
         let components = utc.dateComponents(
             [.year, .month, .day, .hour, .minute],
             from: try #require(account.lastListenerActivityAt))
         #expect(components.year == 2026 && components.month == 11 && components.day == 22)
-        #expect(components.hour == 3 && components.minute == 15)
+        #expect(components.hour == 9 && components.minute == 30)
     }
 
     @Test func decodesTransactionsWithNullsAndNegativeAmount() async throws {
         let server = StubServer { request in
             self.jsonResponse(url: request.url!, json: """
-            {"data":[{"id":981,"session_id":12,"bank_transaction_id":"FT26327",\
-            "amount":-150000,"currency":"VND",\
-            "transaction_date":"2026-11-22T09:58:12+07:00","note":null,\
+            {"data":[\
+            {"id":"00000000-0000-4000-8000-000000000001",\
+            "session_id":"11111111-1111-4111-8111-111111111111",\
+            "bank_transaction_id":"d41d8cd98f00b204e9800998ecf8427e",\
+            "amount":50000,"currency":"VND",\
+            "transaction_date":"2026-11-20T09:00:00+07:00",\
+            "note":"NAP123456 chuyen tien",\
+            "counterparty_account_masked":"*6655",\
+            "created_at":"2026-11-20T09:05:00+07:00"},\
+            {"id":"00000000-0000-4000-8000-000000000002",\
+            "session_id":"11111111-1111-4111-8111-111111111111",\
+            "bank_transaction_id":"0cc175b9c0f1b6a831c399e269772661",\
+            "amount":-30000,"currency":"VND",\
+            "transaction_date":"2026-11-20T09:00:00+07:00","note":null,\
             "counterparty_account_masked":null,\
-            "created_at":"2026-11-22T09:58:20+07:00"}],\
-            "meta":{"next_after_id":981,"has_more":false,\
-            "server_time":"2026-11-22T10:20:00+07:00"}}
+            "created_at":"2026-11-20T09:05:00+07:00"}],\
+            "meta":{"next_after_id":"00000000-0000-4000-8000-000000000002",\
+            "has_more":true,"server_time":"2026-11-22T16:35:00+07:00"}}
             """)
         }
-        let page = try await makeClient(server: server)
-            .transactions(sessionID: 12, afterID: 0, limit: 200)
+        let page = try await makeClient(server: server).transactions(
+            sessionID: "11111111-1111-4111-8111-111111111111",
+            afterID: "0", limit: 200)
 
         let request = try #require(server.capturedRequests.first)
-        #expect(queryParam(request, "session_id") == "12")
+        #expect(
+            queryParam(request, "session_id")
+            == "11111111-1111-4111-8111-111111111111")
         #expect(queryParam(request, "after_id") == "0")
         #expect(queryParam(request, "limit") == "200")
 
-        let transaction = try #require(page.items.first)
-        #expect(transaction.id == 981)
-        #expect(transaction.sessionId == 12)
-        #expect(transaction.bankTransactionId == "FT26327")
-        #expect(transaction.amount == -150_000)
+        #expect(page.items.count == 2)
+        let transaction = page.items[0]
+        #expect(transaction.id == "00000000-0000-4000-8000-000000000001")
+        #expect(transaction.sessionId == "11111111-1111-4111-8111-111111111111")
+        #expect(transaction.bankTransactionId == "d41d8cd98f00b204e9800998ecf8427e")
+        #expect(transaction.amount == 50_000)
         #expect(transaction.currency == "VND")
-        #expect(transaction.note == nil)
-        #expect(transaction.counterpartyAccountMasked == nil)
-        #expect(page.meta.hasMore == false)
-        #expect(page.meta.nextAfterId == 981)
+        #expect(transaction.note == "NAP123456 chuyen tien")
+        #expect(transaction.counterpartyAccountMasked == "*6655")
+        #expect(transaction.createdAt != nil)
+
+        // Money out arrives as a negative VND integer; nulls stay nil.
+        #expect(page.items[1].amount == -30_000)
+        #expect(page.items[1].note == nil)
+        #expect(page.items[1].counterpartyAccountMasked == nil)
+
+        #expect(page.meta.hasMore == true)
+        #expect(page.meta.nextAfterId == "00000000-0000-4000-8000-000000000002")
         #expect(page.meta.serverTime != nil)
     }
 
@@ -647,35 +681,45 @@ struct WalletLinkTests {
     // MARK: - Paging
 
     @Test func allTransactionsPagesUntilHasMoreIsFalse() async throws {
+        let session = "11111111-1111-4111-8111-111111111111"
         let server = StubServer { request in
             if self.queryParam(request, "after_id") == "0" {
                 return self.jsonResponse(url: request.url!, json: """
                 {"data":[\
-                {"id":1,"session_id":12,"bank_transaction_id":"A",\
-                "amount":1000,"currency":"VND",\
+                {"id":"00000000-0000-4000-8000-000000000001","session_id":"\(session)",\
+                "bank_transaction_id":"A","amount":1000,"currency":"VND",\
                 "transaction_date":"2026-11-22T09:00:00+07:00","note":null,\
                 "counterparty_account_masked":null,"created_at":null},\
-                {"id":2,"session_id":12,"bank_transaction_id":"B",\
-                "amount":2000,"currency":"VND",\
+                {"id":"00000000-0000-4000-8000-000000000002","session_id":"\(session)",\
+                "bank_transaction_id":"B","amount":2000,"currency":"VND",\
                 "transaction_date":"2026-11-22T09:01:00+07:00","note":null,\
                 "counterparty_account_masked":null,"created_at":null}],\
-                "meta":{"next_after_id":2,"has_more":true,"server_time":null}}
+                "meta":{"next_after_id":"00000000-0000-4000-8000-000000000002",\
+                "has_more":true,"server_time":null}}
                 """)
             }
             return self.jsonResponse(url: request.url!, json: """
             {"data":[\
-            {"id":3,"session_id":12,"bank_transaction_id":"C",\
-            "amount":3000,"currency":"VND",\
+            {"id":"00000000-0000-4000-8000-000000000003","session_id":"\(session)",\
+            "bank_transaction_id":"C","amount":3000,"currency":"VND",\
             "transaction_date":"2026-11-22T09:02:00+07:00","note":null,\
             "counterparty_account_masked":null,"created_at":null}],\
-            "meta":{"next_after_id":3,"has_more":false,"server_time":null}}
+            "meta":{"next_after_id":"00000000-0000-4000-8000-000000000003",\
+            "has_more":false,"server_time":null}}
             """)
         }
-        let all = try await makeClient(server: server).allTransactions(sessionID: 12)
+        let all = try await makeClient(server: server)
+            .allTransactions(sessionID: session)
 
-        #expect(all.map(\.id) == [1, 2, 3])
+        #expect(all.map(\.id) == [
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+            "00000000-0000-4000-8000-000000000003",
+        ])
         #expect(server.requestCount == 2)
-        #expect(queryParam(server.capturedRequests[1], "after_id") == "2")
+        #expect(
+            queryParam(server.capturedRequests[1], "after_id")
+            == "00000000-0000-4000-8000-000000000002")
     }
 
     @Test func allTransactionsStopsOnNonAdvancingCursor() async throws {
@@ -683,16 +727,18 @@ struct WalletLinkTests {
             // has_more stays true but the cursor never moves — must not loop.
             self.jsonResponse(url: request.url!, json: """
             {"data":[\
-            {"id":7,"session_id":12,"bank_transaction_id":"A",\
-            "amount":1000,"currency":"VND",\
+            {"id":"00000000-0000-4000-8000-000000000007",\
+            "session_id":"11111111-1111-4111-8111-111111111111",\
+            "bank_transaction_id":"A","amount":1000,"currency":"VND",\
             "transaction_date":"2026-11-22T09:00:00+07:00","note":null,\
             "counterparty_account_masked":null,"created_at":null}],\
-            "meta":{"next_after_id":0,"has_more":true,"server_time":null}}
+            "meta":{"next_after_id":"0","has_more":true,"server_time":null}}
             """)
         }
-        let all = try await makeClient(server: server).allTransactions(sessionID: 12)
+        let all = try await makeClient(server: server).allTransactions(
+            sessionID: "11111111-1111-4111-8111-111111111111")
 
-        #expect(all.map(\.id) == [7])
+        #expect(all.map(\.id) == ["00000000-0000-4000-8000-000000000007"])
         #expect(server.requestCount == 1)
     }
 }
