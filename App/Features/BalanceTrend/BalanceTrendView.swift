@@ -46,6 +46,7 @@ enum BalanceTrendDateLabel {
 struct BalanceTrendView: View {
     let account: Account
 
+    @Environment(\.modelContext) private var context
     @State private var range: BalanceTrendRange = .days30
     @State private var isAnchoring = false
     @State private var inspectedDate: Date?
@@ -54,12 +55,16 @@ struct BalanceTrendView: View {
         self.account = account
     }
 
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
+    }
+
     private var isLiability: Bool { account.kind.isLiability }
     private var chartColor: Color { Color(hex: account.colorHex) }
 
     private var series: BalanceTrendSeries? {
         try? BalanceTrendSeries.build(
-            entries: account.balanceTrendEntries,
+            entries: ledger.balanceTrendEntries(of: account),
             openingBalance: account.openingBalance,
             range: range,
             now: .now,
@@ -123,7 +128,8 @@ struct BalanceTrendView: View {
             Text(account.name)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            AmountText(amount: BalanceTrendSeries.displayed(account.balance, isLiability: isLiability))
+            AmountText(amount: BalanceTrendSeries.displayed(
+                ledger.balance(of: account), isLiability: isLiability))
                 .font(.title.bold())
             Text(isLiability ? "Dư nợ hiện tại" : "Số dư hiện tại")
                 .font(.caption)

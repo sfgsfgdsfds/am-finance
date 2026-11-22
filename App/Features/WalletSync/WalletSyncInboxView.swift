@@ -42,21 +42,30 @@ enum WalletSyncSuggestions {
 /// Fast triage for imported rows: one-tap category chips, swipe to clear,
 /// convert to an internal transfer, or spawn an auto-rule from the note.
 /// Pushed inside an existing NavigationStack — no stack of its own.
+///
+/// The pending list is paged (`pageSize` rows at a time, loaded as the
+/// list scrolls to the end) so a 2,000-row backlog does not fault every
+/// row on open; suggestion chips are computed once per direction for the
+/// whole list, not once per row.
 struct WalletSyncInboxView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \LedgerCategory.sortOrder) private var categories: [LedgerCategory]
     @Query(sort: \Business.sortOrder) private var businesses: [Business]
     @Query(sort: \Account.sortOrder) private var accounts: [Account]
-    /// Pending rows, newest first.
-    @Query private var pending: [LedgerTransaction]
     /// The suggestion window — transactions of the last 90 days.
     @Query private var recent: [LedgerTransaction]
 
     private let ruleStore: any WalletSyncRuleStoring
+    private static let pageSize = 60
 
     @State private var editing: LedgerTransaction?
     @State private var transferTarget: LedgerTransaction?
     @State private var ruleTarget: LedgerTransaction?
+    /// The loaded prefix of pending rows, newest first.
+    @State private var pending: [LedgerTransaction] = []
+    /// Total pending rows in the store — `pending.count < total` means
+    /// more pages exist.
+    @State private var totalPending = 0
 
     init(ruleStore: (any WalletSyncRuleStoring)? = nil) {
         self.ruleStore = ruleStore ?? WalletSyncRuleStore()
@@ -65,28 +74,55 @@ struct WalletSyncInboxView: View {
             value: -WalletSyncSuggestions.windowDays,
             to: .now
         ) ?? .now
-        _pending = Query(
-            filter: #Predicate { $0.needsReview == true },
-            sort: \.date, order: .reverse)
-        _recent = Query(
-            filter: #Predicate { $0.date >= cutoff },
-            sort: \.date, order: .reverse)
+        var recentFetch = FetchDescriptor<LedgerTransaction>(
+            predicate: #Predicate { $0.date >= cutoff },
+            sortBy: [SortDescriptor(\.date, order: .reverse)]
+        )
+        recentFetch.relationshipKeyPathsForPrefetching = [\.category]
+        _recent = Query(recentFetch)
+    }
+
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
     }
 
     var body: some View {
+        // Suggestion chips per direction — computed once per body
+        // evaluation instead of once per row (each access re-scanned the
+        // 90-day window in the old code).
+        let expenseSuggestions = WalletSyncSuggestions.top(
+            kind: .expense, transactions: recent,
+            categories: categories, now: .now)
+        let incomeSuggestions = WalletSyncSuggestions.top(
+            kind: .income, transactions: recent,
+            categories: categories, now: .now)
         List {
             ForEach(sections) { section in
                 Section(AppDateFormat.dayHeader(section.day, now: .now)) {
                     ForEach(section.rows) { row in
-                        rowView(row)
+                        rowView(
+                            row,
+                            expenseSuggestions: expenseSuggestions,
+                            incomeSuggestions: incomeSuggestions)
                     }
+                }
+            }
+            if pending.count < totalPending {
+                Section {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                            .accessibilityLabel("Đang tải thêm")
+                        Spacer()
+                    }
+                    .onAppear(perform: loadNextPage)
                 }
             }
         }
         .listStyle(.insetGrouped)
         .navigationTitle("Chờ phân loại")
         .overlay {
-            if sections.isEmpty {
+            if pending.isEmpty && totalPending == 0 {
                 EmptyStateView(
                     symbol: "checkmark.tray.fill",
                     title: "Không còn gì chờ",
@@ -94,6 +130,12 @@ struct WalletSyncInboxView: View {
                 )
             }
         }
+        .task { refresh() }
+        .onAppear(perform: refresh)
+        // Any ledger save — local edits, an import finishing — re-reads
+        // the loaded window so rows that were classified elsewhere drop
+        // out and freshly pending rows appear.
+        .onChange(of: ledger.changeCount) { _, _ in refresh() }
         .sheet(item: $editing) { transaction in
             TransactionEditorView(transaction: transaction)
         }
@@ -105,6 +147,7 @@ struct WalletSyncInboxView: View {
             ) { picked in
                 _ = WalletSyncTransfer.convert(transaction, with: picked)
                 try? context.save()
+                drop(transaction.id)
             }
         }
         .sheet(item: $ruleTarget) { transaction in
@@ -129,7 +172,11 @@ struct WalletSyncInboxView: View {
         Dictionary(pending.map { ($0.id, $0) }) { first, _ in first }
     }
 
-    private func rowView(_ row: TransactionListRow) -> some View {
+    private func rowView(
+        _ row: TransactionListRow,
+        expenseSuggestions: [LedgerCategory],
+        incomeSuggestions: [LedgerCategory]
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -149,7 +196,10 @@ struct WalletSyncInboxView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            suggestionChips(row)
+            suggestionChips(
+                row,
+                expenseSuggestions: expenseSuggestions,
+                incomeSuggestions: incomeSuggestions)
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
@@ -187,19 +237,16 @@ struct WalletSyncInboxView: View {
     }
 
     @ViewBuilder
-    private func suggestionChips(_ row: TransactionListRow) -> some View {
-        let kind: CategoryKind? = switch row.kind {
-        case .income: .income
-        case .expense: .expense
-        case .transfer: nil
+    private func suggestionChips(
+        _ row: TransactionListRow,
+        expenseSuggestions: [LedgerCategory],
+        incomeSuggestions: [LedgerCategory]
+    ) -> some View {
+        let suggestions = switch row.kind {
+        case .income: incomeSuggestions
+        case .expense: expenseSuggestions
+        case .transfer: [LedgerCategory]()
         }
-        let suggestions = kind.map {
-            WalletSyncSuggestions.top(
-                kind: $0,
-                transactions: recent,
-                categories: categories,
-                now: .now)
-        } ?? []
         if !suggestions.isEmpty {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -227,6 +274,45 @@ struct WalletSyncInboxView: View {
         }
     }
 
+    // MARK: - Paging
+
+    private static func pendingDescriptor(
+        offset: Int, limit: Int
+    ) -> FetchDescriptor<LedgerTransaction> {
+        var descriptor = FetchDescriptor<LedgerTransaction>(
+            predicate: #Predicate { $0.needsReview == true },
+            sortBy: [SortDescriptor(\.date, order: .reverse)])
+        descriptor.fetchOffset = offset
+        descriptor.fetchLimit = limit
+        return descriptor
+    }
+
+    /// (Re)loads the first page, keeping the currently loaded span so the
+    /// scroll position is not lost when the ledger changes under us.
+    private func refresh() {
+        let limit = max(Self.pageSize, pending.count)
+        pending = (try? context.fetch(
+            Self.pendingDescriptor(offset: 0, limit: limit))) ?? []
+        totalPending = WalletSyncEngine.pendingReviewCount(context: context)
+    }
+
+    private func loadNextPage() {
+        guard pending.count < totalPending else { return }
+        let more = (try? context.fetch(
+            Self.pendingDescriptor(
+                offset: pending.count, limit: Self.pageSize))) ?? []
+        pending.append(contentsOf: more)
+    }
+
+    /// Drops a classified row locally — the store refresh reconciles the
+    /// rest.
+    private func drop(_ id: UUID) {
+        if pending.contains(where: { $0.id == id }) {
+            pending.removeAll { $0.id == id }
+            totalPending = max(0, totalPending - 1)
+        }
+    }
+
     // MARK: - Actions
 
     private func markReviewed(_ id: UUID) {
@@ -234,6 +320,7 @@ struct WalletSyncInboxView: View {
         transaction.needsReview = false
         transaction.updatedAt = .now
         try? context.save()
+        drop(id)
     }
 
     private func applyCategory(_ category: LedgerCategory, to id: UUID) {
@@ -243,27 +330,33 @@ struct WalletSyncInboxView: View {
         transaction.needsReview = false
         transaction.updatedAt = .now
         try? context.save()
+        drop(id)
     }
 
     /// After a rule is created from a row: re-apply the whole rule list to
-    /// every still-pending row — older rules keep their priority.
+    /// every still-pending row — older rules keep their priority. Fetches
+    /// all pending rows (not just the loaded page) since the user asked
+    /// for a full pass.
     private func applyRulesToPending() {
-        let rules = ruleStore.loadRules()
+        let rules = WalletSyncCompiledRules(rules: ruleStore.loadRules())
         let categoryMap = Dictionary(
             categories.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let businessMap = Dictionary(
             businesses.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let accountMap = Dictionary(
             accounts.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        for transaction in pending where transaction.needsReview {
-            WalletSyncRuleApplier.apply(
+        let allPending = (try? context.fetch(
+            FetchDescriptor<LedgerTransaction>(
+                predicate: #Predicate { $0.needsReview == true }))) ?? []
+        for transaction in allPending {
+            rules.apply(
                 to: transaction,
-                rules: rules,
                 categories: categoryMap,
                 businesses: businessMap,
                 accounts: accountMap)
         }
         try? context.save()
+        refresh()
     }
 }
 
@@ -274,6 +367,11 @@ struct WalletSyncTransferPicker: View {
     let onPick: (Account) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var context
+
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
+    }
 
     var body: some View {
         NavigationStack {
@@ -282,7 +380,8 @@ struct WalletSyncTransferPicker: View {
                     IconBadge(symbol: account.icon, colorHex: account.colorHex, size: 32)
                     Text(account.name)
                     Spacer()
-                    AmountText(amount: account.balance, compact: true)
+                    AmountText(
+                        amount: ledger.balance(of: account), compact: true)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

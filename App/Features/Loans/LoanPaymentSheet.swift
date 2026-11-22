@@ -104,6 +104,7 @@ struct LoanPaymentSheet: View {
 /// cash, bank and e-wallet (`AccountKind.canPay`) — each shown with its
 /// compact balance. Shared by the payment and prepayment sheets.
 struct LoanPayingAccountPicker: View {
+    @Environment(\.modelContext) private var context
     @Query(sort: \Account.sortOrder) private var accounts: [Account]
     @Binding var selection: Account?
 
@@ -114,7 +115,11 @@ struct LoanPayingAccountPicker: View {
                     HStack {
                         Text(candidate.name)
                         Spacer(minLength: 8)
-                        AmountText(amount: candidate.balance, compact: true)
+                        AmountText(
+                            amount: LedgerBalanceStores.shared(
+                                for: context.container
+                            ).balance(of: candidate),
+                            compact: true)
                             .font(.subheadline)
                     }
                 } icon: {

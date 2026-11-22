@@ -24,19 +24,33 @@ struct ReceivableActionSheet: View {
     init(account: Account, kind: ReceivableSheetKind) {
         self.account = account
         self.kind = kind
-        // The repayment sheet starts at "everything the client still owes".
+        // The repayment sheet starts at "everything the client still
+        // owes" — read through the shared ledger cache when the account
+        // already lives in a container.
         _amount = State(initialValue: kind == .repayment
-            ? ReceivableSnapshot.make(account: account).outstanding
+            ? Self.snapshot(of: account).outstanding
             : 0)
         _date = State(initialValue: .now)
         _note = State(initialValue: kind.defaultNote(clientName: account.name))
     }
 
-    private static func outstanding(of account: Account) -> Int64 {
-        ReceivableSnapshot.make(account: account).outstanding
+    /// The receivable snapshot through the container's `LedgerBalanceStore`
+    /// when reachable, else the direct relationship walk.
+    private static func snapshot(of account: Account) -> ReceivableSnapshot {
+        if let store = account.modelContext
+            .map({ LedgerBalanceStores.shared(for: $0.container) }) {
+            return store.receivableSnapshot(of: account)
+        }
+        return ReceivableSnapshot.make(account: account)
     }
 
-    private var outstanding: Int64 { Self.outstanding(of: account) }
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
+    }
+
+    private var outstanding: Int64 {
+        ledger.receivableSnapshot(of: account).outstanding
+    }
 
     /// Accounts the counterparty may be: advance payers (cash, bank,
     /// eWallet, credit card) or receivers (cash, bank, eWallet).
@@ -182,7 +196,8 @@ struct ReceivableActionSheet: View {
                     HStack {
                         Text(option.name)
                         Spacer(minLength: 8)
-                        AmountText(amount: option.balance, compact: true)
+                        AmountText(
+                            amount: ledger.balance(of: option), compact: true)
                             .font(.subheadline)
                     }
                 } icon: {

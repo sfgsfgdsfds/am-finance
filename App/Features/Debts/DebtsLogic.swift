@@ -186,12 +186,17 @@ enum DebtsUpcoming {
 /// `CreditCardOverview` and `LoanPlan` so every number matches the detail
 /// screens. Shared by the debts tab and the dashboard card.
 enum DebtsUpcomingMapper {
+    /// `balanceOf`/`cardEntriesOf` default to the straightforward
+    /// relationship walks; screens with a `LedgerBalanceStore` feed the
+    /// cached variants so the map is O(1) per account.
     static func items(
         for accounts: [Account],
         basisStore: LoanInterestBasisStore = LoanInterestBasisStore(),
         now: Date,
         calendar: Calendar = AppCalendar.vietnam,
-        withinDays: Int? = nil
+        withinDays: Int? = nil,
+        balanceOf: (Account) -> Int64 = { $0.balance },
+        cardEntriesOf: (Account) -> [CreditCardEntry] = { $0.creditCardEntries }
     ) -> [DebtsUpcomingItem] {
         var cards: [DebtsUpcoming.CardDue] = []
         var loans: [DebtsUpcoming.LoanDue] = []
@@ -201,7 +206,7 @@ enum DebtsUpcomingMapper {
                 guard let config = account.creditCardCycleConfig else { continue }
                 let overview = CreditCardOverview.build(
                     openingBalance: account.openingBalance,
-                    entries: account.creditCardEntries,
+                    entries: cardEntriesOf(account),
                     config: config,
                     creditLimit: account.creditLimit,
                     now: now,
@@ -217,6 +222,7 @@ enum DebtsUpcomingMapper {
             case .loan:
                 guard let plan = LoanPlan(
                     account: account,
+                    balance: balanceOf(account),
                     basis: basisStore.basis(for: account.id),
                     calendar: calendar
                 ), let next = plan.nextInstallment else { continue }

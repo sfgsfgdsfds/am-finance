@@ -46,6 +46,11 @@ struct AMFinanceApp: App {
                     .onReceive(NotificationCenter.default.publisher(
                         for: .dataResetCompleted
                     )) { _ in
+                        // The container is already wiped and reseeded by
+                        // this point; bump the store so no stale aggregate
+                        // survives while views rebuild.
+                        LedgerBalanceStores.shared(for: container)
+                            .invalidate()
                         dataResetToken = UUID()
                     }
             } else {

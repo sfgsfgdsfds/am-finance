@@ -8,11 +8,17 @@ import FinanceCore
 struct AccountDetailView: View {
     let account: Account
 
+    @Environment(\.modelContext) private var context
+
     @State private var isEditing = false
     @State private var isAnchoring = false
 
     init(account: Account) {
         self.account = account
+    }
+
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
     }
 
     var body: some View {
@@ -81,7 +87,7 @@ struct AccountDetailView: View {
             Text(account.kind.displayName)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            AmountText(amount: account.balance)
+            AmountText(amount: ledger.balance(of: account))
                 .font(.title.bold())
             Text(account.kind.isLiability ? "Dư nợ hiện tại" : "Số dư hiện tại")
                 .font(.caption)
@@ -92,7 +98,7 @@ struct AccountDetailView: View {
     // MARK: - Credit card
 
     /// Debt carried on the card — the account's negative balance, clamped.
-    private var cardDebt: Int64 { max(0, -account.balance) }
+    private var cardDebt: Int64 { max(0, -ledger.balance(of: account)) }
 
     private var cardCycleInfo: AccountCardCycleInfo? {
         AccountCardCycleInfo(
@@ -144,7 +150,9 @@ struct AccountDetailView: View {
             if let principal = account.loanPrincipal {
                 LabeledContent("Số tiền gốc", value: VND.format(principal))
             }
-            LabeledContent("Dư nợ còn lại", value: VND.format(max(0, -account.balance)))
+            LabeledContent(
+                "Dư nợ còn lại",
+                value: VND.format(max(0, -ledger.balance(of: account))))
             if let rate = account.loanAnnualRatePercent {
                 LabeledContent(
                     "Lãi suất",

@@ -98,6 +98,20 @@ workers know what already exists. Pushed views must not create their own
 - `WalletLink/` — `WalletLinkSettingsView` (OIDC sign-in to wallet.amx.vn via auth.amx.vn).
 - `WalletSync/` — `WalletSyncAccountsView`, `WalletSyncInboxView`, `WalletSyncRulesView`, `WalletSyncStatusBanner`, `.walletSyncAutoRefresh()` modifier; shared `WalletSyncCoordinator` created in `AMFinanceApp`.
 
+## Performance
+
+- `App/Models/LedgerBalanceStore.swift` caches every account balance plus
+  card/trend/receivable entries in one pass over fetched transactions.
+  Views must read `LedgerBalanceStores.shared(for: container)` (e.g.
+  `ledger.balance(of:)`), not the per-account relationship walks;
+  `Account.balance` stays the fallback for non-UI callers and stale reads.
+- Invalidation is automatic: `ModelContext.didSave` bumps a version, and a
+  `LedgerAggregateFetcher` model actor recomputes off-main. Any write that
+  bypasses `save()` must call `ledger.invalidate()` manually.
+- The 30k-row benchmark suite is `PerformanceBenchmark` in
+  `AppTests/PerformanceTests.swift` — gated off by default; enable by
+  creating `<app container>/tmp/amfinance-perf-big` and running that suite.
+
 ## Release
 
 - `scripts/archive.sh` builds and exports an IPA for TestFlight.

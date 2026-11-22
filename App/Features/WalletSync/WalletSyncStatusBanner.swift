@@ -9,11 +9,13 @@ import FinanceCore
 struct WalletSyncStatusBanner: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Account.sortOrder) private var accounts: [Account]
-    @Query private var pending: [LedgerTransaction]
 
     private let coordinator: WalletSyncCoordinator?
     private let defaults: UserDefaults
     @State private var own: WalletSyncCoordinator?
+    /// `fetchCount` fallback shown until the coordinator exists; after
+    /// that the banner tracks `coordinator.pendingReviewCount`.
+    @State private var pendingCount = 0
 
     init(
         coordinator: WalletSyncCoordinator? = nil,
@@ -21,9 +23,6 @@ struct WalletSyncStatusBanner: View {
     ) {
         self.coordinator = coordinator
         self.defaults = defaults
-        _pending = Query(
-            filter: #Predicate { $0.needsReview == true },
-            sort: \.date, order: .reverse)
     }
 
     private var linked: [Account] {
@@ -36,13 +35,25 @@ struct WalletSyncStatusBanner: View {
         coordinator ?? own
     }
 
+    private var pending: Int {
+        resolved?.pendingReviewCount ?? pendingCount
+    }
+
     var body: some View {
         if !linked.isEmpty {
             card
                 .task {
+                    pendingCount = WalletSyncEngine.pendingReviewCount(
+                        context: context)
                     if resolved == nil {
                         own = .live(context: context, defaults: defaults)
                     }
+                }
+                // Popping back from the inbox: re-count what was classified.
+                .onAppear {
+                    pendingCount = WalletSyncEngine.pendingReviewCount(
+                        context: context)
+                    resolved?.refreshPendingCount()
                 }
         }
     }
@@ -54,9 +65,9 @@ struct WalletSyncStatusBanner: View {
             } label: {
                 HStack(spacing: 12) {
                     IconBadge(
-                        symbol: pending.isEmpty
+                        symbol: pending == 0
                             ? "checkmark.circle.fill" : "tray.full.fill",
-                        colorHex: pending.isEmpty ? "0A84FF" : "FF9500",
+                        colorHex: pending == 0 ? "0A84FF" : "FF9500",
                         size: 36)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(title)
@@ -96,9 +107,9 @@ struct WalletSyncStatusBanner: View {
     }
 
     private var title: String {
-        pending.isEmpty
+        pending == 0
             ? "Đồng bộ ngân hàng"
-            : "\(pending.count) giao dịch chờ phân loại"
+            : "\(pending) giao dịch chờ phân loại"
     }
 
     private var subtitle: String {

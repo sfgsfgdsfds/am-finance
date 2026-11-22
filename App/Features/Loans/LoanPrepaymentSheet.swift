@@ -27,7 +27,7 @@ struct LoanPrepaymentSheet: View {
                     Text("Số tiền gốc trả trước")
                 } footer: {
                     Text(
-                        "Dư nợ còn lại \(VND.format(max(0, -account.balance))). "
+                        "Dư nợ còn lại \(VND.format(max(0, -LedgerBalanceStores.shared(for: context.container).balance(of: account)))). "
                         + "Lịch trả nợ sẽ tự điều chỉnh theo số tiền đã trả."
                     )
                 }

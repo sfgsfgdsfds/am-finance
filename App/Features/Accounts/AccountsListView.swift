@@ -15,6 +15,10 @@ struct AccountsListView: View {
 
     init() {}
 
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
+    }
+
     var body: some View {
         Group {
             if accounts.isEmpty {
@@ -48,7 +52,7 @@ struct AccountsListView: View {
             isPresented: deleteAlertPresented,
             presenting: pendingDelete
         ) { account in
-            if AccountGrouping.canDelete(account) {
+            if !ledger.hasActivity(of: account) {
                 Button("Xoá", role: .destructive) {
                     context.delete(account)
                 }
@@ -60,7 +64,7 @@ struct AccountsListView: View {
                 Button("Huỷ", role: .cancel) {}
             }
         } message: { account in
-            if AccountGrouping.canDelete(account) {
+            if !ledger.hasActivity(of: account) {
                 Text("Xoá \"\(account.name)\"? Thao tác này không thể hoàn tác.")
             } else {
                 Text("\"\(account.name)\" đã có giao dịch nên không thể xoá. Bạn có thể lưu trữ để ẩn tài khoản này.")
@@ -87,7 +91,11 @@ struct AccountsListView: View {
                     .listRowBackground(Color.clear)
             }
 
-            ForEach(AccountGrouping.sections(from: accounts), id: \.kind) { section in
+            ForEach(
+                AccountGrouping.sections(
+                    from: accounts, balanceOf: { ledger.balance(of: $0) }),
+                id: \.kind
+            ) { section in
                 Section {
                     ForEach(section.accounts, id: \.id) { account in
                         row(account)
@@ -134,7 +142,7 @@ struct AccountsListView: View {
                 IconBadge(symbol: account.icon, colorHex: account.colorHex, size: 36)
                 Text(account.name)
                 Spacer()
-                AmountText(amount: account.balance)
+                AmountText(amount: ledger.balance(of: account))
             }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -161,18 +169,31 @@ struct AccountsListView: View {
 private struct AccountNetWorthCard: View {
     let accounts: [Account]
 
+    @Environment(\.modelContext) private var context
+
+    private func balance(of account: Account) -> Int64 {
+        LedgerBalanceStores.shared(for: context.container)
+            .balance(of: account)
+    }
+
     var body: some View {
         VStack(spacing: 10) {
             Text("Tài sản ròng")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            AmountText(amount: NetWorth.total(accounts))
+            AmountText(
+                amount: NetWorth.total(accounts, balanceOf: balance(of:)))
                 .font(.title.bold())
 
             HStack(spacing: 0) {
-                column(title: "Tài sản", amount: NetWorth.assets(accounts))
+                column(
+                    title: "Tài sản",
+                    amount: NetWorth.assets(accounts, balanceOf: balance(of:)))
                 Divider().frame(height: 32)
-                column(title: "Nợ", amount: NetWorth.liabilities(accounts))
+                column(
+                    title: "Nợ",
+                    amount: NetWorth.liabilities(
+                        accounts, balanceOf: balance(of:)))
             }
         }
         .padding(.vertical, 16)

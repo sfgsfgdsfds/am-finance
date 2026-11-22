@@ -14,15 +14,17 @@ struct DashboardView: View {
     @Query(sort: \Business.sortOrder) private var businesses: [Business]
     /// Transactions of the last six calendar months, newest first — covers
     /// the month cards, the chart, top categories, business P&L and the
-    /// latest-eight strip.
+    /// latest-eight strip. Relationships are prefetched once so mapping
+    /// rows for the snapshot does not fault each transaction separately.
     @Query private var windowTransactions: [LedgerTransaction]
-    @Query private var pendingReview: [LedgerTransaction]
 
     @State private var editing: LedgerTransaction?
     @State private var isCreating = false
     /// Cheap `fetchCount` (no rows loaded) so a user whose only transactions
     /// are older than six months is not greeted with the empty-state card.
     @State private var transactionCount = 0
+    /// Same trick for the pending-review badge: a count, not the rows.
+    @State private var pendingReviewCount = 0
 
     /// Shared coordinator from `AMFinanceApp`, forwarded to the sync
     /// banner — nil under `-uiTestInMemoryStore`.
@@ -36,16 +38,13 @@ struct DashboardView: View {
         ).start
         let windowStart = calendar.date(byAdding: .month, value: -5, to: monthStart)
             ?? monthStart
-        _windowTransactions = Query(
-            filter: #Predicate { $0.date >= windowStart },
-            sort: \.date,
-            order: .reverse
+        var fetch = FetchDescriptor<LedgerTransaction>(
+            predicate: #Predicate { $0.date >= windowStart },
+            sortBy: [SortDescriptor(\.date, order: .reverse)]
         )
-        _pendingReview = Query(
-            filter: #Predicate { $0.needsReview == true },
-            sort: \.date,
-            order: .reverse
-        )
+        fetch.relationshipKeyPathsForPrefetching =
+            [\.account, \.toAccount, \.category, \.business]
+        _windowTransactions = Query(fetch)
     }
 
     var body: some View {
@@ -122,13 +121,16 @@ struct DashboardView: View {
             .sheet(isPresented: $isCreating) {
                 TransactionEditorView()
             }
-            .task(refreshTransactionCount)
-            .onAppear(perform: refreshTransactionCount)
-            .onChange(of: windowTransactions.count) { _, _ in
-                refreshTransactionCount()
+            .task {
+                LedgerBalanceStores.shared(for: context.container).warmUp()
+                refreshCounts()
             }
-            .onChange(of: pendingReview.count) { _, _ in
-                refreshTransactionCount()
+            .onAppear(perform: refreshCounts)
+            .onChange(of: windowTransactions.count) { _, _ in
+                refreshCounts()
+            }
+            .onChange(of: syncCoordinator?.pendingReviewCount ?? -1) { _, _ in
+                refreshCounts()
             }
         }
     }
@@ -142,15 +144,20 @@ struct DashboardView: View {
     /// Debt payments due within the next 14 days (overdue ones included) —
     /// drives the "Sắp đến hạn" card, hidden when empty.
     private var upcomingItems: [DebtsUpcomingItem] {
-        DebtsUpcomingMapper.items(
-            for: accounts, now: .now, calendar: AppCalendar.vietnam, withinDays: 14
+        let ledger = LedgerBalanceStores.shared(for: context.container)
+        return DebtsUpcomingMapper.items(
+            for: accounts, now: .now, calendar: AppCalendar.vietnam,
+            withinDays: 14,
+            balanceOf: { ledger.balance(of: $0) },
+            cardEntriesOf: { ledger.creditCardEntries(of: $0) }
         )
     }
 
     // MARK: - Snapshot
 
     private var snapshot: DashboardSnapshot {
-        DashboardSnapshot.make(
+        let ledger = LedgerBalanceStores.shared(for: context.container)
+        return DashboardSnapshot.make(
             entries: windowTransactions.map { transaction in
                 ReportEntry(
                     date: transaction.date,
@@ -183,7 +190,7 @@ struct DashboardView: View {
                     isLiability: account.kind.isLiability,
                     icon: account.icon,
                     colorHex: account.colorHex,
-                    balance: account.balance,
+                    balance: ledger.balance(of: account),
                     isArchived: account.isArchived,
                     sortOrder: account.sortOrder
                 )
@@ -198,19 +205,21 @@ struct DashboardView: View {
                     name: $0.name, icon: $0.icon, colorHex: $0.colorHex
                 ))
             }),
-            pendingReviewCount: pendingReview.count,
+            pendingReviewCount: pendingReviewCount,
             hasAnyTransaction: transactionCount > 0
                 || !windowTransactions.isEmpty
-                || !pendingReview.isEmpty,
+                || pendingReviewCount > 0,
             now: .now,
             calendar: AppCalendar.vietnam
         )
     }
 
-    private func refreshTransactionCount() {
+    private func refreshCounts() {
         transactionCount = (try? context.fetchCount(
             FetchDescriptor<LedgerTransaction>()
         )) ?? 0
+        pendingReviewCount = WalletSyncEngine.pendingReviewCount(
+            context: context)
     }
 }
 

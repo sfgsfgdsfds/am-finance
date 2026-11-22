@@ -71,8 +71,13 @@ enum WalletSyncNaming {
 /// cursor would miss forever. So each account also rescans from the "0"
 /// cursor — at most once every `fullRescanInterval`, or whenever the
 /// caller forces it. Dedupe by `externalID` keeps the rescan idempotent.
-@MainActor
-struct WalletSyncEngine {
+///
+/// The engine is actor-agnostic: it works on whichever `ModelContext` it
+/// is given, so the foreground coordinator hands it a worker context and
+/// a 30k-row import never blocks the UI. `@unchecked Sendable` because a
+/// `ModelContext` is only safe on one executor at a time — each call site
+/// owns its context for the duration of the sync (worker or runner).
+struct WalletSyncEngine: @unchecked Sendable {
     /// `externalSource` marker on linked accounts and imported rows.
     static let externalSource = "wallet.amx.vn"
     /// Minimum gap between two automatic full rescans — one day.
@@ -87,7 +92,7 @@ struct WalletSyncEngine {
     /// Fired after each page is committed — lets a caller collect the rows
     /// that actually landed even when a later page fails and `syncAll`
     /// throws (those committed rows are still new imports).
-    var onPageCommitted: (([WalletSyncInsertedTransaction]) -> Void)?
+    var onPageCommitted: (@Sendable ([WalletSyncInsertedTransaction]) -> Void)?
 
     init(
         api: any WalletSyncAPI,
@@ -144,29 +149,8 @@ struct WalletSyncEngine {
         // One fetch per sync: every externalID ever imported (on any
         // account) or tombstoned blocks a re-import.
         var known = knownExternalIDs()
-        var summary = WalletSyncSummary()
-        for (sessionID, account) in linked {
-            summary.accounts.append(
-                try await syncAccount(
-                    sessionID: sessionID, account: account, now: now,
-                    fullRescan: fullRescan, known: &known))
-        }
-        return summary
-    }
-
-    /// One account's page loop: fetch → insert → save → advance cursor.
-    private func syncAccount(
-        sessionID: String, account: Account, now: Date, fullRescan: Bool,
-        known: inout Set<String>
-    ) async throws -> WalletSyncAccountResult {
-        var state = stateStore.state(for: sessionID)
-        // A nil `lastFullRescanAt` means this account never scanned from
-        // the start — the first sync after linking counts as the rescan.
-        let rescan = fullRescan || state.lastFullRescanAt
-            .map({ now.timeIntervalSince($0) >= Self.fullRescanInterval }) ?? true
-        var cursor = rescan ? WalletSyncAccountState.startCursor : state.cursor
-        var result = WalletSyncAccountResult(sessionID: sessionID)
-        let rules = ruleStore.loadRules()
+        // Per-sync rule + lookup fetches — once, not per linked account.
+        let rules = WalletSyncCompiledRules(rules: ruleStore.loadRules())
         let categories = Dictionary(
             ((try? context.fetch(FetchDescriptor<LedgerCategory>())) ?? []).map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first })
@@ -176,6 +160,34 @@ struct WalletSyncEngine {
         let accounts = Dictionary(
             ((try? context.fetch(FetchDescriptor<Account>())) ?? []).map { ($0.id, $0) },
             uniquingKeysWith: { first, _ in first })
+        var summary = WalletSyncSummary()
+        for (sessionID, account) in linked {
+            summary.accounts.append(
+                try await syncAccount(
+                    sessionID: sessionID, account: account, now: now,
+                    fullRescan: fullRescan, known: &known,
+                    rules: rules, categories: categories,
+                    businesses: businesses, accounts: accounts))
+        }
+        return summary
+    }
+
+    /// One account's page loop: fetch → insert → save → advance cursor.
+    private func syncAccount(
+        sessionID: String, account: Account, now: Date, fullRescan: Bool,
+        known: inout Set<String>,
+        rules: WalletSyncCompiledRules,
+        categories: [UUID: LedgerCategory],
+        businesses: [UUID: Business],
+        accounts: [UUID: Account]
+    ) async throws -> WalletSyncAccountResult {
+        var state = stateStore.state(for: sessionID)
+        // A nil `lastFullRescanAt` means this account never scanned from
+        // the start — the first sync after linking counts as the rescan.
+        let rescan = fullRescan || state.lastFullRescanAt
+            .map({ now.timeIntervalSince($0) >= Self.fullRescanInterval }) ?? true
+        var cursor = rescan ? WalletSyncAccountState.startCursor : state.cursor
+        var result = WalletSyncAccountResult(sessionID: sessionID)
 
         while true {
             // Honours task expiration between committed pages — a
@@ -207,9 +219,8 @@ struct WalletSyncEngine {
                 transaction.externalSource = Self.externalSource
                 transaction.externalID = externalID
                 context.insert(transaction)
-                WalletSyncRuleApplier.apply(
+                rules.apply(
                     to: transaction,
-                    rules: rules,
                     categories: categories,
                     businesses: businesses,
                     accounts: accounts
@@ -269,5 +280,28 @@ struct WalletSyncEngine {
     /// Overflow-safe |amount|: Int64.min has no positive counterpart.
     private func magnitude(of amount: Int64) -> Int64 {
         amount == Int64.min ? Int64.max : abs(amount)
+    }
+}
+
+/// A `ModelActor` that runs `WalletSyncEngine.syncAll` on its own context
+/// and executor — the foreground import path. Everything the engine
+/// touches (linked accounts, inserted rows, page saves) stays on the
+/// worker's context; the main actor only awaits the summary.
+@ModelActor
+actor WalletSyncWorker {
+    func syncAll(
+        api: any WalletSyncAPI,
+        stateStore: any WalletSyncStateStoring,
+        ruleStore: any WalletSyncRuleStoring,
+        now: Date = .now,
+        fullRescan: Bool = false
+    ) async throws -> WalletSyncSummary {
+        let engine = WalletSyncEngine(
+            api: api,
+            stateStore: stateStore,
+            ruleStore: ruleStore,
+            context: modelContext
+        )
+        return try await engine.syncAll(now: now, fullRescan: fullRescan)
     }
 }

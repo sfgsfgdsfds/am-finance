@@ -24,14 +24,19 @@ enum AccountGrouping {
     /// Non-archived accounts grouped by kind, in the fixed order
     /// cash, bank, eWallet, creditCard, loan. Kinds with no accounts are
     /// dropped; inside a section accounts sort by `sortOrder` then name.
-    static func sections(from accounts: [Account]) -> [AccountSection] {
+    /// `balanceOf` lets callers feed cached balances (defaults to the
+    /// straightforward `account.balance` walk).
+    static func sections(
+        from accounts: [Account],
+        balanceOf: (Account) -> Int64 = { $0.balance }
+    ) -> [AccountSection] {
         AccountKind.allCases.compactMap { kind in
             let members = sorted(accounts.filter { !$0.isArchived && $0.kind == kind })
             guard !members.isEmpty else { return nil }
             return AccountSection(
                 kind: kind,
                 accounts: members,
-                subtotal: members.reduce(0) { $0 + $1.balance }
+                subtotal: members.reduce(0) { $0 + balanceOf($1) }
             )
         }
     }

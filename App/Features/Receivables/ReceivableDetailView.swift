@@ -9,14 +9,20 @@ import FinanceCore
 struct ReceivableDetailView: View {
     let account: Account
 
+    @Environment(\.modelContext) private var context
+
     @State private var sheet: ReceivableSheetKind?
 
     init(account: Account) {
         self.account = account
     }
 
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
+    }
+
     private var snapshot: ReceivableSnapshot {
-        ReceivableSnapshot.make(account: account)
+        ledger.receivableSnapshot(of: account)
     }
 
     var body: some View {

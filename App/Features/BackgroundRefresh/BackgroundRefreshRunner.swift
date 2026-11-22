@@ -165,6 +165,26 @@ struct BackgroundRefreshRunner {
 
 // MARK: - Live wiring
 
+/// Lock-protected accumulator the engine's page callback fills from
+/// whichever executor the sync ran on — read back on the caller's actor
+/// once `syncAll` returns or throws.
+private final class WalletSyncInsertedCollector: @unchecked Sendable {
+    private var storage: [WalletSyncInsertedTransaction] = []
+    private let lock = NSLock()
+
+    var rows: [WalletSyncInsertedTransaction] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func append(_ page: [WalletSyncInsertedTransaction]) {
+        lock.lock()
+        storage.append(contentsOf: page)
+        lock.unlock()
+    }
+}
+
 /// The real sync step: shared session, UserDefaults stores, the runner's
 /// own model context, the live wallet API — the same pieces the
 /// foreground coordinator wires, minus its UI state. Only ever touched on
@@ -181,7 +201,7 @@ private struct LiveBackgroundRefreshSync:
         guard case .signedIn = await session.status else { return .skipped }
         guard !WalletSyncEngine.linkedAccounts(context: context).isEmpty
         else { return .skipped }
-        var committed: [WalletSyncInsertedTransaction] = []
+        let committed = WalletSyncInsertedCollector()
         do {
             let resolved = try WalletLinkConfigStore(defaults: defaults)
                 .load().resolved()
@@ -194,14 +214,14 @@ private struct LiveBackgroundRefreshSync:
             )
             // Pages the run commits before a failure are still new rows
             // worth notifying about.
-            engine.onPageCommitted = { committed.append(contentsOf: $0) }
+            engine.onPageCommitted = { committed.append($0) }
             _ = try await engine.syncAll(now: now)
             return BackgroundRefreshSyncResult(
-                status: .synced, insertedRows: committed)
+                status: .synced, insertedRows: committed.rows)
         } catch {
             return BackgroundRefreshSyncResult(
                 status: .failed,
-                insertedRows: committed,
+                insertedRows: committed.rows,
                 errorDescription: error.localizedDescription)
         }
     }

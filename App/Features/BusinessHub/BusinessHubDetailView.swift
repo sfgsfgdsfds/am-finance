@@ -45,10 +45,15 @@ private struct BusinessHubDetailContent: View {
     let period: ReportsPeriod
     let business: Business
 
+    @Environment(\.modelContext) private var context
     @Query(sort: \LedgerCategory.sortOrder) private var categories: [LedgerCategory]
     @Query private var transactions: [LedgerTransaction]
 
     @State private var editing: LedgerTransaction?
+
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
+    }
 
     init(period: ReportsPeriod, business: Business) {
         self.period = period
@@ -116,7 +121,9 @@ private struct BusinessHubDetailContent: View {
     /// What clients still owe this business — the receivables' positive
     /// balances summed.
     private var receivableOutstanding: Int64 {
-        receivableAccounts.reduce(0) { $0 + max(0, $1.balance) }
+        receivableAccounts.reduce(0) {
+            $0 + max(0, ledger.balance(of: $1))
+        }
     }
 
     /// The "Phòng cho thuê" section shows whenever the business has rental

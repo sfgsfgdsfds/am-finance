@@ -124,12 +124,17 @@ extension WalletSyncCoordinator {
                     client = WalletAPIClient(
                         baseURL: resolved.walletBaseURL, tokenProvider: session)
                 }
-                return try await WalletSyncEngine(
+                // The insert loop runs on a `ModelActor` worker's context
+                // and executor — a large import saves page-by-page off the
+                // main actor while still inheriting the caller's
+                // cancellation.
+                let worker = WalletSyncWorker(modelContainer: context.container)
+                return try await worker.syncAll(
                     api: client,
                     stateStore: stateStore,
                     ruleStore: ruleStore,
-                    context: context
-                ).syncAll(fullRescan: fullRescan)
+                    fullRescan: fullRescan
+                )
             },
             countPendingReview: {
                 WalletSyncEngine.pendingReviewCount(context: context)

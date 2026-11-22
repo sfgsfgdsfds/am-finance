@@ -10,12 +10,18 @@ import FinanceCore
 struct CreditCardDetailView: View {
     let account: Account
 
+    @Environment(\.modelContext) private var context
+
     @State private var showsPayment = false
     @State private var showsEdit = false
     @State private var selectedSegment = CreditCardCycleSegment.current
 
     init(account: Account) {
         self.account = account
+    }
+
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
     }
 
     var body: some View {
@@ -53,13 +59,13 @@ struct CreditCardDetailView: View {
     // MARK: - Overview
 
     /// Debt on the card regardless of whether a cycle is configured.
-    private var debt: Int64 { max(0, -account.balance) }
+    private var debt: Int64 { max(0, -ledger.balance(of: account)) }
 
     private var overview: CreditCardOverview? {
         account.creditCardCycleConfig.map {
             CreditCardOverview.build(
                 openingBalance: account.openingBalance,
-                entries: account.creditCardEntries,
+                entries: ledger.creditCardEntries(of: account),
                 config: $0,
                 creditLimit: account.creditLimit,
                 now: .now,

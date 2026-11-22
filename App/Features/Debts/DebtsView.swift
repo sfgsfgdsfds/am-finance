@@ -8,11 +8,16 @@ import FinanceCore
 /// `CreditCardOverview` and `LoanPlan` so this screen always agrees with
 /// the detail views it pushes to.
 struct DebtsView: View {
+    @Environment(\.modelContext) private var context
     @Query(sort: \Account.sortOrder) private var accounts: [Account]
 
     @State private var isCreating = false
 
     private let basisStore = LoanInterestBasisStore()
+
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
+    }
 
     private var cards: [Account] {
         accounts.filter { $0.kind == .creditCard && !$0.isArchived }
@@ -24,16 +29,20 @@ struct DebtsView: View {
 
     private var totals: DebtsTotals {
         DebtsTotals.make(accounts: cards.map {
-            DebtsTotals.Input(kind: .creditCard, balance: $0.balance)
+            DebtsTotals.Input(
+                kind: .creditCard, balance: ledger.balance(of: $0))
         } + loans.map {
-            DebtsTotals.Input(kind: .loan, balance: $0.balance)
+            DebtsTotals.Input(
+                kind: .loan, balance: ledger.balance(of: $0))
         })
     }
 
     private var upcoming: [DebtsUpcomingItem] {
         DebtsUpcomingMapper.items(
             for: accounts, basisStore: basisStore,
-            now: .now, calendar: AppCalendar.vietnam
+            now: .now, calendar: AppCalendar.vietnam,
+            balanceOf: { ledger.balance(of: $0) },
+            cardEntriesOf: { ledger.creditCardEntries(of: $0) }
         )
     }
 
@@ -172,7 +181,7 @@ struct DebtsView: View {
         card.creditCardCycleConfig.map {
             CreditCardOverview.build(
                 openingBalance: card.openingBalance,
-                entries: card.creditCardEntries,
+                entries: ledger.creditCardEntries(of: card),
                 config: $0,
                 creditLimit: card.creditLimit,
                 now: .now,
@@ -182,7 +191,7 @@ struct DebtsView: View {
     }
 
     private func cardRow(_ card: Account) -> some View {
-        let debt = max(0, -card.balance)
+        let debt = max(0, -ledger.balance(of: card))
         let cardOverview = overview(for: card)
         return HStack(spacing: 12) {
             IconBadge(symbol: card.icon, colorHex: card.colorHex, size: 36)
@@ -243,12 +252,14 @@ struct DebtsView: View {
     // MARK: - Loan rows
 
     private func loanRow(_ loan: Account) -> some View {
+        let balance = ledger.balance(of: loan)
         let plan = LoanPlan(
             account: loan,
+            balance: balance,
             basis: basisStore.basis(for: loan.id),
             calendar: AppCalendar.vietnam
         )
-        let remaining = plan?.remainingDebt ?? max(0, -loan.balance)
+        let remaining = plan?.remainingDebt ?? max(0, -balance)
         return HStack(spacing: 12) {
             IconBadge(symbol: loan.icon, colorHex: loan.colorHex, size: 36)
             VStack(alignment: .leading, spacing: 4) {

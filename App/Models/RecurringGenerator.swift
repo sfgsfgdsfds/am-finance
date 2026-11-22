@@ -28,8 +28,11 @@ enum RecurringGenerator {
         calendar: Calendar = AppCalendar.vietnam
     ) throws -> Int {
         var created = 0
-        for rule in try context.fetch(FetchDescriptor<RecurringRule>())
-        where rule.isActive && rule.autoCreate {
+        // Predicate on the stored flags — an idle activation fetches only
+        // the rules that could ever produce rows, not the whole table.
+        let due = try context.fetch(FetchDescriptor<RecurringRule>(
+            predicate: #Predicate { $0.isActive && $0.autoCreate }))
+        for rule in due {
             guard let schedule = rule.recurrenceRule(calendar: calendar) else { continue }
             let baseline = rule.lastGeneratedDate
                 ?? calendar.date(
