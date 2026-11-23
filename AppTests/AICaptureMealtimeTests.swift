@@ -4,12 +4,13 @@ import FinanceCore
 @testable import AMFinance
 
 /// The Vietnamese mealtime context embedded in the typed-capture
-/// extraction prompt: `AIMealtime`'s non-overlapping daypart buckets
-/// (05–10 sáng, 11–13 trưa, 14–17 chiều, 18–22 tối, otherwise neutral)
-/// and the guardrails the system prompt must state. Every instant is
-/// pinned in UTC — Vietnam is UTC+7, so 17:30 UTC is 00:30 the next day
-/// there, and 2026-11-24 in Vietnam spans 2026-11-23 17:00 →
-/// 2026-11-24 16:59 UTC.
+/// extraction prompt: the system prompt must carry the Vietnam clock,
+/// the current `AIMealtime` bucket and the non-overlapping daypart
+/// guardrails (05–10 sáng, 11–13 trưa, 14–17 chiều, 18–22 tối, otherwise
+/// neutral — the boundaries themselves are `MealDaypart`, tested in
+/// FinanceCore). Every instant is pinned in UTC — Vietnam is UTC+7, so
+/// 17:30 UTC is 00:30 the next day there, and 2026-11-24 in Vietnam
+/// spans 2026-11-23 17:00 → 2026-11-24 16:59 UTC.
 struct AICaptureMealtimeTests {
 
     /// A Date built from UTC components.
@@ -22,29 +23,6 @@ struct AICaptureMealtimeTests {
         return calendar.date(from: DateComponents(
             year: year, month: month, day: day,
             hour: hour, minute: minute))!
-    }
-
-    @Test func daypartBucketsMeetButNeverOverlap() {
-        // sáng 05:00–10:59 VN = 22:00 → 03:59 UTC.
-        #expect(AIMealtime.at(utc(2026, 11, 23, 22, 0)) == .sang)
-        #expect(AIMealtime.at(utc(2026, 11, 24, 3, 59)) == .sang)
-        // trưa 11:00–13:59 VN = 04:00 → 06:59 UTC.
-        #expect(AIMealtime.at(utc(2026, 11, 24, 4, 0)) == .trua)
-        #expect(AIMealtime.at(utc(2026, 11, 24, 6, 59)) == .trua)
-        // chiều 14:00–17:59 VN = 07:00 → 10:59 UTC.
-        #expect(AIMealtime.at(utc(2026, 11, 24, 7, 0)) == .chieu)
-        #expect(AIMealtime.at(utc(2026, 11, 24, 10, 59)) == .chieu)
-        // tối 18:00–22:59 VN = 11:00 → 15:59 UTC.
-        #expect(AIMealtime.at(utc(2026, 11, 24, 11, 0)) == .toi)
-        #expect(AIMealtime.at(utc(2026, 11, 24, 15, 59)) == .toi)
-    }
-
-    @Test func lateNightHoursStayNeutralIncludingNearVietnameseMidnight() {
-        // Neutral 23:00–04:59 VN = 16:00 → 21:59 UTC.
-        #expect(AIMealtime.at(utc(2026, 11, 24, 16, 0)) == nil)   // 23:00 VN
-        // 17:30 UTC = 00:30 VN on 25/11 — just past Vietnamese midnight.
-        #expect(AIMealtime.at(utc(2026, 11, 24, 17, 30)) == nil)
-        #expect(AIMealtime.at(utc(2026, 11, 24, 21, 59)) == nil)  // 04:59 VN
     }
 
     @Test func promptAtBreakfastHourCarriesClockMealAndRules() {

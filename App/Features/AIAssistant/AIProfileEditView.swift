@@ -120,11 +120,13 @@ struct AIProfileEditView: View {
 
     /// One-tap presets for known gateways. A button disables while the
     /// draft already points at that gateway — tapping again would only
-    /// wipe the key and model the user has since entered.
+    /// wipe the key and model the user has since entered — and while a
+    /// check or model fetch is in flight, whose late result would
+    /// otherwise land on the reconfigured form.
     private var presetButtons: some View {
         ForEach(AIProviderPreset.allCases, id: \.self) { preset in
             Button {
-                draft.applyPreset(preset)
+                applyPreset(preset)
             } label: {
                 Label {
                     VStack(alignment: .leading, spacing: 2) {
@@ -138,7 +140,7 @@ struct AIProfileEditView: View {
                         .foregroundStyle(Color.accentColor)
                 }
             }
-            .disabled(draft.matchingPreset == preset)
+            .disabled(draft.matchingPreset == preset || providerCallInFlight)
         }
     }
 
@@ -284,6 +286,21 @@ struct AIProfileEditView: View {
 
     private var hasKey: Bool {
         !draft.apiKey.isEmpty || draft.hasSavedKey
+    }
+
+    /// A connection check or model-list fetch still running.
+    private var providerCallInFlight: Bool {
+        checking || fetchingModels
+    }
+
+    /// Applies a gateway preset and drops the view-local results bound to
+    /// the previous provider — a fetched model list or a check outcome
+    /// belongs to the gateway it came from, not the one the form now
+    /// points at.
+    private func applyPreset(_ preset: AIProviderPreset) {
+        draft.applyPreset(preset)
+        fetchedModels = nil
+        checkResult = nil
     }
 
     /// Builds a client for the current draft using the typed key, or the

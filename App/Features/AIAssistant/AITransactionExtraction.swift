@@ -129,17 +129,18 @@ enum AIMealtime: String, Sendable {
 
     /// The bucket `date`'s Vietnam hour falls into — sáng 05–10,
     /// trưa 11–13, chiều 14–17, tối 18–22 — or nil for the neutral
-    /// 23:00–04:59 stretch.
+    /// 23:00–04:59 stretch. The hour→bucket policy is `MealDaypart`
+    /// (FinanceCore); the Vietnam calendar supplies the wall-clock hour.
     static func at(
         _ date: Date,
         calendar: Calendar = AppCalendar.vietnam
     ) -> AIMealtime? {
-        switch calendar.component(.hour, from: date) {
-        case 5...10: return .sang
-        case 11...13: return .trua
-        case 14...17: return .chieu
-        case 18...22: return .toi
-        default: return nil
+        switch MealDaypart.at(hour: calendar.component(.hour, from: date)) {
+        case .sang: return .sang
+        case .trua: return .trua
+        case .chieu: return .chieu
+        case .toi: return .toi
+        case nil: return nil
         }
     }
 }
