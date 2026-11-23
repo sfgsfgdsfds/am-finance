@@ -1223,6 +1223,102 @@ final class AMFinanceUITests: XCTestCase {
                        "expected exactly one applied 'Phở UI test' row")
     }
 
+    /// ONE app-level conversation shared by every entry point: a message
+    /// sent from the Giao dịch toolbar — with its pending proposal card —
+    /// is still there when the same Agent screen is reached from the
+    /// Tổng quan sparkles button and from Cài đặt → "Agent". Leaving
+    /// the screen no longer wipes the session.
+    func testAgentSharedConversation() throws {
+        app.terminate()
+        app.launchArguments = ["-uiTestInMemoryStore", "-uiTestAgentScript"]
+        app.launch()
+
+        // Cài đặt → "Nhà cung cấp AI" → "Quyền của Agent" → grant.
+        let gear = app.buttons["Cài đặt"]
+        XCTAssertTrue(waitReady(gear, timeout: 15), "settings gear missing")
+        gear.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Cài đặt"]
+                .waitForExistence(timeout: 5),
+            "settings screen missing")
+        tapOption("Nhà cung cấp AI")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Trí tuệ nhân tạo (AI)"]
+                .waitForExistence(timeout: 5),
+            "AI settings screen missing")
+        let picker = scopedElement("agent.accessPicker")
+        assertVisible(picker, "access picker missing")
+        picker.tap()
+        tapOption("Đọc và thao tác")
+        goBack(to: "Cài đặt")
+        goBack(to: "Tổng quan")
+
+        // Entry 1 — the Giao dịch toolbar button: send one message and
+        // wait for the scripted proposal card.
+        openTab("Giao dịch")
+        let entry = app.buttons["Agent"]
+        XCTAssertTrue(waitReady(entry, timeout: 10), "agent entry missing")
+        entry.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Agent"]
+                .waitForExistence(timeout: 5),
+            "agent screen missing")
+        sendAgentMessage("ghi lai pho 50k")
+        let apply = app.buttons["agent.proposal.apply"]
+        XCTAssertTrue(waitReady(apply, timeout: 10),
+                      "proposal apply button missing")
+        XCTAssertTrue(app.staticTexts["ghi lai pho 50k"].exists,
+                      "sent message missing")
+        goBack(to: "Giao dịch")
+
+        // Entry 2 — the Tổng quan sparkles button: the same conversation
+        // and the same pending card, not a fresh screen.
+        openTab("Tổng quan")
+        let sparkles = app.buttons["Agent"]
+        XCTAssertTrue(waitReady(sparkles, timeout: 10),
+                      "agent sparkles entry missing")
+        sparkles.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Agent"]
+                .waitForExistence(timeout: 5),
+            "agent screen missing from dashboard")
+        XCTAssertTrue(
+            app.staticTexts["ghi lai pho 50k"]
+                .waitForExistence(timeout: 5),
+            "conversation lost across entry points")
+        XCTAssertTrue(apply.exists, "pending proposal lost after re-entry")
+        goBack(to: "Tổng quan")
+
+        // Entry 3 — Cài đặt → "Agent" row: still the same conversation.
+        XCTAssertTrue(waitReady(gear, timeout: 8),
+                      "settings gear missing on return")
+        gear.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Cài đặt"]
+                .waitForExistence(timeout: 5),
+            "settings screen missing")
+        tapOption("Agent")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Agent"]
+                .waitForExistence(timeout: 5),
+            "agent screen missing from settings")
+        XCTAssertTrue(
+            app.staticTexts["ghi lai pho 50k"]
+                .waitForExistence(timeout: 5),
+            "conversation lost on the settings entry")
+        XCTAssertTrue(apply.exists,
+                      "pending proposal lost on the settings entry")
+
+        // "Bỏ qua" drops the card from the shared session; the chat
+        // itself stays.
+        let discard = app.buttons["agent.proposal.discard"]
+        XCTAssertTrue(discard.exists, "proposal discard button missing")
+        discard.tap()
+        waitForDisappearance(apply, message: "card stayed after Bỏ qua")
+        XCTAssertTrue(app.staticTexts["ghi lai pho 50k"].exists,
+                      "conversation vanished with the card")
+    }
+
     // MARK: - Flow helpers
 
     /// Types into the Agent input and taps send. The field may surface as

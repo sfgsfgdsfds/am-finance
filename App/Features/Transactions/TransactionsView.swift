@@ -59,6 +59,7 @@ struct TransactionsView: View {
                         AIAgentView()
                     } label: {
                         Image(systemName: "wand.and.stars")
+                            .agentActivityBadge()
                     }
                     .accessibilityLabel("Agent")
                 }

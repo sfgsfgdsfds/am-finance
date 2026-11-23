@@ -79,7 +79,11 @@ struct SettingsView: View {
                 NavigationLink {
                     LazyDestination { AIAgentView() }
                 } label: {
-                    Label("Agent", systemImage: "sparkles")
+                    HStack {
+                        Label("Agent", systemImage: "sparkles")
+                        Spacer()
+                        AgentActivityDot()
+                    }
                 }
             }
 

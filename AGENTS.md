@@ -25,11 +25,12 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
 - AMDev stops a single `--check` after 15 minutes and the whole UI suite
   takes longer, so gate it as four shards with `AMFINANCE_UI_TEST_FILTERS`
   (each selector is `-only-testing:AMFinanceUITests/AMFinanceUITests/<name>`):
-  (1) `testWiredFeatureScreens`; (2) `testTabsReportsAndSettings`,
-  `testTransactionsAddEditDelete`, `testAccountsAndDebts`; (3)
-  `testRentalsImportAndReminders`, `testAIEntryPointsAndSpendingShare`,
-  `testTransactionScopes`; (4) `testBillSplit`, `testAgentLedgerAccess`,
-  `testAgentProposalConfirm`. Put a new UI test into the lightest shard.
+  (1) `testWiredFeatureScreens`, `testAgentSharedConversation`; (2)
+  `testTabsReportsAndSettings`, `testTransactionsAddEditDelete`,
+  `testAccountsAndDebts`; (3) `testRentalsImportAndReminders`,
+  `testAIEntryPointsAndSpendingShare`, `testTransactionScopes`; (4)
+  `testBillSplit`, `testAgentLedgerAccess`, `testAgentProposalConfirm`.
+  Put a new UI test into the lightest shard.
 - `scripts/lib-test.sh` — shared lock/simulator/retry helper sourced by both
   test scripts; not meant to be run directly.
 - The generated `.xcodeproj` is a build artifact: git-ignored, never commit it.
@@ -91,7 +92,15 @@ workers know what already exists. Pushed views must not create their own
 - `Accounts/` — `AccountsListView`, `AccountDetailView(account:)`, `AccountEditView(account:)`; `AccountBalanceAdjustment` helper.
 - `AIAgent/` — `AIAgentView` (the one chat-style Agent, pushed from the
   dashboard sparkles button, Settings → "Agent" and the Giao dịch
-  toolbar leading button), driven by `AIAgentChatSession` (bounded
+  toolbar leading button), a thin view over `AIAgentController` —
+  `AIAgentControllers.shared(for: container)` keeps ONE shared session
+  app-wide so an in-flight turn survives pops and tab switches (the
+  conversation is replaced only on "Cuộc trò chuyện mới", a real
+  provider-destination change or `.dataResetCompleted`; a transient
+  `makeClient` failure keeps it while the screen shows "Chưa cấu hình
+  AI"; `AgentActivityDot`/`agentActivityBadge()` badge the three entry
+  points while the agent works or a reply landed unseen) —
+  driven by `AIAgentChatSession` (bounded
   loop: max 4 tool steps per turn, one correction round, tool results
   ride back as untrusted user-role text; `pendingProposal` →
   `confirmProposal()` is the only write path) + `AIAgentChatProtocol`
