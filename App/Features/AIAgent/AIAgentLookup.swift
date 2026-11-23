@@ -82,8 +82,8 @@ struct AIAgentTransactionPreview: Equatable, Sendable {
 }
 
 /// One lookup hit: the local `preview` plus `original`, the opaque
-/// full-state token `applyCategoryEdits` requires as proof the user
-/// confirmed this exact row state. `original` is the same fingerprint
+/// full-state token `apply` requires as proof the user confirmed this
+/// exact row state. `original` is the same fingerprint
 /// shape `BillSplitOriginal` uses for its confirm sheets — it holds the
 /// row's real identity and is strictly local: never serialized, never
 /// sent. Only `lookup` mints matches, so apply cannot be pointed at a

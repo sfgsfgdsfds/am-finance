@@ -605,4 +605,43 @@ struct AIAgentChatTests {
         #expect(session.match(forHandle: "R1")?.original.id == rowA.id)
         #expect(session.match(forHandle: "R2")?.preview.note == "beta row")
     }
+
+    /// The moved payload caps hold: a long note, account name and
+    /// category name all truncate at `AIAgentChatSession.maxNoteLength`/
+    /// `maxAccountNameLength`/`maxCategoryNameLength` with an ellipsis.
+    @Test func searchPayloadTruncatesLongFieldsAtTheCaps() async throws {
+        let context = try makeContext()
+        let longName = String(repeating: "đ", count: 100)
+        let account = Account(name: longName, kind: .cash)
+        let category = LedgerCategory(
+            name: String(repeating: "c", count: 100), kind: .expense)
+        context.insert(account)
+        context.insert(category)
+        let longNote = String(repeating: "x", count: 200)
+        seed(in: context, date: day(2026, 11, 10), note: longNote,
+             account: account, category: category)
+        try context.save()
+
+        let client = FakeAIClient()
+        client.queueReply(#"{"type":"search","args":{}}"#)
+        client.queueReply(#"{"type":"answer","text":"ok"}"#)
+        let session = makeSession(client: client, context: context)
+
+        session.send("liệt kê")
+        #expect(await waitUntil { !session.isWorking })
+
+        let tool = try #require(toolResult(in: client.requests[1]))
+        #expect(!tool.text.contains(longNote))
+        #expect(tool.text.contains(
+            String(longNote.prefix(AIAgentChatSession.maxNoteLength - 1))
+                + "…"))
+        #expect(!tool.text.contains(longName))
+        #expect(tool.text.contains(
+            String(longName.prefix(AIAgentChatSession.maxAccountNameLength - 1))
+                + "…"))
+        #expect(tool.text.contains(
+            String(category.name
+                .prefix(AIAgentChatSession.maxCategoryNameLength - 1))
+                + "…"))
+    }
 }

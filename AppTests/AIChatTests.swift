@@ -4,11 +4,10 @@ import SwiftData
 import FinanceCore
 @testable import AMFinance
 
-/// Tests for the AI chat + inbox-suggestion features: conversation trimming
-/// and request building, scope/label math, the SwiftData → snapshot loader,
-/// streaming accumulation/stop/retry through `AIChatSession`, and the
-/// `AIInboxSuggestModel` batching + apply semantics — all through a fake
-/// `AIChatClientProtocol`, no network.
+/// Tests for the AI summary + inbox-suggestion features: `AIChatScope`
+/// interval/label math, the SwiftData → snapshot loader and its privacy
+/// projection, and the `AIInboxSuggestModel` batching + apply semantics —
+/// all through a fake `AIChatClientProtocol`, no network.
 struct AIChatTests {
 
     // MARK: - Scaffolding
@@ -194,58 +193,6 @@ struct AIChatTests {
                 .periodLabel(now: now, calendar: calendar) == "Năm 2026")
     }
 
-    // MARK: - AIChatConversation
-
-    @Test func trimmingDropsOldestTurnsWithinBudget() {
-        var conversation = AIChatConversation(characterBudget: 50)
-        conversation.appendUser("câu một")            // 7
-        conversation.appendAssistant("trả lời một")    // 11
-        conversation.appendUser("câu hai")            // 7
-        conversation.appendAssistant("trả lời hai")    // 11
-        let kept = conversation.trimmedTurns()
-        // 50 chars fit the newest two pairs + part of the oldest answer.
-        #expect(kept.count == 4)
-        #expect(kept.last?.text == "trả lời hai")
-        #expect(kept.first?.role == .user)
-        let total = kept.map(\.text.count).reduce(0, +)
-        #expect(total <= 50)
-        // Drop one more char and the oldest turn must go.
-        conversation.characterBudget = 35
-        #expect(conversation.trimmedTurns().count == 3)
-    }
-
-    @Test func newestTurnIsKeptEvenWhenItExceedsBudget() {
-        var conversation = AIChatConversation(characterBudget: 10)
-        conversation.appendUser("câu hỏi rất dài hơn ngân sách nhiều")
-        let kept = conversation.trimmedTurns()
-        #expect(kept.count == 1)
-        #expect(kept[0].role == .user)
-        #expect(kept[0].text.hasSuffix("…"))
-        #expect(kept[0].text.count <= 10)
-    }
-
-    @Test func requestPutsContextInSystemExactlyOnce() throws {
-        var conversation = AIChatConversation()
-        conversation.appendUser("chi tiêu thế nào?")
-        conversation.appendAssistant("bạn tiêu ít thôi")
-        conversation.appendUser("còn tiết kiệm?")
-        let context = "Bối cảnh tài chính — Tháng 11/2026\nThu 20 tr · Chi 5 tr"
-        let request = conversation.request(
-            system: "Hệ thống.", contextText: context)
-
-        let system = try #require(request.system)
-        // Exactly one copy of the context — inside system, nowhere else.
-        #expect(system.components(separatedBy: context).count - 1 == 1)
-        #expect(system.contains("Hệ thống."))
-        for message in request.messages {
-            #expect(!message.text.contains("Bối cảnh tài chính"))
-            #expect(message.role != .system)
-        }
-        // The full conversation is carried, oldest first.
-        #expect(request.messages.map(\.text)
-            == ["chi tiêu thế nào?", "bạn tiêu ít thôi", "còn tiết kiệm?"])
-    }
-
     // MARK: - AIChatContextLoader
 
     @Test @MainActor func loaderBuildsSnapshotForScope() throws {
@@ -330,66 +277,6 @@ struct AIChatTests {
         #expect(!minimal.contains("Giao dịch trong kỳ"))
         // The summary header stays — privacy only narrows it.
         #expect(minimal.contains("Bối cảnh tài chính"))
-    }
-
-    // MARK: - AIChatSession streaming
-
-    @Test @MainActor func streamingAccumulatesIntoAnswerTurn() async throws {
-        let client = FakeAIClient()
-        client.deltas = ["Tháng này ", "bạn chi ", "**3 tr**."]
-        let session = AIChatSession(client: client, contextText: "CTX")
-
-        session.send("Chi bao nhiêu?")
-        #expect(session.isStreaming)
-        #expect(await waitUntil { !session.isStreaming })
-
-        #expect(session.conversation.turns.count == 2)
-        #expect(session.conversation.turns[0].role == .user)
-        #expect(session.conversation.turns[1].role == .assistant)
-        #expect(session.conversation.turns[1].text == "Tháng này bạn chi **3 tr**.")
-        #expect(session.streamingText.isEmpty)
-        #expect(session.errorMessage == nil)
-        // The request carried the context in the system prompt.
-        let sent = try #require(client.requests.first)
-        #expect(sent.system?.contains("CTX") == true)
-    }
-
-    @Test @MainActor func stopKeepsPartialAnswerAndCancels() async {
-        let client = FakeAIClient()
-        client.deltas = ["đang trả lời… "]
-        client.hangsAfterDeltas = true
-        let session = AIChatSession(client: client)
-
-        session.send("hỏi")
-        #expect(await waitUntil { !session.streamingText.isEmpty })
-        session.stop()
-        #expect(await waitUntil { !session.isStreaming })
-
-        // Whatever arrived is kept as the assistant's turn.
-        #expect(session.conversation.turns.count == 2)
-        #expect(session.conversation.turns[1].text == "đang trả lời… ")
-        #expect(session.errorMessage == nil)
-    }
-
-    @Test @MainActor func failureSurfacesErrorAndRetryResends() async {
-        struct Fake: Error {}
-        let client = FakeAIClient()
-        client.streamError = Fake()
-        let session = AIChatSession(client: client)
-
-        session.send("câu hỏi một")
-        #expect(await waitUntil { session.errorMessage != nil })
-        #expect(session.canRetry)
-        // The failed question stays the last turn — retry re-sends it.
-        #expect(session.conversation.turns.count == 1)
-
-        client.streamError = nil
-        client.deltas = ["lần hai ok"]
-        session.retry()
-        #expect(await waitUntil { !session.isStreaming && session.errorMessage == nil })
-        #expect(session.conversation.turns.count == 2)
-        #expect(session.conversation.turns[1].text == "lần hai ok")
-        #expect(client.requests.count == 2)
     }
 
     // MARK: - AIInboxSuggestModel

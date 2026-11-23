@@ -2,6 +2,99 @@ import Foundation
 import SwiftData
 import FinanceCore
 
+/// The four data scopes the assistant features can summarize.
+enum AIChatScopeKind: String, CaseIterable, Sendable {
+    case thisMonth
+    case threeMonths
+    case thisYear
+    case custom
+}
+
+/// The period a summary request talks about. `customStart`/`customEnd`
+/// only matter for `.custom` — callers fill them directly like
+/// `ReportsPeriod` does. Pure value type; every computation takes `now`
+/// and `calendar` explicitly.
+struct AIChatScope: Equatable, Sendable {
+    var kind: AIChatScopeKind = .thisMonth
+    var customStart: Date
+    var customEnd: Date
+
+    init(
+        kind: AIChatScopeKind = .thisMonth,
+        customStart: Date? = nil,
+        customEnd: Date? = nil,
+        now: Date = .now,
+        calendar: Calendar = AppCalendar.vietnam
+    ) {
+        self.kind = kind
+        self.customStart = customStart
+            ?? calendar.date(byAdding: .month, value: -1, to: now) ?? now
+        self.customEnd = customEnd ?? now
+    }
+
+    /// The half-open interval [start, end) the scope covers.
+    /// `.threeMonths` is the three calendar months ending with the current
+    /// one (e.g. Sep–Nov); `.thisYear` is the whole calendar year.
+    func interval(now: Date, calendar: Calendar) -> ReportDateInterval {
+        switch kind {
+        case .thisMonth:
+            return ReportsPeriod.monthInterval(containing: now, calendar: calendar)
+        case .threeMonths:
+            let current = ReportsPeriod.monthInterval(containing: now, calendar: calendar)
+            let start = calendar.date(byAdding: .month, value: -2, to: current.start)
+                ?? current.start
+            return ReportDateInterval(start: start, end: current.end)
+        case .thisYear:
+            return ReportsPeriod.yearInterval(containing: now, calendar: calendar)
+        case .custom:
+            return ReportsPeriod.customInterval(
+                from: customStart, through: customEnd, calendar: calendar)
+        }
+    }
+
+    /// The label that opens the context text — "Tháng 11/2026",
+    /// "3 tháng gần đây", "Năm 2026", "01/10 – 15/11/2026".
+    func periodLabel(now: Date, calendar: Calendar) -> String {
+        let current = interval(now: now, calendar: calendar)
+        switch kind {
+        case .thisMonth:
+            return AppDateFormat.monthTitle(current.start, calendar: calendar)
+        case .threeMonths:
+            return "3 tháng gần đây"
+        case .thisYear:
+            return "Năm \(calendar.component(.year, from: current.start))"
+        case .custom:
+            return Self.rangeLabel(
+                start: current.start,
+                end: current.end.addingTimeInterval(-1),
+                calendar: calendar)
+        }
+    }
+
+    /// "dd/MM – dd/MM/yyyy", dropping the start's year when it matches the
+    /// end's — the same shape `ReportsPeriod.title` uses for custom ranges.
+    private static func rangeLabel(
+        start: Date, end: Date, calendar: Calendar
+    ) -> String {
+        let sameYear = calendar.component(.year, from: start)
+            == calendar.component(.year, from: end)
+        let endText = formatter("dd/MM/yyyy", calendar: calendar).string(from: end)
+        let startText = formatter(
+            sameYear ? "dd/MM" : "dd/MM/yyyy", calendar: calendar
+        ).string(from: start)
+        return "\(startText) – \(endText)"
+    }
+
+    private static func formatter(_ format: String, calendar: Calendar) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.locale = calendar.locale
+        formatter.dateFormat = format
+        return formatter
+    }
+}
+
 /// Collects the lightweight inputs `AIFinanceContextBuilder` needs from
 /// SwiftData for the chosen scope. Every query uses a date-range predicate
 /// or a tiny lookup table — never the whole transactions table. The async

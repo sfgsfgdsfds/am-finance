@@ -73,6 +73,14 @@ final class AIAgentChatSession {
     /// Corrective rounds granted for contract-violating replies.
     static let defaultMaxCorrections = 1
 
+    /// Outgoing-payload caps the model cannot raise.
+    static let maxNoteLength = 80
+    static let maxAccountNameLength = 40
+    static let maxCategoryNameLength = 60
+    /// Each direction's catalog shows at most this many categories to
+    /// the model.
+    static let maxCategoriesPerDirection = 40
+
     /// The visible conversation — user text, tool-activity notes and
     /// assistant answers, in order.
     private(set) var messages: [AIAgentChatMessage] = []
@@ -89,7 +97,7 @@ final class AIAgentChatSession {
     private(set) var pendingProposal: AIAgentActionProposal?
 
     /// Whether transaction notes ride search results — truncated to
-    /// `AIAgentOrchestrator.maxNoteLength` like the preview payload.
+    /// `Self.maxNoteLength` like the rest of the search payload.
     var includeNotes: Bool
     /// Transcript character budget for trimming.
     var characterBudget: Int
@@ -670,8 +678,8 @@ final class AIAgentChatSession {
     }
 
     /// The catalog the system prompt advertises — accounts in handle
-    /// order, categories capped at
-    /// `AIAgentOrchestrator.maxCategoriesPerDirection` per direction.
+    /// order, categories capped at `Self.maxCategoriesPerDirection` per
+    /// direction.
     private func currentActionCatalog() -> AIAgentActionCatalog {
         let defaultID = defaultAccountID()
         let accounts = accountHandles
@@ -689,7 +697,7 @@ final class AIAgentChatSession {
         {
             guard let category = categoriesByID[id],
                   (perKind[category.kind] ?? 0)
-                      < AIAgentOrchestrator.maxCategoriesPerDirection
+                      < Self.maxCategoriesPerDirection
             else { continue }
             perKind[category.kind, default: 0] += 1
             categories.append(.init(
@@ -1054,20 +1062,20 @@ final class AIAgentChatSession {
             ]
             row["category"] = preview.categoryName.map {
                 Self.truncated(
-                    $0, limit: AIAgentOrchestrator.maxCategoryNameLength)
+                    $0, limit: Self.maxCategoryNameLength)
                     as Any
             } ?? NSNull()
             if let account = preview.accountName {
                 row["account"] = Self.truncated(
-                    account, limit: AIAgentOrchestrator.maxAccountNameLength)
+                    account, limit: Self.maxAccountNameLength)
             }
             if let toAccount = preview.toAccountName {
                 row["toAccount"] = Self.truncated(
-                    toAccount, limit: AIAgentOrchestrator.maxAccountNameLength)
+                    toAccount, limit: Self.maxAccountNameLength)
             }
             if includeNotes, !preview.note.isEmpty {
                 row["note"] = Self.truncated(
-                    preview.note, limit: AIAgentOrchestrator.maxNoteLength)
+                    preview.note, limit: Self.maxNoteLength)
             }
             return row
         }
@@ -1114,8 +1122,7 @@ final class AIAgentChatSession {
         return handle
     }
 
-    /// Cuts a string to `limit` characters with an ellipsis — the same
-    /// shape the orchestrator's payload uses.
+    /// Cuts a string to `limit` characters with an ellipsis.
     private static func truncated(_ text: String, limit: Int) -> String {
         guard text.count > limit else { return text }
         return String(text.prefix(max(0, limit - 1))) + "…"

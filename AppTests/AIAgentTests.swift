@@ -104,12 +104,13 @@ struct AIAgentTests {
 
         #expect(AIAgentPermission.off.access == .off)
         #expect(!AIAgentAccess.off.canLookup)
+        #expect(!AIAgentAccess.off.canProposeActions)
         #expect(throws: AIAgentError.permissionDenied) {
             _ = try tools.lookup(permission: .off, in: context)
         }
-        #expect(throws: AIAgentError.permissionDenied) {
-            _ = try tools.applyCategoryEdits(
-                [], to: food, permission: .off, in: context)
+        #expect(throws: AIAgentApplyError.batch(.permissionDenied)) {
+            _ = try tools.apply(
+                [], permission: .off, in: context)
         }
     }
 
@@ -125,9 +126,10 @@ struct AIAgentTests {
         let result = try tools.lookup(permission: read, in: context)
         #expect(result.matches.count == 1)
 
-        #expect(throws: AIAgentError.permissionDenied) {
-            _ = try tools.applyCategoryEdits(
-                result.matches, to: food, permission: read, in: context)
+        #expect(throws: AIAgentApplyError.batch(.permissionDenied)) {
+            _ = try tools.apply(
+                [.setCategory(match: result.matches[0], category: food)],
+                permission: read, in: context)
         }
         #expect(row.category == nil)
         #expect(row.needsReview == false)
@@ -137,7 +139,7 @@ struct AIAgentTests {
     /// tools. A full-year grant still passes.
     @Test func windowTooWideIsRejected() throws {
         let context = try makeContext()
-        let (cash, _, food, _) = try seedBasics(in: context)
+        let (cash, _, _, _) = try seedBasics(in: context)
         seed(in: context, date: day(2026, 11, 10), account: cash)
         try context.save()
         let tools = AIAgentLedgerTools()
@@ -148,9 +150,9 @@ struct AIAgentTests {
         #expect(throws: AIAgentError.windowTooWide) {
             _ = try tools.lookup(permission: wide, in: context)
         }
-        #expect(throws: AIAgentError.windowTooWide) {
-            _ = try tools.applyCategoryEdits(
-                [], to: food, permission: wide, in: context)
+        #expect(throws: AIAgentApplyError.batch(.windowTooWide)) {
+            _ = try tools.apply(
+                [], permission: wide, in: context)
         }
 
         // Dec 1 2025 → Dec 1 2026 is 365 days — a full-year grant works.
@@ -348,7 +350,7 @@ struct AIAgentTests {
         #expect(smallCap.truncated)
     }
 
-    // MARK: - Apply
+    // MARK: - Apply (setCategory through the mixed batch)
 
     /// The confirmed batch lands atomically on the same rows: only
     /// category, needsReview and updatedAt move — id, amount, date,
@@ -377,9 +379,10 @@ struct AIAgentTests {
         }
         #expect(matches.count == 2)
 
-        let result = try tools.applyCategoryEdits(
-            matches, to: food, permission: permission(), in: context)
-        #expect(result.appliedCount == 2)
+        let summary = try tools.apply(
+            matches.map { .setCategory(match: $0, category: food) },
+            permission: permission(), in: context)
+        #expect(summary.categorized == 2)
 
         // Same rows — same ids, same objects.
         #expect(synced.category?.id == food.id)
@@ -399,6 +402,41 @@ struct AIAgentTests {
         #expect(!context.hasChanges)
     }
 
+    /// One batch may mix target categories — each row lands on its own
+    /// category in the same atomic commit.
+    @Test func applyLandsMixedCategoriesAtomically() throws {
+        let context = try makeContext()
+        let (cash, bank, food, salary) = try seedBasics(in: context)
+        let other = LedgerCategory(name: "Di chuyển", kind: .expense)
+        context.insert(other)
+        let coffee = seed(in: context, amount: 40_000,
+                          date: day(2026, 11, 10), note: "cf",
+                          account: cash)
+        let taxi = seed(in: context, amount: 150_000,
+                        date: day(2026, 11, 11), note: "grab",
+                        account: bank)
+        let pay = seed(in: context, kind: .income, amount: 9_000_000,
+                       date: day(2026, 11, 12), note: "lương",
+                       account: bank)
+        try context.save()
+        let tools = AIAgentLedgerTools()
+        let looked = try tools.lookup(permission: permission(), in: context)
+        func match(_ row: LedgerTransaction) throws -> AIAgentLookupMatch {
+            try #require(looked.matches.first { $0.original.id == row.id })
+        }
+
+        let summary = try tools.apply(
+            [.setCategory(match: try match(coffee), category: food),
+             .setCategory(match: try match(taxi), category: other),
+             .setCategory(match: try match(pay), category: salary)],
+            permission: permission(), in: context)
+        #expect(summary.categorized == 3)
+        #expect(coffee.category?.id == food.id)
+        #expect(taxi.category?.id == other.id)
+        #expect(pay.category?.id == salary.id)
+        #expect(!context.hasChanges)
+    }
+
     /// Applying to a pending-review row that already carries the same
     /// category is a real edit — it confirms the classification and
     /// clears the flag.
@@ -413,83 +451,12 @@ struct AIAgentTests {
         let looked = try tools.lookup(
             AIAgentLookupQuery(unclassifiedOnly: true),
             permission: permission(), in: context)
-        let result = try tools.applyCategoryEdits(
-            looked.matches, to: food, permission: permission(), in: context)
-        #expect(result.appliedCount == 1)
+        let summary = try tools.apply(
+            looked.matches.map { .setCategory(match: $0, category: food) },
+            permission: permission(), in: context)
+        #expect(summary.categorized == 1)
         #expect(row.category?.id == food.id)
         #expect(!row.needsReview)
-    }
-
-    /// One stale row poisons the whole batch — the other valid edit
-    /// does not partially land.
-    @Test func applyIsAtomicWhenAnyRowIsStale() throws {
-        let context = try makeContext()
-        let (cash, bank, food, _) = try seedBasics(in: context)
-        let moved = seed(in: context, date: day(2026, 11, 10),
-                         account: cash)
-        let clean = seed(in: context, date: day(2026, 11, 11),
-                         account: bank)
-        try context.save()
-        let tools = AIAgentLedgerTools()
-        let looked = try tools.lookup(permission: permission(), in: context)
-
-        // The user confirmed, then someone edited the first row.
-        moved.note = "Đã sửa"
-        moved.updatedAt = .now
-        try context.save()
-
-        #expect(throws: AIAgentError.staleTransaction) {
-            _ = try tools.applyCategoryEdits(
-                looked.matches, to: food,
-                permission: permission(), in: context)
-        }
-        #expect(moved.category == nil)
-        #expect(clean.category == nil)
-        #expect(clean.needsReview == false)
-        #expect(!context.hasChanges)
-    }
-
-    /// A deleted target fails the batch the same way a changed one does.
-    @Test func applyRejectsDeletedRow() throws {
-        let context = try makeContext()
-        let (cash, _, food, _) = try seedBasics(in: context)
-        let row = seed(in: context, date: day(2026, 11, 10), account: cash)
-        try context.save()
-        let tools = AIAgentLedgerTools()
-        let looked = try tools.lookup(permission: permission(), in: context)
-
-        context.delete(row)
-        try context.save()
-
-        #expect(throws: AIAgentError.staleTransaction) {
-            _ = try tools.applyCategoryEdits(
-                looked.matches, to: food,
-                permission: permission(), in: context)
-        }
-        #expect(try fetchAll(LedgerTransaction.self, in: context).isEmpty)
-    }
-
-    /// Duplicates in the confirmed batch are refused before any write.
-    @Test func applyRejectsDuplicateTargetsAndEmptyBatch() throws {
-        let context = try makeContext()
-        let (cash, _, food, _) = try seedBasics(in: context)
-        let row = seed(in: context, date: day(2026, 11, 10), account: cash)
-        try context.save()
-        let tools = AIAgentLedgerTools()
-        let looked = try tools.lookup(permission: permission(), in: context)
-        let match = try #require(looked.matches.first)
-
-        #expect(throws: AIAgentError.emptyBatch) {
-            _ = try tools.applyCategoryEdits(
-                [], to: food, permission: permission(), in: context)
-        }
-        #expect(throws: AIAgentError.duplicateTransaction) {
-            _ = try tools.applyCategoryEdits(
-                [match, match], to: food,
-                permission: permission(), in: context)
-        }
-        #expect(row.category == nil)
-        #expect(!context.hasChanges)
     }
 
     /// Transfers, rent-linked rows and rows outside the granted window
@@ -514,14 +481,16 @@ struct AIAgentTests {
                 $0.original.id == row.id })
         }
 
-        #expect(throws: AIAgentError.transactionNotEligible) {
-            _ = try tools.applyCategoryEdits(
-                [try match(transfer)], to: food,
+        #expect(throws: AIAgentApplyError.action(
+            0, .transactionNotEligible)) {
+            _ = try tools.apply(
+                [.setCategory(match: try match(transfer), category: food)],
                 permission: permission(), in: context)
         }
-        #expect(throws: AIAgentError.transactionNotEligible) {
-            _ = try tools.applyCategoryEdits(
-                [try match(rent)], to: food,
+        #expect(throws: AIAgentApplyError.action(
+            0, .transactionNotEligible)) {
+            _ = try tools.apply(
+                [.setCategory(match: try match(rent), category: food)],
                 permission: permission(), in: context)
         }
 
@@ -530,9 +499,9 @@ struct AIAgentTests {
         let narrower = permission(
             window: DateInterval(
                 start: day(2026, 11, 1, 0), end: day(2026, 11, 20, 0)))
-        #expect(throws: AIAgentError.rowOutsideWindow) {
-            _ = try tools.applyCategoryEdits(
-                [try match(outside)], to: food,
+        #expect(throws: AIAgentApplyError.action(0, .rowOutsideWindow)) {
+            _ = try tools.apply(
+                [.setCategory(match: try match(outside), category: food)],
                 permission: narrower, in: context)
         }
         #expect(transfer.category == nil)
@@ -563,98 +532,32 @@ struct AIAgentTests {
         }
 
         // Wrong-kind category for the row.
-        #expect(throws: AIAgentError.invalidCategory) {
-            _ = try tools.applyCategoryEdits(
-                [try match(expense)], to: salary,
+        #expect(throws: AIAgentApplyError.action(0, .invalidCategory)) {
+            _ = try tools.apply(
+                [.setCategory(match: try match(expense), category: salary)],
                 permission: permission(), in: context)
         }
         // A mixed batch dies whole — the valid expense stays untouched.
-        #expect(throws: AIAgentError.invalidCategory) {
-            _ = try tools.applyCategoryEdits(
-                [try match(expense), try match(income)], to: food,
+        #expect(throws: AIAgentApplyError.action(1, .invalidCategory)) {
+            _ = try tools.apply(
+                [.setCategory(match: try match(expense), category: food),
+                 .setCategory(match: try match(income), category: food)],
                 permission: permission(), in: context)
         }
-        #expect(throws: AIAgentError.invalidCategory) {
-            _ = try tools.applyCategoryEdits(
-                [try match(expense)], to: archived,
+        #expect(throws: AIAgentApplyError.action(0, .invalidCategory)) {
+            _ = try tools.apply(
+                [.setCategory(match: try match(expense), category: archived)],
                 permission: permission(), in: context)
         }
         // A category object that never entered this context.
-        #expect(throws: AIAgentError.invalidCategory) {
-            _ = try tools.applyCategoryEdits(
-                [try match(expense)],
-                to: LedgerCategory(name: "Bay", kind: .expense),
+        #expect(throws: AIAgentApplyError.action(0, .invalidCategory)) {
+            _ = try tools.apply(
+                [.setCategory(
+                    match: try match(expense),
+                    category: LedgerCategory(name: "Bay", kind: .expense))],
                 permission: permission(), in: context)
         }
         #expect(expense.category == nil && income.category == nil)
-        #expect(!context.hasChanges)
-    }
-
-    /// A clean row already on the target category is a no-op — refused.
-    @Test func applyRejectsNoOpEdits() throws {
-        let context = try makeContext()
-        let (cash, _, food, _) = try seedBasics(in: context)
-        seed(in: context, date: day(2026, 11, 10), account: cash,
-             category: food)
-        try context.save()
-        let tools = AIAgentLedgerTools()
-        let looked = try tools.lookup(permission: permission(), in: context)
-
-        #expect(throws: AIAgentError.noOpEdit) {
-            _ = try tools.applyCategoryEdits(
-                looked.matches, to: food,
-                permission: permission(), in: context)
-        }
-        #expect(!context.hasChanges)
-    }
-
-    /// A context holding unrelated pending edits is refused — a
-    /// rollback on failure would eat them.
-    @Test func applyRefusesDirtyContextAndKeepsPendingEdits() throws {
-        let context = try makeContext()
-        let (cash, _, food, _) = try seedBasics(in: context)
-        let row = seed(in: context, date: day(2026, 11, 10), account: cash)
-        try context.save()
-        let tools = AIAgentLedgerTools()
-        let looked = try tools.lookup(permission: permission(), in: context)
-
-        context.insert(LedgerTransaction(
-            kind: .expense, amount: 5_000, account: cash))
-        #expect(context.hasChanges)
-
-        #expect(throws: AIAgentError.contextHasChanges) {
-            _ = try tools.applyCategoryEdits(
-                looked.matches, to: food,
-                permission: permission(), in: context)
-        }
-        #expect(context.hasChanges)
-        #expect(row.category == nil)
-    }
-
-    /// A failed commit rolls back the batch's writes — no half-categorized
-    /// rows, and the error propagates wrapped, not swallowed.
-    @Test func failedSaveRollsBackTheWholeBatch() throws {
-        let context = try makeContext()
-        let (cash, bank, food, _) = try seedBasics(in: context)
-        let first = seed(in: context, date: day(2026, 11, 10),
-                         account: cash, needsReview: true)
-        let second = seed(in: context, date: day(2026, 11, 11),
-                          account: bank)
-        try context.save()
-        let tools = AIAgentLedgerTools()
-        let looked = try tools.lookup(permission: permission(), in: context)
-
-        struct CommitError: Error {}
-        let failing = AIAgentLedgerTools(saveAndCheck: { _ in
-            throw CommitError()
-        })
-        #expect(throws: AIAgentError.saveFailed(CommitError())) {
-            _ = try failing.applyCategoryEdits(
-                looked.matches, to: food,
-                permission: permission(), in: context)
-        }
-        #expect(first.category == nil && second.category == nil)
-        #expect(first.needsReview)
         #expect(!context.hasChanges)
     }
 
@@ -692,8 +595,8 @@ struct AIAgentTests {
             .transactionNotEligible, .invalidCategory, .noOpEdit,
             .saveFailed(URLError(.cannotConnectToHost)),
             .unparseableModelReply, .unsupportedTool, .malformedQuery,
-            .unknownHandle, .invalidProposal, .tooManyProposals,
-            .staleCategory, .tooManyActions, .invalidDraft, .invalidEdit,
+            .unknownHandle, .invalidProposal,
+            .tooManyActions, .invalidDraft, .invalidEdit,
         ]
         for error in cases {
             #expect(error.errorDescription?.isEmpty == false)
@@ -702,77 +605,123 @@ struct AIAgentTests {
             == "Giao dịch đã thay đổi hoặc bị xoá — hãy tra cứu lại.")
     }
 
-    // MARK: - Agent window selection (the sheet's bounded picker)
+    // MARK: - Search-args parsing (AIAgentToolPlanner)
 
-    /// Presets resolve to whole Vietnam-local days: "Tháng này" is the
-    /// calendar month and the "N ngày qua" options end at tomorrow's
-    /// day start so today is included.
-    @Test func windowPresetsResolveToLocalDays() throws {
-        let now = day(2026, 11, 15, 15)
-        let month = AIAgentWindowSelection(kind: .thisMonth)
-            .interval(now: now, calendar: calendar)
-        #expect(month == DateInterval(
-            start: day(2026, 11, 1, 0), end: day(2026, 12, 1, 0)))
-        let week = AIAgentWindowSelection(kind: .last7Days)
-            .interval(now: now, calendar: calendar)
-        #expect(week == DateInterval(
-            start: day(2026, 11, 9, 0), end: day(2026, 11, 16, 0)))
-        let month30 = AIAgentWindowSelection(kind: .last30Days)
-            .interval(now: day(2026, 11, 30, 9), calendar: calendar)
-        #expect(month30 == DateInterval(
-            start: day(2026, 11, 1, 0), end: day(2026, 12, 1, 0)))
-        // Presets can never fail validation.
-        #expect(AIAgentWindowSelection(kind: .thisMonth)
-            .errorText(now: now, calendar: calendar) == nil)
+    /// A valid tool call maps onto the typed query: `to` is an inclusive
+    /// day (the interval ends at the next day start) and every filter
+    /// axis lands where the lookup expects it. The `args`/`arguments`/
+    /// `parameters` spellings all parse.
+    @Test func parseMapsArgsToTheTypedQuery() throws {
+        for key in ["args", "arguments", "parameters"] {
+            let query = try AIAgentToolPlanner.parse(
+                """
+                {"tool":"searchTransactions","\(key)":{"from":"2026-11-10",
+                    "to":"2026-11-12","kind":"expense","source":"wallet",
+                    "text":"grab","needsReview":true,
+                    "minAmount":10000,"maxAmount":"200000"}}
+                """,
+                grantedWindow: window, calendar: calendar)
+            #expect(query.kind == .expense)
+            #expect(query.source == .wallet)
+            #expect(query.text == "grab")
+            #expect(query.unclassifiedOnly)
+            #expect(query.minAmount == 10_000 && query.maxAmount == 200_000)
+            let interval = try #require(query.interval)
+            #expect(interval.start == day(2026, 11, 10, 0))
+            #expect(interval.end == day(2026, 11, 13, 0))
+        }
     }
 
-    /// The custom range is validated before any interval is built:
-    /// inclusive days, inverted ranges rejected, the ~93-day bound
-    /// refused rather than clipped.
-    @Test func customWindowValidatesBeforeInterval() throws {
-        // Inclusive "Đến ngày" — the interval ends the next day.
-        var selection = AIAgentWindowSelection(
-            kind: .custom,
-            customStart: day(2026, 11, 10),
-            customEnd: day(2026, 11, 15))
-        #expect(selection.interval(
-            now: day(2026, 11, 20), calendar: calendar)
-            == DateInterval(
-                start: day(2026, 11, 10, 0), end: day(2026, 11, 16, 0)))
-        #expect(selection.errorText(
-            now: day(2026, 11, 20), calendar: calendar) == nil)
+    /// Wrong tool, non-dict args, unknown fields, bad dates, inverted
+    /// ranges and bounds — every malformed reply fails before the read.
+    @Test func parseRejectsWrongToolAndMalformedArgs() throws {
+        // A different or missing tool name → not the allow-listed call.
+        for reply in [
+            #"{"tool":"deleteTransactions","args":{}}"#,
+            #"{"args":{"kind":"expense"}}"#,
+        ] {
+            #expect(throws: AIAgentError.unsupportedTool) {
+                _ = try AIAgentToolPlanner.parse(
+                    reply, grantedWindow: window, calendar: calendar)
+            }
+        }
+        // args must be an object; unknown fields are refused.
+        for reply in [
+            #"{"tool":"searchTransactions","args":[1,2]}"#,
+            #"{"tool":"searchTransactions","args":{"account":"Tiền mặt"}}"#,
+        ] {
+            #expect(throws: AIAgentError.malformedQuery) {
+                _ = try AIAgentToolPlanner.parse(
+                    reply, grantedWindow: window, calendar: calendar)
+            }
+        }
+        // Bad day strings and inverted ranges.
+        for reply in [
+            #"{"tool":"searchTransactions","args":{"from":"10/11/2026"}}"#,
+            #"{"tool":"searchTransactions","args":{"from":"2026-13-01"}}"#,
+            #"{"tool":"searchTransactions","args":{"from":"2026-11-20","to":"2026-11-10"}}"#,
+            #"{"tool":"searchTransactions","args":{"to":"hôm qua"}}"#,
+        ] {
+            #expect(throws: AIAgentError.malformedQuery) {
+                _ = try AIAgentToolPlanner.parse(
+                    reply, grantedWindow: window, calendar: calendar)
+            }
+        }
+        // Inverted/negative bounds and a boolean-as-amount.
+        for reply in [
+            #"{"tool":"searchTransactions","args":{"minAmount":500,"maxAmount":100}}"#,
+            #"{"tool":"searchTransactions","args":{"minAmount":-5}}"#,
+            #"{"tool":"searchTransactions","args":{"maxAmount":true}}"#,
+        ] {
+            #expect(throws: AIAgentError.malformedQuery) {
+                _ = try AIAgentToolPlanner.parse(
+                    reply, grantedWindow: window, calendar: calendar)
+            }
+        }
+        // Unknown enum values.
+        for reply in [
+            #"{"tool":"searchTransactions","args":{"kind":"saving"}}"#,
+            #"{"tool":"searchTransactions","args":{"source":"bank"}}"#,
+            #"{"tool":"searchTransactions","args":{"needsReview":"yes"}}"#,
+        ] {
+            #expect(throws: AIAgentError.malformedQuery) {
+                _ = try AIAgentToolPlanner.parse(
+                    reply, grantedWindow: window, calendar: calendar)
+            }
+        }
+        // Overlong search text.
+        let overlong = """
+        {"tool":"searchTransactions","args":{"text":"\(String(repeating: "a", count: 200))"}}
+        """
+        #expect(throws: AIAgentError.malformedQuery) {
+            _ = try AIAgentToolPlanner.parse(
+                overlong, grantedWindow: window, calendar: calendar)
+        }
+        // A day range escaping the grant — refused, not clipped.
+        for reply in [
+            #"{"tool":"searchTransactions","args":{"from":"2026-10-01"}}"#,
+            #"{"tool":"searchTransactions","args":{"to":"2026-12-15"}}"#,
+            #"{"tool":"searchTransactions","args":{"from":"2027-01-05","to":"2027-01-10"}}"#,
+        ] {
+            #expect(throws: AIAgentError.queryOutsideWindow) {
+                _ = try AIAgentToolPlanner.parse(
+                    reply, grantedWindow: window, calendar: calendar)
+            }
+        }
+    }
 
-        // Inverted → nil plus the right message.
-        selection = AIAgentWindowSelection(
-            kind: .custom,
-            customStart: day(2026, 11, 15),
-            customEnd: day(2026, 11, 10))
-        #expect(selection.interval(
-            now: day(2026, 11, 20), calendar: calendar) == nil)
-        #expect(selection.errorText(
-            now: day(2026, 11, 20), calendar: calendar)
-            == "Ngày kết thúc phải bằng hoặc sau ngày bắt đầu.")
-
-        // Exactly at the ~3-month bound is allowed — the picker's own
-        // cap, tighter than the tools' `maxWindow`.
-        selection = AIAgentWindowSelection(
-            kind: .custom,
-            customStart: day(2026, 8, 10),
-            customEnd: day(2026, 11, 10))
-        #expect(selection.interval(
-            now: day(2026, 11, 20), calendar: calendar)?.duration
-            == AIAgentWindowSelection.maxCustomWindow)
-        #expect(selection.errorText(
-            now: day(2026, 11, 20), calendar: calendar) == nil)
-
-        // One day past it is refused, not clipped.
-        selection = AIAgentWindowSelection(
-            kind: .custom,
-            customStart: day(2026, 8, 9),
-            customEnd: day(2026, 11, 10))
-        #expect(selection.interval(
-            now: day(2026, 11, 20), calendar: calendar) == nil)
-        #expect(selection.errorText(
-            now: day(2026, 11, 20), calendar: calendar) != nil)
+    /// A reply with no usable JSON at all is a parse failure.
+    @Test func parseRejectsNonJSON() throws {
+        #expect(throws: AIAgentError.unparseableModelReply) {
+            _ = try AIAgentToolPlanner.parse(
+                "Xin lỗi, tôi không hiểu.",
+                grantedWindow: window, calendar: calendar)
+        }
+        // An empty args object parses — every axis defaults to "all".
+        let query = try AIAgentToolPlanner.parse(
+            #"{"tool":"searchTransactions","args":{}}"#,
+            grantedWindow: window, calendar: calendar)
+        #expect(query.interval == nil && query.kind == nil)
+        #expect(query.text.isEmpty && !query.unclassifiedOnly)
     }
 }
