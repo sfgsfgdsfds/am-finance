@@ -17,6 +17,16 @@ public enum AccountKind: String, Codable, CaseIterable, Sendable {
         self == .creditCard || self == .loan
     }
 
+    /// Day-to-day money: kinds whose balance is cash in hand — cash, a
+    /// bank account or an e-wallet. A card or loan balance is debt, and a
+    /// receivable is still somebody else's money, so none of them count.
+    public var isLiquid: Bool {
+        switch self {
+        case .cash, .bank, .eWallet: return true
+        case .receivable, .creditCard, .loan: return false
+        }
+    }
+
     /// Vietnamese label for the UI.
     public var displayName: String {
         switch self {

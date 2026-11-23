@@ -304,8 +304,7 @@ struct DebtsView: View {
 }
 
 /// One upcoming-payment row: account badge and name on the left, amount
-/// and countdown on the right — shared between the debts list and the
-/// dashboard "Sắp đến hạn" card.
+/// and countdown on the right — the debts list's "Sắp đến hạn" section.
 struct DebtsUpcomingRow: View {
     let item: DebtsUpcomingItem
     let account: Account

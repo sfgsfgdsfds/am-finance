@@ -203,7 +203,7 @@ enum PerfOps {
                 entries: plain,
                 accounts: ds.accounts.map {
                     .init(id: $0.id, name: $0.name,
-                          isLiability: $0.kind.isLiability,
+                          isLiquid: $0.kind.isLiquid,
                           icon: $0.icon, colorHex: $0.colorHex,
                           balance: $0.balance,
                           isArchived: $0.isArchived,

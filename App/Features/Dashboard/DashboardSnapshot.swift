@@ -23,25 +23,28 @@ struct DashboardSnapshot: Equatable {
         }
     }
 
-    /// One account's contribution to net worth and the accounts strip.
+    /// One account's contribution to "Tiền đang có" and the accounts strip.
     struct AccountInput: Equatable, Sendable {
         var id: UUID
         var name: String
-        /// Credit cards and loans — balances are signed, negative is owed.
-        var isLiability: Bool
+        /// Cash, bank and eWallet — day-to-day money (`AccountKind.isLiquid`).
+        /// Cards and loans are debt and a receivable is still somebody
+        /// else's money, so none of them count here.
+        var isLiquid: Bool
         var icon: String
         var colorHex: String
         /// Signed balance: positive is owned, negative is owed (LedgerMath).
+        /// A liquid account may sit negative (overdrawn) — kept as-is.
         var balance: Int64
         var isArchived: Bool
         var sortOrder: Int
 
-        init(id: UUID, name: String, isLiability: Bool, icon: String = "",
+        init(id: UUID, name: String, isLiquid: Bool, icon: String = "",
              colorHex: String = "", balance: Int64, isArchived: Bool = false,
              sortOrder: Int = 0) {
             self.id = id
             self.name = name
-            self.isLiability = isLiability
+            self.isLiquid = isLiquid
             self.icon = icon
             self.colorHex = colorHex
             self.balance = balance
@@ -77,13 +80,6 @@ struct DashboardSnapshot: Equatable {
     }
 
     // MARK: - Outputs
-
-    struct NetWorthSummary: Equatable, Sendable {
-        var total: Int64
-        var assets: Int64
-        /// Sum of liability balances — negative or zero.
-        var liabilities: Int64
-    }
 
     /// The "Tháng này" card: totals, month-over-month percents and the
     /// personal/business split line.
@@ -167,7 +163,11 @@ struct DashboardSnapshot: Equatable {
 
     // MARK: - Snapshot fields
 
-    let netWorth: NetWorthSummary
+    /// "Tiền đang có": the signed sum over non-archived liquid accounts
+    /// (cash, bank, eWallet). Debt is never subtracted — but a real
+    /// repayment out of a liquid account lowers that account's balance,
+    /// and this sum with it. An overdrawn liquid account stays negative.
+    let moneyOnHand: Int64
     let month: MonthSummary
     let accountChips: [AccountChip]
     /// Six (or `monthCount`) monthly points, oldest first; zero-filled.
@@ -224,23 +224,13 @@ struct DashboardSnapshot: Equatable {
             businessExpense: split.business.expense
         )
 
-        var assets: Int64 = 0
-        var liabilities: Int64 = 0
-        for account in accounts where !account.isArchived {
-            if account.isLiability {
-                liabilities = saturatingAdd(liabilities, account.balance)
-            } else {
-                assets = saturatingAdd(assets, account.balance)
-            }
+        var moneyOnHand: Int64 = 0
+        for account in accounts where !account.isArchived && account.isLiquid {
+            moneyOnHand = saturatingAdd(moneyOnHand, account.balance)
         }
-        let netWorth = NetWorthSummary(
-            total: saturatingAdd(assets, liabilities),
-            assets: assets,
-            liabilities: liabilities
-        )
 
         let chips = accounts
-            .filter { !$0.isArchived }
+            .filter { !$0.isArchived && $0.isLiquid }
             .sorted {
                 $0.sortOrder == $1.sortOrder
                     ? $0.name < $1.name
@@ -308,7 +298,7 @@ struct DashboardSnapshot: Equatable {
         }
 
         return DashboardSnapshot(
-            netWorth: netWorth,
+            moneyOnHand: moneyOnHand,
             month: month,
             accountChips: chips,
             months: months,

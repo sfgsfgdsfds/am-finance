@@ -45,43 +45,32 @@ struct DashboardCard<Content: View>: View {
     }
 }
 
-// MARK: - Net worth
+// MARK: - Money on hand
 
-/// Card 1: total net worth plus the assets/liabilities split; tapping pushes
-/// the full accounts list.
-struct DashboardNetWorthCard: View {
-    let netWorth: DashboardSnapshot.NetWorthSummary
+/// Card 1: "Tiền đang có" — one signed VND sum over the non-archived
+/// cash, bank and eWallet accounts. Card/loan debt and receivables never
+/// move the number; tapping pushes the full accounts list, whose own
+/// header still shows complete net worth.
+struct DashboardMoneyCard: View {
+    let amount: Int64
 
     var body: some View {
         NavigationLink {
             AccountsListView()
         } label: {
-            DashboardCard("Tài sản ròng", showsChevron: true) {
-                VStack(spacing: 10) {
-                    AmountText(amount: netWorth.total)
+            DashboardCard("Tiền đang có", showsChevron: true) {
+                VStack(spacing: 4) {
+                    AmountText(amount: amount)
                         .font(.title.bold())
                         .frame(maxWidth: .infinity)
-                    HStack(spacing: 0) {
-                        column(title: "Tài sản", amount: netWorth.assets)
-                        Divider().frame(height: 32)
-                        column(title: "Nợ", amount: netWorth.liabilities)
-                    }
+                    Text("Tiền mặt · Ngân hàng · Ví điện tử")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
         .buttonStyle(.plain)
-        .accessibilityIdentifier("dashboard.netWorthCard")
-    }
-
-    private func column(title: String, amount: Int64) -> some View {
-        VStack(spacing: 2) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            AmountText(amount: amount)
-                .font(.headline)
-        }
-        .frame(maxWidth: .infinity)
+        .accessibilityIdentifier("dashboard.moneyCard")
     }
 }
 
@@ -458,47 +447,6 @@ struct DashboardRecentCard: View {
         }
         .padding(.vertical, 7)
         .contentShape(Rectangle())
-    }
-}
-
-// MARK: - Upcoming debt payments
-
-/// Card: debt payments due within the next days — card statements and loan
-/// installments sorted by due date. Hidden by the caller when the list is
-/// empty; tapping a row pushes the matching detail view.
-struct DashboardUpcomingCard: View {
-    let items: [DebtsUpcomingItem]
-    /// Resolves an item's account id back to its model for the row's icon
-    /// and name and for the navigation destination.
-    let account: (UUID) -> Account?
-
-    var body: some View {
-        DashboardCard("Sắp đến hạn") {
-            VStack(spacing: 0) {
-                ForEach(items) { item in
-                    if let model = account(item.accountID) {
-                        NavigationLink {
-                            destination(item, account: model)
-                        } label: {
-                            DebtsUpcomingRow(item: item, account: model)
-                        }
-                        .buttonStyle(.plain)
-                        if item.id != items.last?.id {
-                            Divider()
-                                .padding(.leading, 48)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func destination(_ item: DebtsUpcomingItem, account: Account) -> some View {
-        switch item.kind {
-        case .creditCard: CreditCardDetailView(account: account)
-        case .loan: LoanDetailView(account: account)
-        }
     }
 }
 

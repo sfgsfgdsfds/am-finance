@@ -257,29 +257,41 @@ struct DashboardTests {
         #expect(!snap.isEmpty)
     }
 
-    // MARK: - Net worth & chips
+    // MARK: - Money on hand & chips
 
-    @Test func netWorthSplitsAssetsAndLiabilities() {
+    @Test func moneyOnHandSumsLiquidAccountsOnly() {
         let accounts = [
             DashboardSnapshot.AccountInput(
-                id: UUID(), name: "Ngân hàng", isLiability: false,
+                id: UUID(), name: "Ngân hàng", isLiquid: true,
                 balance: 20_000_000, sortOrder: 1),
             DashboardSnapshot.AccountInput(
-                id: UUID(), name: "Tiền mặt", isLiability: false,
+                id: UUID(), name: "Tiền mặt", isLiquid: true,
                 balance: 5_000_000, sortOrder: 0),
             DashboardSnapshot.AccountInput(
-                id: UUID(), name: "Thẻ Visa", isLiability: true,
-                balance: -3_000_000, sortOrder: 2),
+                id: UUID(), name: "Ví Momo", isLiquid: true,
+                balance: -1_000_000, sortOrder: 2),
             DashboardSnapshot.AccountInput(
-                id: UUID(), name: "Ví cũ", isLiability: false,
-                balance: 99_000_000, isArchived: true, sortOrder: 3),
+                id: UUID(), name: "Thẻ Visa", isLiquid: false,
+                balance: -3_000_000, sortOrder: 3),
+            DashboardSnapshot.AccountInput(
+                id: UUID(), name: "Vay mua nhà", isLiquid: false,
+                balance: -400_000_000, sortOrder: 4),
+            DashboardSnapshot.AccountInput(
+                id: UUID(), name: "Khách A", isLiquid: false,
+                balance: 8_000_000, sortOrder: 5),
+            DashboardSnapshot.AccountInput(
+                id: UUID(), name: "Ví cũ", isLiquid: true,
+                balance: 99_000_000, isArchived: true, sortOrder: 6),
         ]
         let snap = snapshot(accounts: accounts)
-        #expect(snap.netWorth.assets == 25_000_000)
-        #expect(snap.netWorth.liabilities == -3_000_000)
-        #expect(snap.netWorth.total == 22_000_000)
-        // Chips skip archived accounts and follow sortOrder.
-        #expect(snap.accountChips.map(\.name) == ["Tiền mặt", "Ngân hàng", "Thẻ Visa"])
+        // Cash + bank + eWallet only — the card, the hefty loan and the
+        // receivable never move the number; the overdrawn wallet stays
+        // negative; archived money is out.
+        #expect(snap.moneyOnHand == 24_000_000)
+        // Chips list exactly the same liquid, non-archived accounts,
+        // still in sortOrder.
+        #expect(snap.accountChips.map(\.name) == ["Tiền mặt", "Ngân hàng", "Ví Momo"])
+        #expect(snap.accountChips.map(\.balance) == [5_000_000, 20_000_000, -1_000_000])
     }
 
     // MARK: - Pending review & empty state
@@ -350,16 +362,20 @@ struct DashboardTests {
     // MARK: - End-to-end with real models
 
     /// Inserts real SwiftData rows, maps them to snapshot inputs the same way
-    /// the view does, and checks the aggregated numbers — including the
-    /// signed-balance convention (a card purchase makes the card more
-    /// negative, feeding "Nợ").
+    /// the view does, and checks the aggregated numbers — including that a
+    /// real card repayment out of the bank account lowers "Tiền đang có",
+    /// while the card, the client receivable and full net worth are
+    /// unaffected by the new card's scope.
     @Test func snapshotFromModelRows() throws {
         let context = try makeContext()
         let cash = Account(name: "Tiền mặt", kind: .cash,
                            openingBalance: 5_000_000, sortOrder: 0)
-        let card = Account(name: "Thẻ Visa", kind: .creditCard, sortOrder: 1)
-        context.insert(cash)
-        context.insert(card)
+        let bank = Account(name: "Ngân hàng", kind: .bank,
+                           openingBalance: 30_000_000, sortOrder: 1)
+        let card = Account(name: "Thẻ Visa", kind: .creditCard, sortOrder: 2)
+        let client = Account(name: "Khách A", kind: .receivable,
+                             openingBalance: 8_000_000, sortOrder: 3)
+        for account in [cash, bank, card, client] { context.insert(account) }
         let food = LedgerCategory(name: "Ăn uống", kind: .expense,
                                   icon: "fork.knife", colorHex: "FF9500")
         context.insert(food)
@@ -378,9 +394,10 @@ struct DashboardTests {
             kind: .expense, amount: 500_000, date: monthStart,
             account: card, category: food, business: shop
         ))
+        // The card repayment is a real transfer out of the bank.
         context.insert(LedgerTransaction(
             kind: .transfer, amount: 2_000_000, date: monthStart,
-            account: cash, toAccount: card
+            account: bank, toAccount: card
         ))
         try context.save()
 
@@ -390,13 +407,14 @@ struct DashboardTests {
         ))
         #expect(transactions.count == 3)
 
+        let accounts = [cash, bank, card, client]
         let snap = DashboardSnapshot.make(
             entries: transactions.map {
                 ReportEntry(date: $0.date, kind: $0.kind, amount: $0.amount,
                             categoryID: $0.category?.id, businessID: $0.business?.id)
             },
-            accounts: [cash, card].map {
-                .init(id: $0.id, name: $0.name, isLiability: $0.kind.isLiability,
+            accounts: accounts.map {
+                .init(id: $0.id, name: $0.name, isLiquid: $0.kind.isLiquid,
                       icon: $0.icon, colorHex: $0.colorHex,
                       balance: $0.balance, isArchived: $0.isArchived,
                       sortOrder: $0.sortOrder)
@@ -415,14 +433,19 @@ struct DashboardTests {
         #expect(snap.month.income == 10_000_000)
         #expect(snap.month.expense == 500_000)
         #expect(snap.month.businessIncome == 10_000_000)
-        // Cash: 5tr opening + 10tr income - 2tr transfer out = 13tr.
-        // Card: -500k from the purchase + 2tr as transfer destination =
-        // +1,5tr — a liability-kind account can still sit positive.
-        #expect(cash.balance == 13_000_000)
+        // Cash: 5tr opening + 10tr income = 15tr. Bank: 30tr - the real
+        // 2tr repayment to the card = 28tr. Card: -500k from the purchase
+        // + 2tr as transfer destination = +1,5tr — a liability-kind
+        // account can still sit positive.
+        #expect(cash.balance == 15_000_000)
+        #expect(bank.balance == 28_000_000)
         #expect(card.balance == 1_500_000)
-        #expect(snap.netWorth.assets == 13_000_000)
-        #expect(snap.netWorth.liabilities == 1_500_000)
-        #expect(snap.netWorth.total == 14_500_000)
+        // 43tr cash + bank: the repayment debited the bank for real, the
+        // card and the 8tr client receivable are excluded.
+        #expect(snap.moneyOnHand == 43_000_000)
+        #expect(snap.accountChips.map(\.name) == ["Tiền mặt", "Ngân hàng"])
+        // Full net worth is unaffected: every account still counts there.
+        #expect(NetWorth.total(accounts) == 52_500_000)
         #expect(snap.topExpenseCategories.map(\.name) == ["Ăn uống"])
         #expect(snap.businessResults.map(\.profit) == [9_500_000])
     }
