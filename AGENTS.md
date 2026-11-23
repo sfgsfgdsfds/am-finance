@@ -77,17 +77,22 @@ workers know what already exists. Pushed views must not create their own
 `NavigationStack`.
 
 - `Accounts/` — `AccountsListView`, `AccountDetailView(account:)`, `AccountEditView(account:)`; `AccountBalanceAdjustment` helper.
-- `AIAgent/` — `AIAgentView` (the "Agent giao dịch" sheet, Giao dịch
-  toolbar leading button: persisted `aiAgent.access` picker default
-  `.off`, bounded window picker, exact-payload review, confirmed apply);
-  `AIAgentWindowSelection` bounded local day windows; `AIAgentLedgerTools`
-  (`lookup` bounded read, `applyCategoryEdits` atomic user-confirmed
-  category edits — `[AIAgentCategoryEdit]` mixed batches scoped by
-  `lookupWindow`), `AIAgentAccess`/`AIAgentPermission` policy,
-  `AIAgentOrchestrator` two-stage pipeline (`search` → `prepareAnalysis`
-  → `analyze`; prompts/parsers in `AIAgentPlanner`, value types
-  `AIAgentDataPreview`, `AIAgentPreparedAnalysis`, `AIAgentAnalysis`).
-- `AIAssistant/` — `AISettingsView`, `AIChatView`, `AIInboxSuggestView`, `AICaptureView`; wired at Settings → "Trợ lý AI", the inbox toolbar's "Phân loại bằng AI", the dashboard sparkles button and the `root.aiCapture` satellite beside the "+".
+- `AIAgent/` — `AIAgentView` (the one chat-style Agent, pushed from the
+  dashboard sparkles button, Settings → "Agent" and the Giao dịch
+  toolbar leading button), driven by `AIAgentChatSession` (bounded
+  loop: max 4 tool steps per turn, one correction round, tool results
+  ride back as untrusted user-role text; `pendingProposal` →
+  `confirmProposal()` is the only write path) + `AIAgentChatProtocol`
+  (JSON-in-text contract: answer / search / summary / actions);
+  `AIAgentLedgerTools` (`lookup` bounded read under `resultLimit`/
+  `scanLimit`/`maxWindow`, `validate` dry run, atomic user-confirmed
+  `apply` of setCategory/add/edit/delete — `actionLimit`, per-action
+  refusals as `AIAgentApplyError.action(i, reason)`);
+  `AIAgentToolPlanner` search-args parsing + day helpers;
+  `AIAgentAccess`/`AIAgentPermission` policy — the `aiAgent.access` and
+  `aiAgent.includeNotes` `@AppStorage` keys set in `AISettingsView`
+  → "Quyền của Agent".
+- `AIAssistant/` — `AISettingsView` (Settings → Trợ lý AI → "Nhà cung cấp AI"; hosts the "Quyền của Agent" pickers), `AIInboxSuggestView` (inbox toolbar's "Phân loại bằng AI"), `AICaptureView` (the `root.aiCapture` satellite beside "+"); shared plumbing `AIClient`/`AIChatClientProtocol`, `AIChatScope` + `AIChatContextLoader`/`AIFinanceContextBuilder` summaries, extraction/categorization parsers.
 - `AppLock/` — `AppLockSettingsView`, the `.appLockProtected()` modifier on the root; `AppLockController.shared`.
 - `BackgroundRefresh/` — `BackgroundRefreshScheduler` (BGAppRefreshTask `vn.amx.finance.refresh`, registered in `AMFinanceApp`), `BackgroundRefreshRunner` (background wallet sync + recurring + reminders with local notifications), `BackgroundRefreshNotificationPlan`.
 - `Backup/` — `BackupView` (Settings → Dữ liệu).

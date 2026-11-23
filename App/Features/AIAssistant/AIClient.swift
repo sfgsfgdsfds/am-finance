@@ -610,3 +610,13 @@ struct AIClient: Sendable {
         }
     }
 }
+
+/// The surface every AI feature screen calls. `AIClient` already
+/// implements both methods; tests substitute a fake so no network is
+/// involved.
+protocol AIChatClientProtocol: Sendable {
+    func complete(_ request: AIRequest) async throws -> AIResponse
+    func stream(_ request: AIRequest) -> AsyncThrowingStream<String, Error>
+}
+
+extension AIClient: AIChatClientProtocol {}

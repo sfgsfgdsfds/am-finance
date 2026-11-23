@@ -23,14 +23,9 @@ enum AIAgentAccess: String, CaseIterable, Sendable {
     /// Whether `lookup` may run at all.
     var canLookup: Bool { self != .off }
 
-    /// Whether `applyCategoryEdits` may run.
-    var canProposeCategoryEdits: Bool {
-        self == .scopedReadAndProposeCategoryEdits
-    }
-
     /// Whether `apply(_:permission:in:lookupWindow:)` may run — the
-    /// mixed action batch. Same grant as `canProposeCategoryEdits`:
-    /// the single write level covers every confirmed action kind.
+    /// mixed action batch. The single write level covers every
+    /// confirmed action kind.
     var canProposeActions: Bool {
         self == .scopedReadAndProposeCategoryEdits
     }

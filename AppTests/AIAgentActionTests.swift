@@ -8,8 +8,8 @@ import FinanceCore
 /// agent's confirmed write layer: `setCategory`, `add`, `edit` and
 /// `delete` in one atomic commit, indexed `AIAgentApplyError` failures
 /// and the tombstone-aware imported-row rules. Lookup-level behavior
-/// stays in `AIAgentTests`; the orchestrator bridge in
-/// `AIAgentOrchestratorTests`.
+/// stays in `AIAgentTests`; the confirm flow in
+/// `AIAgentChatActionTests`.
 @MainActor
 struct AIAgentActionTests {
 
@@ -200,12 +200,12 @@ struct AIAgentActionTests {
             name: "Cũ", kind: .expense, isArchived: true)
         context.insert(archived)
         try context.save()
-        var staleCategory = TransactionDraft(kind: .expense, account: cash)
-        staleCategory.amount = 10_000
-        staleCategory.category = archived
+        var archivedCategory = TransactionDraft(kind: .expense, account: cash)
+        archivedCategory.amount = 10_000
+        archivedCategory.category = archived
         #expect(throws: AIAgentApplyError.action(0, .invalidCategory)) {
             _ = try tools.apply(
-                [.add(draft: staleCategory)],
+                [.add(draft: archivedCategory)],
                 permission: permission(), in: context)
         }
         var archivedAccount = TransactionDraft(
@@ -956,5 +956,57 @@ struct AIAgentActionTests {
         #expect(summary.categorized == 1)
         #expect(row.category?.id == food.id)
         #expect(!row.needsReview)
+    }
+
+    /// `lookupWindow` re-resolves inside the narrowed slice the lookup
+    /// actually scanned — a row older than the grant's first
+    /// `scanLimit` entries still applies when its window is passed
+    /// back, exactly like the chat confirm path does.
+    @Test func applyReResolvesInsideNarrowedLookupWindow() throws {
+        let context = try makeContext()
+        let (cash, _, food, _) = try seedBasics(in: context)
+        // Five newest-first rows, the oldest two inside the narrow
+        // window — a scanLimit of three cannot see them on its own.
+        var older: [LedgerTransaction] = []
+        for dayOfMonth in [26, 25, 20, 11, 10] {
+            let row = seed(in: context, amount: 10_000,
+                           date: day(2026, 11, dayOfMonth), account: cash)
+            if dayOfMonth <= 11 { older.append(row) }
+        }
+        try context.save()
+        let tools = AIAgentLedgerTools(scanLimit: 3)
+
+        let narrow = DateInterval(
+            start: day(2026, 11, 1, 0), end: day(2026, 11, 15, 0))
+        let looked = try tools.lookup(
+            AIAgentLookupQuery(interval: narrow),
+            permission: permission(), in: context)
+        #expect(looked.matches.count == 2)
+        #expect(looked.window == narrow)
+        let match = try #require(looked.matches.first {
+            $0.original.id == older[1].id })
+
+        // Without the narrowed window the apply cannot even see the row.
+        #expect(throws: AIAgentApplyError.action(0, .staleTransaction)) {
+            _ = try tools.apply(
+                [.setCategory(match: match, category: food)],
+                permission: permission(), in: context)
+        }
+        // With it, the row re-resolves and the edit lands.
+        let summary = try tools.apply(
+            [.setCategory(match: match, category: food)],
+            permission: permission(), in: context,
+            lookupWindow: narrow)
+        #expect(summary.categorized == 1)
+        #expect(older[1].category?.id == food.id)
+
+        // A window escaping the grant is still refused, not clipped.
+        #expect(throws: AIAgentApplyError.batch(.queryOutsideWindow)) {
+            _ = try tools.apply(
+                [.setCategory(match: match, category: food)],
+                permission: permission(), in: context,
+                lookupWindow: DateInterval(
+                    start: day(2026, 10, 1, 0), end: day(2026, 12, 1, 0)))
+        }
     }
 }

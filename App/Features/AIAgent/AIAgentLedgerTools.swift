@@ -2,29 +2,13 @@ import Foundation
 import SwiftData
 import FinanceCore
 
-/// What one `applyCategoryEdits` call committed — the batch is atomic,
-/// so the count always equals the confirmed batch size.
-struct AIAgentApplyResult: Equatable, Sendable {
-    var appliedCount: Int
-}
-
-/// One confirmed category edit inside a batch — the lookup-issued match
-/// (its `original` snapshot is re-verified before anything writes) plus
-/// the live category it moves to. The batch apply takes a list of
-/// these, so a mixed set of targets still lands in one atomic commit.
-struct AIAgentCategoryEdit {
-    var match: AIAgentLookupMatch
-    var category: LedgerCategory
-}
-
 /// One user-confirmed action inside a mixed `apply` batch — the chat
 /// agent's whole write vocabulary. Existing rows are addressed only
 /// through lookup-issued matches, so nothing the tools never surfaced
 /// can be touched; `add` stands alone because a brand-new row has no
 /// match to mint.
 enum AIAgentLedgerAction {
-    /// Move an existing row to a new category — the confirmed unit of
-    /// the legacy `applyCategoryEdits` path.
+    /// Move an existing row to a new category.
     case setCategory(match: AIAgentLookupMatch, category: LedgerCategory)
     /// Insert a new row from a validated draft — an ordinary manual row
     /// (no external provenance, `needsReview == false`). The permission
@@ -148,13 +132,6 @@ enum AIAgentError: LocalizedError {
     /// The proposal list itself was malformed — not objects, missing
     /// keys, or a row named twice.
     case invalidProposal
-    /// More proposals than the cap allows — the model is told to
-    /// propose at most one edit per surfaced row.
-    case tooManyProposals
-    /// The proposal's snapped category was renamed, archived or deleted
-    /// since the preview was built — the confirm would write something
-    /// the user never saw.
-    case staleCategory
     /// More actions than `AIAgentLedgerTools.actionLimit` in one
     /// confirmed batch.
     case tooManyActions
@@ -202,10 +179,6 @@ enum AIAgentError: LocalizedError {
             return "Đề xuất tham chiếu một mục không có trong kết quả."
         case .invalidProposal:
             return "Đề xuất của AI không hợp lệ — không áp dụng đề xuất nào."
-        case .tooManyProposals:
-            return "AI đề xuất quá nhiều thay đổi — hãy thu hẹp yêu cầu."
-        case .staleCategory:
-            return "Danh mục đã đổi tên, bị ẩn hoặc bị xoá — hãy tra cứu lại."
         case .tooManyActions:
             return "Quá nhiều thao tác một lần — tối đa \(AIAgentLedgerTools.actionLimit) mục."
         case .invalidDraft:
@@ -238,8 +211,6 @@ extension AIAgentError: Equatable {
              (.malformedQuery, .malformedQuery),
              (.unknownHandle, .unknownHandle),
              (.invalidProposal, .invalidProposal),
-             (.tooManyProposals, .tooManyProposals),
-             (.staleCategory, .staleCategory),
              (.tooManyActions, .tooManyActions),
              (.invalidDraft, .invalidDraft),
              (.invalidEdit, .invalidEdit):
@@ -269,9 +240,9 @@ extension AIAgentError: Equatable {
 ///   back only this operation's writes. Kind, business, rental links
 ///   and external provenance are never touched.
 ///
-/// - `applyCategoryEdits` — the legacy single-field write kept for the
-///   old view/orchestrator: wraps `apply` and unwraps the indexed
-///   error back to the bare `AIAgentError` it always threw.
+/// - `validate` — the same preflight `apply` runs, minus the writes:
+///   `AIAgentChatSession` dry-runs a proposed batch through it before
+///   the confirmation card is offered.
 @MainActor
 struct AIAgentLedgerTools {
 
@@ -367,10 +338,10 @@ struct AIAgentLedgerTools {
     ///
     /// Match-carrying actions re-resolve their row through the
     /// effective lookup window — the grant itself, or `lookupWindow`
-    /// verified inside it — exactly like `applyCategoryEdits`, and must
-    /// still match their `BillSplitOriginal` snapshot field by field.
-    /// `add` rows are ordinary manual rows (no provenance, never
-    /// pending review) and are not bound to the window.
+    /// verified inside it — and must still match their
+    /// `BillSplitOriginal` snapshot field by field. `add` rows are
+    /// ordinary manual rows (no provenance, never pending review) and
+    /// are not bound to the window.
     @discardableResult
     func apply(
         _ actions: [AIAgentLedgerAction],
@@ -679,59 +650,6 @@ struct AIAgentLedgerTools {
             && draft.business?.id == row.business?.id
     }
 
-    // MARK: - Apply category edits (legacy shim)
-
-    /// Applies one user-confirmed batch: every `matches` entry must be a
-    /// lookup-issued match whose snapshot still verifies a live,
-    /// eligible income/expense row, and `category` must be active and
-    /// kind-matching for every target. Any rejection — revoked
-    /// permission, oversized window, dirty context, empty or duplicated
-    /// batch, stale/deleted/out-of-window/ineligible/no-op targets —
-    /// writes nothing. On success each row keeps its id, amount, date,
-    /// accounts, business, note and external provenance; `needsReview`
-    /// clears and `updatedAt` is stamped on every applied row.
-    @discardableResult
-    func applyCategoryEdits(
-        _ matches: [AIAgentLookupMatch],
-        to category: LedgerCategory,
-        permission: AIAgentPermission,
-        in context: ModelContext
-    ) throws -> AIAgentApplyResult {
-        try applyCategoryEdits(
-            matches.map { AIAgentCategoryEdit(match: $0, category: category) },
-            permission: permission, in: context)
-    }
-
-    /// The mixed form: one confirmed batch where each edit carries its
-    /// own target category — the orchestrator's validated proposals —
-    /// still committed atomically under the same guards. `lookupWindow`
-    /// is the effective window the matches' lookup actually scanned
-    /// (`AIAgentLookupResult.window`): verified to sit inside the grant,
-    /// then re-fetched instead of the grant's broader first-`scanLimit`
-    /// slice, so a narrowed lookup's rows always re-resolve. Pass nil to
-    /// re-resolve over the whole grant — the single-category path's
-    /// original behavior. Runs on top of `apply`, unwrapping the
-    /// indexed error back to the bare reason this API always threw.
-    @discardableResult
-    func applyCategoryEdits(
-        _ edits: [AIAgentCategoryEdit],
-        permission: AIAgentPermission,
-        in context: ModelContext,
-        lookupWindow: DateInterval? = nil
-    ) throws -> AIAgentApplyResult {
-        do {
-            let summary = try apply(
-                edits.map {
-                    .setCategory(match: $0.match, category: $0.category)
-                },
-                permission: permission, in: context,
-                lookupWindow: lookupWindow)
-            return AIAgentApplyResult(appliedCount: summary.categorized)
-        } catch let error as AIAgentApplyError {
-            throw error.reason
-        }
-    }
-
     // MARK: - Row semantics
 
     /// The provenance bucket a row falls in — manual rows carry no
@@ -760,16 +678,6 @@ struct AIAgentLedgerTools {
             && row.rentalLease == nil
             && row.rentalPeriod == nil
             && row.toAccount == nil
-    }
-
-    /// The same rule read off a lookup snapshot — the preview and the
-    /// proposal validator mark proposal-eligible rows without touching
-    /// the live row.
-    nonisolated static func canEditCategory(of snapshot: BillSplitOriginal) -> Bool {
-        (snapshot.kind == .income || snapshot.kind == .expense)
-            && snapshot.rentalLeaseID == nil
-            && snapshot.rentalPeriod == nil
-            && snapshot.toAccountID == nil
     }
 
     /// The category kind a transaction kind accepts — transfers have
