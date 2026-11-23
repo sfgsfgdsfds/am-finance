@@ -1134,7 +1134,108 @@ final class AMFinanceUITests: XCTestCase {
         goBack(to: "Giao dịch")
     }
 
+    /// The proposal card end to end. Relaunched with `-uiTestAgentScript`
+    /// beside the in-memory store, the Agent screen counts as configured
+    /// and the scripted client answers deterministically: every user
+    /// message proposes one 50.000 ₫ expense ("Phở UI test") on the
+    /// seeded account. Grant "Đọc và thao tác" in AI settings, then the
+    /// card previews the add, "Bỏ qua" drops it untouched, a second
+    /// message re-proposes, "Áp dụng" writes, and the row lands in
+    /// Giao dịch → "Tất cả".
+    func testAgentProposalConfirm() throws {
+        app.terminate()
+        app.launchArguments = ["-uiTestInMemoryStore", "-uiTestAgentScript"]
+        app.launch()
+
+        // Cài đặt → "Nhà cung cấp AI" → "Quyền của Agent" → grant.
+        let gear = app.buttons["Cài đặt"]
+        XCTAssertTrue(waitReady(gear, timeout: 15), "settings gear missing")
+        gear.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Cài đặt"]
+                .waitForExistence(timeout: 5),
+            "settings screen missing")
+        tapOption("Nhà cung cấp AI")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Trí tuệ nhân tạo (AI)"]
+                .waitForExistence(timeout: 5),
+            "AI settings screen missing")
+        let picker = scopedElement("agent.accessPicker")
+        assertVisible(picker, "access picker missing")
+        picker.tap()
+        tapOption("Đọc và thao tác")
+        goBack(to: "Cài đặt")
+
+        // The settings "Trợ lý AI" section's own Agent row — with the
+        // scripted client the chat renders instead of the unconfigured
+        // state.
+        tapOption("Agent")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Agent"]
+                .waitForExistence(timeout: 5),
+            "agent screen missing")
+
+        sendAgentMessage("ghi lai pho 50k")
+
+        // The card previews the proposed add — kind badge, the formatted
+        // amount line, both decision buttons.
+        let apply = app.buttons["agent.proposal.apply"]
+        XCTAssertTrue(waitReady(apply, timeout: 10),
+                      "proposal apply button missing")
+        XCTAssertTrue(app.staticTexts["Thêm"].exists,
+                      "add-kind badge missing")
+        XCTAssertTrue(
+            app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS %@", "50.000"))
+                .firstMatch.exists,
+            "amount preview line missing")
+
+        // Discard — the card disappears and nothing is written.
+        let discard = app.buttons["agent.proposal.discard"]
+        XCTAssertTrue(discard.exists, "proposal discard button missing")
+        discard.tap()
+        waitForDisappearance(apply, message: "card stayed after Bỏ qua")
+
+        // A second message re-proposes; this one is applied.
+        sendAgentMessage("them lai pho 50k")
+        XCTAssertTrue(waitReady(apply, timeout: 10),
+                      "second proposal apply button missing")
+        apply.tap()
+        XCTAssertTrue(
+            app.staticTexts.matching(
+                NSPredicate(format: "label CONTAINS %@", "Đã áp dụng"))
+                .firstMatch.waitForExistence(timeout: 5),
+            "applied confirmation missing")
+        XCTAssertFalse(apply.exists, "card still visible after apply")
+
+        // The confirmed row lands once in Giao dịch → "Tất cả".
+        goBack(to: "Cài đặt")
+        goBack(to: "Tổng quan")
+        openTab("Giao dịch")
+        tapScope("txList.scope.all")
+        let noteRows = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Phở UI test"))
+        if !reveal(noteRows.firstMatch, maxSwipes: 6) {
+            XCTAssertTrue(noteRows.firstMatch.waitForExistence(timeout: 3),
+                          "applied 'Phở UI test' row missing")
+        }
+        XCTAssertEqual(noteRows.count, 1,
+                       "expected exactly one applied 'Phở UI test' row")
+    }
+
     // MARK: - Flow helpers
+
+    /// Types into the Agent input and taps send. The field may surface as
+    /// a text view (`axis: .vertical`), so it is matched by identifier
+    /// whatever element type it carries; the send button is disabled
+    /// until text lands, so the tap waits for enabled too.
+    private func sendAgentMessage(_ text: String) {
+        let input = app.descendants(matching: .any)["agent.input"]
+        XCTAssertTrue(waitReady(input, timeout: 8), "agent input missing")
+        input.tap()
+        app.typeText(text)
+        tapWhenReady(app.buttons["agent.send"], "agent send missing")
+    }
 
     /// Taps the floating "+" (identifier `root.quickAdd`) and waits for the
     /// editor sheet. Waits for hittable, not just exists — the button is in
