@@ -82,6 +82,12 @@ struct AIProfileEditView: View {
 
     private var providerSection: some View {
         Section("Nhà cung cấp") {
+            // Presets are only offered for a new profile: applying one to an
+            // existing profile could re-aim its saved API key at a new
+            // gateway the key was never meant for.
+            if isNew {
+                presetButtons
+            }
             TextField("Tên hiển thị", text: $draft.name)
             Picker("Kiểu API", selection: $draft.style) {
                 ForEach(AIAPIStyle.allCases, id: \.self) { style in
@@ -104,6 +110,35 @@ struct AIProfileEditView: View {
                     .font(.footnote.monospaced())
                     .foregroundStyle(.secondary)
             }
+            if let preset = draft.matchingPreset {
+                Label(preset.hint, systemImage: "info.circle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// One-tap presets for known gateways. A button disables while the
+    /// draft already points at that gateway — tapping again would only
+    /// wipe the key and model the user has since entered.
+    private var presetButtons: some View {
+        ForEach(AIProviderPreset.allCases, id: \.self) { preset in
+            Button {
+                draft.applyPreset(preset)
+            } label: {
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(preset.buttonTitle)
+                        Text(preset.buttonSubtitle)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } icon: {
+                    Image(systemName: preset.symbol)
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+            .disabled(draft.matchingPreset == preset)
         }
     }
 

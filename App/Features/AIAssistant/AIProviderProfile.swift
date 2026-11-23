@@ -272,6 +272,86 @@ struct AIProviderProfile: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// A known gateway offered as a one-tap preset when creating a profile.
+/// A preset only fills non-secret fields — the API key is always typed by
+/// the user and the model is picked from the provider's own list.
+enum AIProviderPreset: String, CaseIterable, Sendable {
+    /// AM Router — OpenAI-compatible gateway at provider.amx.vn, gated by
+    /// an AM Router API key. Reuses the `.openAICompatible` transport.
+    case amRouter
+
+    /// Display name the preset writes into the form.
+    var name: String {
+        switch self {
+        case .amRouter: return "AM Router"
+        }
+    }
+
+    var style: AIAPIStyle {
+        switch self {
+        case .amRouter: return .openAICompatible
+        }
+    }
+
+    /// The exact base URL written into the form.
+    var baseURL: String {
+        switch self {
+        case .amRouter: return "https://provider.amx.vn/v1"
+        }
+    }
+
+    /// The `supportsJSONMode` flag applied with the preset.
+    var supportsJSONMode: Bool {
+        switch self {
+        case .amRouter: return true
+        }
+    }
+
+    /// One-line label of the preset button.
+    var buttonTitle: String {
+        switch self {
+        case .amRouter: return "Dùng AM Router"
+        }
+    }
+
+    /// Smaller line under the button title.
+    var buttonSubtitle: String {
+        switch self {
+        case .amRouter:
+            return "Cổng OpenAI tương thích của AM — provider.amx.vn, cần khoá AM Router"
+        }
+    }
+
+    /// SF Symbol for the button row.
+    var symbol: String {
+        switch self {
+        case .amRouter: return "bolt.horizontal.fill"
+        }
+    }
+
+    /// Guidance shown while the draft points at this preset's gateway:
+    /// enter the key, fetch the model list, and for reading hoá đơn pick an
+    /// image-capable model into "Model nhận ảnh".
+    var hint: String {
+        switch self {
+        case .amRouter:
+            return "Nhập khoá AM Router rồi bấm \"Tải danh sách model\" để chọn model. Để đọc hoá đơn, điền thêm một model có nhận ảnh vào ô \"Model nhận ảnh\"."
+        }
+    }
+
+    /// True when the draft's style and normalized base URL point at this
+    /// preset's gateway — regardless of how they got there (preset button
+    /// or URL typed by hand).
+    func matches(_ draft: AIProfileDraft) -> Bool {
+        guard draft.style == style,
+              let typed = try? AIBaseURL.normalize(draft.baseURL),
+              let presetURL = try? AIBaseURL.normalize(baseURL) else {
+            return false
+        }
+        return typed == presetURL
+    }
+}
+
 /// Editable form state for `AIProfileEditView` — pure value type so the
 /// validation rules are unit-testable without a view.
 struct AIProfileDraft: Equatable, Sendable {
@@ -304,6 +384,30 @@ struct AIProfileDraft: Equatable, Sendable {
         maxTokens = profile.maxTokens
         timeout = profile.timeout
         supportsJSONMode = profile.supportsJSONMode
+    }
+
+    /// The preset whose gateway this draft currently points at, if any —
+    /// detected from style + normalized base URL, so a gateway URL typed by
+    /// hand is recognized the same as a tapped preset.
+    var matchingPreset: AIProviderPreset? {
+        AIProviderPreset.allCases.first { $0.matches(self) }
+    }
+
+    /// Applies a known-gateway preset: fills name/style/baseURL and the
+    /// JSON-mode flag, clears both model fields (the model must be picked
+    /// from that provider's own list) and clears any key already typed —
+    /// it may belong to another provider and must never be sent to the
+    /// preset's origin. Offered only for new profiles, so no saved key can
+    /// be re-aimed at a new gateway by applying a preset.
+    mutating func applyPreset(_ preset: AIProviderPreset) {
+        name = preset.name
+        style = preset.style
+        baseURL = preset.baseURL
+        supportsJSONMode = preset.supportsJSONMode
+        model = ""
+        visionModel = ""
+        extraHeaders = ""
+        apiKey = ""
     }
 
     /// Sensible defaults when the user picks an API style.
