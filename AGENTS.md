@@ -79,6 +79,13 @@ workers know what already exists. Pushed views must not create their own
 - `AppLock/` — `AppLockSettingsView`, the `.appLockProtected()` modifier on the root; `AppLockController.shared`.
 - `BackgroundRefresh/` — `BackgroundRefreshScheduler` (BGAppRefreshTask `vn.amx.finance.refresh`, registered in `AMFinanceApp`), `BackgroundRefreshRunner` (background wallet sync + recurring + reminders with local notifications), `BackgroundRefreshNotificationPlan`.
 - `Backup/` — `BackupView` (Settings → Dữ liệu).
+- `BillSplit/` — `BillSplitService` (chia bill accounting, no UI yet):
+  `splitNewBill` posts the payer's own-share expense + one transfer
+  advance per friend; `splitExistingExpense` shrinks an eligible personal
+  expense in place (keeps id/external provenance, `BillSplitOriginal`
+  precondition); `assignRepayment` converts an eligible income into a
+  receivable repayment via `WalletSyncTransfer`. Equal-split math lives
+  in `FinanceCore.BillSplit`.
 - `BalanceTrend/` — `BalanceTrendView(account:)`, `BalanceTrendAnchorSheet(account:)`.
 - `Budgets/` — `BudgetsView`, `BudgetsEditSheet`, `BudgetsSummaryCard` (dashboard).
 - `BusinessHub/` — `BusinessHubView`, `BusinessHubDetailView(business:)`.

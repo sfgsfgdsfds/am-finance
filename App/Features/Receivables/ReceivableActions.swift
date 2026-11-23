@@ -96,20 +96,28 @@ enum ReceivableActions {
     /// Accounts an advance can be paid from: non-archived accounts holding
     /// real money or card capacity — cash, bank, eWallet, credit card.
     static func advancePayers(_ accounts: [Account], for receivable: Account) -> [Account] {
-        accounts.filter {
-            !$0.isArchived && $0.id != receivable.id
-                && ($0.kind == .cash || $0.kind == .bank
-                    || $0.kind == .eWallet || $0.kind == .creditCard)
-        }
+        accounts.filter { $0.id != receivable.id && canAdvance(from: $0) }
     }
 
     /// Accounts a repayment or service fee can land in: non-archived cash,
     /// bank or eWallet.
     static func receivers(_ accounts: [Account], for receivable: Account) -> [Account] {
-        accounts.filter {
-            !$0.isArchived && $0.id != receivable.id
-                && ($0.kind == .cash || $0.kind == .bank || $0.kind == .eWallet)
-        }
+        accounts.filter { $0.id != receivable.id && canReceive(into: $0) }
+    }
+
+    /// The per-account half of `advancePayers` — for callers validating a
+    /// single already-picked payer.
+    static func canAdvance(from account: Account) -> Bool {
+        !account.isArchived
+            && (account.kind == .cash || account.kind == .bank
+                || account.kind == .eWallet || account.kind == .creditCard)
+    }
+
+    /// The per-account half of `receivers`.
+    static func canReceive(into account: Account) -> Bool {
+        !account.isArchived
+            && (account.kind == .cash || account.kind == .bank
+                || account.kind == .eWallet)
     }
 
     // MARK: - Seeded categories
