@@ -98,6 +98,9 @@ struct AIAgentOrchestratorTests {
         private var recorded: [AIRequest] = []
         private var queued: [String] = []
         var response = #"{"tool":"searchTransactions","args":{}}"#
+        /// Cancels the calling task mid-request — proves the stage's
+        /// post-`complete` cancellation check stops further work.
+        var cancelInComplete = false
 
         var requests: [AIRequest] {
             lock.lock()
@@ -119,7 +122,11 @@ struct AIAgentOrchestratorTests {
         }
 
         func complete(_ request: AIRequest) async throws -> AIResponse {
-            AIResponse(text: dequeue(for: request) ?? response)
+            let text = dequeue(for: request) ?? response
+            if cancelInComplete {
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+            return AIResponse(text: text)
         }
 
         func stream(
@@ -925,5 +932,121 @@ struct AIAgentOrchestratorTests {
                 lookupWindow: DateInterval(
                     start: day(2026, 10, 1, 0), end: day(2026, 12, 1, 0)))
         }
+    }
+
+    // MARK: - Window containment & cancellation guards
+
+    /// A grant narrowed since the lookup must regress both stage-2
+    /// entry points before any network — the effective window is
+    /// re-checked against the current grant, not trusted.
+    @Test func narrowedGrantRegressesBeforeNetwork() async throws {
+        let context = try makeContext()
+        let (cash, _, _, _) = try seedBasics(in: context)
+        seed(in: context, date: day(2026, 11, 10), account: cash)
+        try context.save()
+        let fake = FakeAIClient()
+        let orchestrator = orchestrator(fake)
+        let search = try await orchestrator.search(
+            question: "x", permission: permission(), in: context)
+        let sent = fake.requests.count
+
+        // The grant shrunk to the month's second half — the searched
+        // full month no longer sits inside it.
+        let narrower = permission(window: DateInterval(
+            start: day(2026, 11, 15, 0), end: day(2026, 12, 1, 0)))
+        #expect(throws: AIAgentError.queryOutsideWindow) {
+            try orchestrator.prepareAnalysis(
+                search, permission: narrower, in: context)
+        }
+        let prepared = try orchestrator.prepareAnalysis(
+            search, permission: permission(), in: context)
+        await #expect(throws: AIAgentError.queryOutsideWindow) {
+            _ = try await orchestrator.analyze(
+                prepared, permission: narrower)
+        }
+        // Oversized grants regress the same way — refused, not clipped.
+        let tooWide = permission(window: DateInterval(
+            start: day(2026, 9, 1, 0), end: day(2027, 1, 1, 0)))
+        #expect(throws: AIAgentError.windowTooWide) {
+            try orchestrator.prepareAnalysis(
+                search, permission: tooWide, in: context)
+        }
+        await #expect(throws: AIAgentError.windowTooWide) {
+            _ = try await orchestrator.analyze(prepared, permission: tooWide)
+        }
+        // Nothing beyond the original search request ever left.
+        #expect(fake.requests.count == sent)
+    }
+
+    /// Cancellation set before the request means the request never
+    /// leaves — the ledger is not read either.
+    @Test func searchHonoursCancellationBeforeNetwork() async throws {
+        let context = try makeContext()
+        _ = try seedBasics(in: context)
+        let fake = FakeAIClient()
+        let orchestrator = orchestrator(fake)
+        let task = Task { @MainActor in
+            try await orchestrator.search(
+                question: "x", permission: permission(), in: context)
+        }
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+        #expect(fake.requests.isEmpty)
+    }
+
+    /// A cancellation landing inside the request still stops the stage
+    /// before the reply is parsed and the ledger read runs.
+    @Test func searchStopsAfterCancelledRequest() async throws {
+        let context = try makeContext()
+        let (cash, _, _, _) = try seedBasics(in: context)
+        seed(in: context, date: day(2026, 11, 10), account: cash)
+        try context.save()
+        let fake = FakeAIClient()
+        fake.cancelInComplete = true
+        let orchestrator = orchestrator(fake)
+        let task = Task { @MainActor in
+            try await orchestrator.search(
+                question: "x", permission: permission(), in: context)
+        }
+        await #expect(throws: CancellationError.self) {
+            _ = try await task.value
+        }
+        #expect(fake.requests.count == 1)
+    }
+
+    /// `analyze` has the same guards: cancelled before the request →
+    /// zero network; cancelled inside it → nothing is parsed.
+    @Test func analyzeHonoursCancellation() async throws {
+        let context = try makeContext()
+        let (cash, _, _, _) = try seedBasics(in: context)
+        seed(in: context, date: day(2026, 11, 10), account: cash)
+        try context.save()
+        let (prepared, fake) = try await searchedAndPrepared(
+            #"{"tool":"searchTransactions","args":{}}"#, in: context)
+        let orchestrator = orchestrator(fake)
+        let sent = fake.requests.count
+
+        let cancelledEarly = Task { @MainActor in
+            try await orchestrator.analyze(
+                prepared, permission: permission())
+        }
+        cancelledEarly.cancel()
+        await #expect(throws: CancellationError.self) {
+            _ = try await cancelledEarly.value
+        }
+        #expect(fake.requests.count == sent)
+
+        fake.cancelInComplete = true
+        fake.queueReply(#"{"answer":"x","proposals":[]}"#)
+        let cancelledLate = Task { @MainActor in
+            try await orchestrator.analyze(
+                prepared, permission: permission())
+        }
+        await #expect(throws: CancellationError.self) {
+            _ = try await cancelledLate.value
+        }
+        #expect(fake.requests.count == sent + 1)
     }
 }

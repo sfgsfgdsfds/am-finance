@@ -701,4 +701,77 @@ struct AIAgentTests {
         #expect(AIAgentError.staleTransaction.errorDescription
             == "Giao dịch đã thay đổi hoặc bị xoá — hãy tra cứu lại.")
     }
+
+    // MARK: - Agent window selection (the sheet's bounded picker)
+
+    /// Presets resolve to whole Vietnam-local days: "Tháng này" is the
+    /// calendar month and the "N ngày qua" options end at tomorrow's
+    /// day start so today is included.
+    @Test func windowPresetsResolveToLocalDays() throws {
+        let now = day(2026, 11, 15, 15)
+        let month = AIAgentWindowSelection(kind: .thisMonth)
+            .interval(now: now, calendar: calendar)
+        #expect(month == DateInterval(
+            start: day(2026, 11, 1, 0), end: day(2026, 12, 1, 0)))
+        let week = AIAgentWindowSelection(kind: .last7Days)
+            .interval(now: now, calendar: calendar)
+        #expect(week == DateInterval(
+            start: day(2026, 11, 9, 0), end: day(2026, 11, 16, 0)))
+        let month30 = AIAgentWindowSelection(kind: .last30Days)
+            .interval(now: day(2026, 11, 30, 9), calendar: calendar)
+        #expect(month30 == DateInterval(
+            start: day(2026, 11, 1, 0), end: day(2026, 12, 1, 0)))
+        // Presets can never fail validation.
+        #expect(AIAgentWindowSelection(kind: .thisMonth)
+            .errorText(now: now, calendar: calendar) == nil)
+    }
+
+    /// The custom range is validated before any interval is built:
+    /// inclusive days, inverted ranges rejected, the ~93-day bound
+    /// refused rather than clipped.
+    @Test func customWindowValidatesBeforeInterval() throws {
+        // Inclusive "Đến ngày" — the interval ends the next day.
+        var selection = AIAgentWindowSelection(
+            kind: .custom,
+            customStart: day(2026, 11, 10),
+            customEnd: day(2026, 11, 15))
+        #expect(selection.interval(
+            now: day(2026, 11, 20), calendar: calendar)
+            == DateInterval(
+                start: day(2026, 11, 10, 0), end: day(2026, 11, 16, 0)))
+        #expect(selection.errorText(
+            now: day(2026, 11, 20), calendar: calendar) == nil)
+
+        // Inverted → nil plus the right message.
+        selection = AIAgentWindowSelection(
+            kind: .custom,
+            customStart: day(2026, 11, 15),
+            customEnd: day(2026, 11, 10))
+        #expect(selection.interval(
+            now: day(2026, 11, 20), calendar: calendar) == nil)
+        #expect(selection.errorText(
+            now: day(2026, 11, 20), calendar: calendar)
+            == "Ngày kết thúc phải bằng hoặc sau ngày bắt đầu.")
+
+        // Exactly at the ~3-month bound is allowed.
+        selection = AIAgentWindowSelection(
+            kind: .custom,
+            customStart: day(2026, 8, 10),
+            customEnd: day(2026, 11, 10))
+        #expect(selection.interval(
+            now: day(2026, 11, 20), calendar: calendar)?.duration
+            == AIAgentLedgerTools.maxWindow)
+        #expect(selection.errorText(
+            now: day(2026, 11, 20), calendar: calendar) == nil)
+
+        // One day past it is refused, not clipped.
+        selection = AIAgentWindowSelection(
+            kind: .custom,
+            customStart: day(2026, 8, 9),
+            customEnd: day(2026, 11, 10))
+        #expect(selection.interval(
+            now: day(2026, 11, 20), calendar: calendar) == nil)
+        #expect(selection.errorText(
+            now: day(2026, 11, 20), calendar: calendar) != nil)
+    }
 }

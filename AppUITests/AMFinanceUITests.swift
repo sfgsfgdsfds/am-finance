@@ -1062,6 +1062,70 @@ final class AMFinanceUITests: XCTestCase {
                       "month summary missing in 'Tất cả'")
     }
 
+    // MARK: - 9. Agent giao dịch
+
+    /// The ledger agent entry point: the Giao dịch toolbar opens the
+    /// sheet, the persisted access picker defaults to "Tắt" (the launch
+    /// flag clears its AppStorage so the default check stays stable), and
+    /// granting "Chỉ đọc" reveals the no-provider state — with no
+    /// provider configured no model call is even rendered possible.
+    func testAgentLedgerAccess() throws {
+        openTab("Giao dịch")
+        let entry = app.buttons["Agent giao dịch"]
+        XCTAssertTrue(waitReady(entry, timeout: 10), "agent entry missing")
+        entry.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Agent giao dịch"]
+                .waitForExistence(timeout: 5),
+            "agent sheet missing")
+
+        // Default grant is off — no search affordance, no ledger access.
+        let picker = scopedElement("agent.accessPicker")
+        XCTAssertTrue(picker.waitForExistence(timeout: 5),
+                      "access picker missing")
+        let offValue = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Tắt"))
+            .firstMatch
+        XCTAssertTrue(offValue.exists, "default access is not Tắt")
+        XCTAssertFalse(app.buttons["Tìm trong sổ"].exists,
+                       "search must not be offered while access is off")
+
+        // Grant read-only access through the persisted picker.
+        picker.tap()
+        tapOption("Chỉ đọc")
+
+        // No provider is configured in tests: the empty state shows and
+        // "Tìm trong sổ" is not rendered — no model call is possible.
+        assertVisible(app.staticTexts["Chưa cấu hình AI"],
+                      "no-provider state missing")
+        assertVisible(app.buttons["Mở cài đặt AI"],
+                      "AI settings entry missing")
+        XCTAssertFalse(app.buttons["Tìm trong sổ"].exists,
+                       "search must not exist without a provider")
+
+        // The grant persists for the session — reopening keeps
+        // "Chỉ đọc" and the no-provider state.
+        tapWhenReady(app.buttons["Đóng"], "agent sheet close missing")
+        waitForDisappearance(
+            app.navigationBars.staticTexts["Agent giao dịch"],
+            message: "agent sheet did not dismiss")
+        XCTAssertTrue(waitReady(entry, timeout: 8),
+                      "agent entry missing after close")
+        entry.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Agent giao dịch"]
+                .waitForExistence(timeout: 5),
+            "agent sheet did not reopen")
+        let readValue = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Chỉ đọc"))
+            .firstMatch
+        XCTAssertTrue(readValue.exists,
+                      "access grant did not persist for the session")
+        assertVisible(app.staticTexts["Chưa cấu hình AI"],
+                      "no-provider state missing after reopen")
+        tapWhenReady(app.buttons["Đóng"], "agent sheet close missing")
+    }
+
     // MARK: - Flow helpers
 
     /// Taps the floating "+" (identifier `root.quickAdd`) and waits for the
