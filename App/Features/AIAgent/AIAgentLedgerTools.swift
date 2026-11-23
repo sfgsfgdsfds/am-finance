@@ -8,6 +8,15 @@ struct AIAgentApplyResult: Equatable, Sendable {
     var appliedCount: Int
 }
 
+/// One confirmed category edit inside a batch — the lookup-issued match
+/// (its `original` snapshot is re-verified before anything writes) plus
+/// the live category it moves to. The batch apply takes a list of
+/// these, so a mixed set of targets still lands in one atomic commit.
+struct AIAgentCategoryEdit {
+    var match: AIAgentLookupMatch
+    var category: LedgerCategory
+}
+
 /// Every failure the agent ledger tools can produce — each case carries
 /// a Vietnamese message the UI can show verbatim.
 enum AIAgentError: LocalizedError {
@@ -44,6 +53,29 @@ enum AIAgentError: LocalizedError {
     case noOpEdit
     /// The single commit failed; the batch's writes were rolled back.
     case saveFailed(any Error)
+    /// The model's reply carried no usable JSON for the stage that ran.
+    case unparseableModelReply
+    /// The model asked for a tool or proposal action outside the
+    /// allow-list — the only tools are `searchTransactions` and
+    /// `setCategory`.
+    case unsupportedTool
+    /// The `searchTransactions` arguments were malformed — bad day
+    /// strings, an inverted date or amount range, negative or non-numeric
+    /// bounds, overlong text, or fields outside the allow-list.
+    case malformedQuery
+    /// A proposal referenced a row/category handle the preview never
+    /// issued.
+    case unknownHandle
+    /// The proposal list itself was malformed — not objects, missing
+    /// keys, or a row named twice.
+    case invalidProposal
+    /// More proposals than the cap allows — the model is told to
+    /// propose at most one edit per surfaced row.
+    case tooManyProposals
+    /// The proposal's snapped category was renamed, archived or deleted
+    /// since the preview was built — the confirm would write something
+    /// the user never saw.
+    case staleCategory
 
     var errorDescription: String? {
         switch self {
@@ -71,6 +103,20 @@ enum AIAgentError: LocalizedError {
             return "Giao dịch đã ở danh mục này — không có gì để thay đổi."
         case .saveFailed(let error):
             return "Không lưu được: \(error.localizedDescription)"
+        case .unparseableModelReply:
+            return "AI trả lời không đúng định dạng — hãy thử lại."
+        case .unsupportedTool:
+            return "AI yêu cầu một thao tác nằm ngoài phạm vi cho phép."
+        case .malformedQuery:
+            return "Bộ lọc AI trả về không hợp lệ."
+        case .unknownHandle:
+            return "Đề xuất tham chiếu một mục không có trong kết quả."
+        case .invalidProposal:
+            return "Đề xuất của AI không hợp lệ — không áp dụng đề xuất nào."
+        case .tooManyProposals:
+            return "AI đề xuất quá nhiều thay đổi — hãy thu hẹp yêu cầu."
+        case .staleCategory:
+            return "Danh mục đã đổi tên, bị ẩn hoặc bị xoá — hãy tra cứu lại."
         }
     }
 }
@@ -91,7 +137,14 @@ extension AIAgentError: Equatable {
              (.transactionNotEligible, .transactionNotEligible),
              (.invalidCategory, .invalidCategory),
              (.noOpEdit, .noOpEdit),
-             (.saveFailed, .saveFailed):
+             (.saveFailed, .saveFailed),
+             (.unparseableModelReply, .unparseableModelReply),
+             (.unsupportedTool, .unsupportedTool),
+             (.malformedQuery, .malformedQuery),
+             (.unknownHandle, .unknownHandle),
+             (.invalidProposal, .invalidProposal),
+             (.tooManyProposals, .tooManyProposals),
+             (.staleCategory, .staleCategory):
             return true
         default:
             return false
@@ -124,12 +177,12 @@ struct AIAgentLedgerTools {
 
     /// App-controlled caps the model cannot raise — instance-overridable
     /// for tests only.
-    static let resultLimit = 30
+    nonisolated static let resultLimit = 30
     /// The bounded scan slice: the newest rows inside the window a
     /// single lookup inspects. Deliberately not the whole ledger.
-    static let scanLimit = 500
+    nonisolated static let scanLimit = 500
     /// The widest window a permission may grant — ~3 months.
-    static let maxWindow: TimeInterval = 93 * 86_400
+    nonisolated static let maxWindow: TimeInterval = 93 * 86_400
 
     var resultLimit = Self.resultLimit
     var scanLimit = Self.scanLimit
@@ -206,25 +259,54 @@ struct AIAgentLedgerTools {
         permission: AIAgentPermission,
         in context: ModelContext
     ) throws -> AIAgentApplyResult {
+        try applyCategoryEdits(
+            matches.map { AIAgentCategoryEdit(match: $0, category: category) },
+            permission: permission, in: context)
+    }
+
+    /// The mixed form: one confirmed batch where each edit carries its
+    /// own target category — the orchestrator's validated proposals —
+    /// still committed atomically under the same guards. `lookupWindow`
+    /// is the effective window the matches' lookup actually scanned
+    /// (`AIAgentLookupResult.window`): verified to sit inside the grant,
+    /// then re-fetched instead of the grant's broader first-`scanLimit`
+    /// slice, so a narrowed lookup's rows always re-resolve. Pass nil to
+    /// re-resolve over the whole grant — the single-category path's
+    /// original behavior.
+    @discardableResult
+    func applyCategoryEdits(
+        _ edits: [AIAgentCategoryEdit],
+        permission: AIAgentPermission,
+        in context: ModelContext,
+        lookupWindow: DateInterval? = nil
+    ) throws -> AIAgentApplyResult {
         guard permission.access.canProposeCategoryEdits
         else { throw AIAgentError.permissionDenied }
         let window = try checked(permission.window)
         if context.hasChanges { throw AIAgentError.contextHasChanges }
-        guard !matches.isEmpty else { throw AIAgentError.emptyBatch }
-        guard category.modelContext === context, !category.isArchived
-        else { throw AIAgentError.invalidCategory }
+        guard !edits.isEmpty else { throw AIAgentError.emptyBatch }
+        // Category sanity before the row loop — the same order the
+        // single-category batch checked them.
+        for edit in edits {
+            guard edit.category.modelContext === context,
+                  !edit.category.isArchived
+            else { throw AIAgentError.invalidCategory }
+        }
 
-        // Re-resolve targets through the same bounded window fetch the
-        // lookup used — consistent bounds, and no raw-id fetch needed.
-        let fetched = try fetchWindow(window, in: context)
+        // Re-resolve targets through the effective lookup window — the
+        // grant itself, or the narrowed interval verified inside it —
+        // keeping the same bounded slice semantics the lookup used.
+        let scanWindow = try narrowed(lookupWindow, within: window)
+        let fetched = try fetchWindow(scanWindow, in: context)
         let rowsByID = Dictionary(
             fetched.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
 
         var seen = Set<UUID>()
-        var rows: [LedgerTransaction] = []
-        rows.reserveCapacity(matches.count)
-        for match in matches {
-            let snapshot = match.original
+        var resolved: [(row: LedgerTransaction, category: LedgerCategory)] = []
+        resolved.reserveCapacity(edits.count)
+        for edit in edits {
+            let snapshot = edit.match.original
+            let category = edit.category
             guard seen.insert(snapshot.id).inserted
             else { throw AIAgentError.duplicateTransaction }
             guard window.contains(snapshot.date)
@@ -240,23 +322,23 @@ struct AIAgentLedgerTools {
             // classification. Only a clean same-category row is a no-op.
             let noOp = row.category?.id == category.id && !row.needsReview
             guard !noOp else { throw AIAgentError.noOpEdit }
-            rows.append(row)
+            resolved.append((row, category))
         }
 
-        for row in rows {
+        for (row, category) in resolved {
             row.category = category
             row.needsReview = false
             row.updatedAt = .now
         }
         try commit(context)
-        return AIAgentApplyResult(appliedCount: rows.count)
+        return AIAgentApplyResult(appliedCount: resolved.count)
     }
 
     // MARK: - Row semantics
 
     /// The provenance bucket a row falls in — manual rows carry no
     /// marker; anything unrecognized counts as a generic import.
-    static func source(of row: LedgerTransaction) -> AIAgentSource {
+    nonisolated static func source(of row: LedgerTransaction) -> AIAgentSource {
         guard let marker = row.externalSource, !marker.isEmpty
         else { return .manual }
         switch marker {
@@ -268,23 +350,33 @@ struct AIAgentLedgerTools {
 
     /// `TransactionListScope.unclassified` semantics: non-transfer rows
     /// missing a category OR still flagged `needsReview`.
-    static func isUnclassified(_ row: LedgerTransaction) -> Bool {
+    nonisolated static func isUnclassified(_ row: LedgerTransaction) -> Bool {
         row.kind != .transfer && (row.category == nil || row.needsReview)
     }
 
     /// The apply's row-level rule — also safe for a UI to pre-check:
     /// a plain, unlinked income or expense; never a transfer, never
     /// rent-linked. The service still re-validates on apply.
-    static func canEditCategory(of row: LedgerTransaction) -> Bool {
+    nonisolated static func canEditCategory(of row: LedgerTransaction) -> Bool {
         (row.kind == .income || row.kind == .expense)
             && row.rentalLease == nil
             && row.rentalPeriod == nil
             && row.toAccount == nil
     }
 
+    /// The same rule read off a lookup snapshot — the preview and the
+    /// proposal validator mark proposal-eligible rows without touching
+    /// the live row.
+    nonisolated static func canEditCategory(of snapshot: BillSplitOriginal) -> Bool {
+        (snapshot.kind == .income || snapshot.kind == .expense)
+            && snapshot.rentalLeaseID == nil
+            && snapshot.rentalPeriod == nil
+            && snapshot.toAccountID == nil
+    }
+
     /// The category kind a transaction kind accepts — transfers have
     /// none (they are never editable here anyway).
-    static func categoryKind(of kind: TransactionKind) -> CategoryKind? {
+    nonisolated static func categoryKind(of kind: TransactionKind) -> CategoryKind? {
         switch kind {
         case .income: return .income
         case .expense: return .expense
