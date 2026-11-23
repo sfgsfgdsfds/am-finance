@@ -928,6 +928,133 @@ final class AMFinanceUITests: XCTestCase {
                       "reports income share section missing")
     }
 
+    // MARK: - 7. Bill split and repayment assignment
+
+    /// "Chia bill" from the unsaved quick-add draft: a 1.200.000 ₫ bill for
+    /// Tôi + 3 friends must preview 300.000 own share and 900.000 phải thu,
+    /// then save through the one explicit "Lưu chia bill" — which also
+    /// dismisses the editor without its "Lưu". The receivable and the
+    /// advance rows are checked in "Giao dịch" and "Khoản ứng hộ khách";
+    /// finally a personal income is reclassified in place as An's
+    /// repayment through "Ghi nhận hoàn tiền".
+    func testBillSplitAndRepayment() throws {
+        // Open quick-add, fill the draft — no normal save.
+        tapQuickAdd()
+        typeAmount(1_200_000)
+        pickCategory("Ăn uống")
+        tapOption("Chia bill")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Chia bill"]
+                .waitForExistence(timeout: 5),
+            "bill split sheet missing")
+
+        // Two more friend rows → Tôi + 3 friends, all typed new names.
+        for _ in 0..<2 {
+            tapOption("Thêm người")
+        }
+        fillField(app.textFields["billSplit.friendName.0"], with: "An")
+        fillField(app.textFields["billSplit.friendName.1"], with: "Binh")
+        fillField(app.textFields["billSplit.friendName.2"], with: "Chi")
+
+        // Live preview: exact own share, total phải thu and bill total.
+        assertVisible(app.staticTexts["Phần của tôi"],
+                      "own-share preview row missing")
+        assertVisible(app.staticTexts["300.000 ₫"],
+                      "preview does not show the 300.000 share")
+        assertVisible(app.staticTexts["Tổng phải thu"],
+                      "receivable-total preview row missing")
+        assertVisible(app.staticTexts["900.000 ₫"],
+                      "preview does not show the 900.000 receivable total")
+        assertVisible(app.staticTexts["1.200.000 ₫"],
+                      "preview does not show the 1.200.000 total")
+
+        // The explicit save dismisses the sheet AND the editor.
+        tapWhenReady(app.buttons["Lưu chia bill"], "split save button missing")
+        waitForDisappearance(
+            app.navigationBars.staticTexts["Chia bill"],
+            message: "split sheet did not dismiss")
+        XCTAssertTrue(
+            waitReady(app.buttons["root.quickAdd"], timeout: 10),
+            "editor did not close after the split")
+
+        // Saved rows: the 300.000 own-share expense plus three advances.
+        openTab("Giao dịch")
+        assertVisible(app.staticTexts["-300.000 ₫"],
+                      "split expense amount missing in list")
+        assertVisible(app.staticTexts["Chuyển khoản"],
+                      "advance transfer rows missing")
+        assertVisible(app.staticTexts["Tiền mặt → An"],
+                      "advance to An missing its transfer subtitle")
+
+        // The new "An" receivable carries the advance as outstanding.
+        openTab("Tổng quan")
+        let gear = app.buttons["Cài đặt"]
+        XCTAssertTrue(waitReady(gear, timeout: 8), "settings gear missing")
+        gear.tap()
+        tapOption("Khoản ứng hộ khách")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Khoản ứng hộ khách"]
+                .waitForExistence(timeout: 5),
+            "receivables screen missing")
+        assertVisible(app.staticTexts["An"],
+                      "receivable created by the split missing")
+        assertVisible(app.staticTexts["+900.000 ₫"],
+                      "total outstanding does not show +900.000 ₫")
+        goBack(to: "Cài đặt")
+        goBack(to: "Tổng quan")
+
+        // A personal income of 300.000 — An pays the bill back.
+        tapQuickAdd()
+        let incomeSegment = app.buttons["Thu"]
+        XCTAssertTrue(incomeSegment.waitForExistence(timeout: 4),
+                      "income segment missing")
+        incomeSegment.tap()
+        typeAmount(300_000)
+        pickCategory("Thu khác")
+        saveSheet()
+
+        // Edit it from "Giao dịch" → "Ghi nhận hoàn tiền".
+        openTab("Giao dịch")
+        tapTransactionRow("Thu khác")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Sửa giao dịch"]
+                .waitForExistence(timeout: 5),
+            "income editor missing")
+        tapOption("Ghi nhận hoàn tiền")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Ghi nhận hoàn tiền"]
+                .waitForExistence(timeout: 5),
+            "repayment sheet missing")
+
+        // Preview shows the amount and the original receiving account.
+        assertVisible(app.staticTexts["300.000 ₫"],
+                      "repayment amount missing")
+        assertVisible(app.staticTexts["Tiền mặt"],
+                      "original receiving account missing")
+
+        // Pick the only eligible receivable and confirm the in-place
+        // reclassification — no secondary row is created.
+        let client = app.descendants(matching: .any)
+            .matching(identifier: "billRepay.receivable.An").firstMatch
+        if !reveal(client, maxSwipes: 4) {
+            XCTAssertTrue(client.waitForExistence(timeout: 3),
+                          "receivable 'An' missing on repayment sheet")
+        }
+        client.tap()
+        tapWhenReady(app.buttons["Xác nhận hoàn tiền"],
+                     "repayment confirm missing")
+        waitForDisappearance(
+            app.navigationBars.staticTexts["Ghi nhận hoàn tiền"],
+            message: "repayment sheet did not dismiss")
+
+        // The income row is now a receivable→cash transfer; no income
+        // row and no duplicate remains.
+        waitForDisappearance(app.staticTexts["Thu khác"],
+                             message: "income row still listed after conversion")
+        assertVisible(app.staticTexts["An → Tiền mặt"],
+                      "repayment transfer subtitle missing")
+    }
+
     // MARK: - Flow helpers
 
     /// Taps the floating "+" (identifier `root.quickAdd`) and waits for the

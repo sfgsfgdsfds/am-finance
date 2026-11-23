@@ -9,8 +9,9 @@ enum BillSplitParticipant {
     /// clients only.
     case existing(Account)
     /// A person name. Trimmed on use; an empty name fails validation and
-    /// a name folding to an existing personal receivable binds to that
-    /// account instead of creating a duplicate.
+    /// a name folding to an existing active personal receivable is
+    /// rejected — the caller must pick that client explicitly rather
+    /// than silently reusing it.
     case newPerson(String)
 }
 
@@ -88,8 +89,8 @@ struct BillSplitResult {
     var advances: [LedgerTransaction]
     /// The receivable each advance landed on — same order as `advances`.
     var receivables: [Account]
-    /// Subset of `receivables` this call created (`newPerson` entries
-    /// whose name matched no existing personal receivable).
+    /// Subset of `receivables` this call created — one account per
+    /// `newPerson` entry.
     var createdAccounts: [Account]
     /// The applied equal-split plan.
     var plan: BillSplit.Plan
@@ -116,6 +117,10 @@ enum BillSplitError: LocalizedError {
     /// An `existing` participant is not an active personal receivable,
     /// or lives on another context.
     case invalidParticipant
+    /// A `newPerson` name folds onto an existing active personal
+    /// receivable — the user must pick that client explicitly rather
+    /// than silently reusing it (or type a distinct name).
+    case participantNameMatchesExisting
     /// The supplied category is archived, wrong kind or from another
     /// context — nil is always fine (the row keeps or gains no
     /// category).
@@ -155,6 +160,8 @@ enum BillSplitError: LocalizedError {
             return "Hai người chia trỏ về cùng một tài khoản phải thu."
         case .invalidParticipant:
             return "Người chia phải là một tài khoản phải thu cá nhân còn hoạt động."
+        case .participantNameMatchesExisting:
+            return "Tên này trùng một phải thu cá nhân có sẵn — hãy chọn khách trong danh sách hoặc đặt tên khác."
         case .invalidCategory:
             return "Danh mục không hợp lệ — hãy chọn một danh mục chi."
         case .transactionNotEligible:
@@ -186,6 +193,7 @@ extension BillSplitError: Equatable {
              (.emptyParticipantName, .emptyParticipantName),
              (.duplicateParticipant, .duplicateParticipant),
              (.invalidParticipant, .invalidParticipant),
+             (.participantNameMatchesExisting, .participantNameMatchesExisting),
              (.invalidCategory, .invalidCategory),
              (.transactionNotEligible, .transactionNotEligible),
              (.staleTransaction, .staleTransaction),
@@ -275,7 +283,9 @@ struct BillSplitService {
     /// keeps its id, `externalSource`/`externalID` and every other bit
     /// of provenance, its date, its payer and its note — only the amount
     /// shrinks to the payer's own share, an optional expense `category`
-    /// is applied, `needsReview` clears and `updatedAt` is stamped.
+    /// is applied and `updatedAt` is stamped. `needsReview` clears only
+    /// when the resulting row carries a category — a still-unclassified
+    /// split keeps its "Chờ phân loại" flag.
     /// Friends' shares become `payer -> receivable` transfer advances on
     /// the same date.
     ///
@@ -306,7 +316,9 @@ struct BillSplitService {
         for advance in advances { context.insert(advance) }
         if let category { transaction.category = category }
         transaction.amount = plan.ownShare
-        transaction.needsReview = false
+        // Only a classified row loses the review flag — a split that
+        // stays uncategorized keeps "Chờ phân loại".
+        if transaction.category != nil { transaction.needsReview = false }
         transaction.updatedAt = .now
         try commit(context)
         return BillSplitResult(
@@ -326,9 +338,9 @@ struct BillSplitService {
     /// `needsReview` clear and `updatedAt` is stamped.
     ///
     /// Stricter than the manual repayment sheet: the income amount must
-    /// not exceed what the client still owes, so this flow can never
-    /// create prepaid credit. `expected` guards stale and repeated
-    /// submissions.
+    /// be positive and must not exceed what the client still owes, so
+    /// this flow can never create prepaid credit or write a zero
+    /// movement. `expected` guards stale and repeated submissions.
     @discardableResult
     func assignRepayment(
         _ transaction: LedgerTransaction,
@@ -404,32 +416,22 @@ struct BillSplitService {
         _ transaction: LedgerTransaction, in context: ModelContext
     ) throws -> Account {
         guard transaction.modelContext === context,
-              transaction.kind == .expense,
-              transaction.business == nil,
-              transaction.rentalLease == nil,
-              transaction.rentalPeriod == nil,
-              transaction.toAccount == nil,
-              let payer = transaction.account,
-              ReceivableActions.canAdvance(from: payer)
+              Self.canSplitExpense(transaction),
+              let payer = transaction.account
         else { throw BillSplitError.transactionNotEligible }
         return payer
     }
 
-    /// Eligible repayment source: a personal, unlinked income landing on
-    /// a valid repayment receiver — returned for the caller's check —
-    /// including synced rows still carrying their `externalID`, which
-    /// the conversion preserves.
+    /// Eligible repayment source: a positive, personal, unlinked income
+    /// landing on a valid repayment receiver — returned for the caller's
+    /// check — including synced rows still carrying their `externalID`,
+    /// which the conversion preserves.
     private func requireAssignableIncome(
         _ transaction: LedgerTransaction, in context: ModelContext
     ) throws -> Account {
         guard transaction.modelContext === context,
-              transaction.kind == .income,
-              transaction.business == nil,
-              transaction.rentalLease == nil,
-              transaction.rentalPeriod == nil,
-              transaction.toAccount == nil,
-              let receiver = transaction.account,
-              ReceivableActions.canReceive(into: receiver)
+              Self.canAssignRepayment(transaction),
+              let receiver = transaction.account
         else { throw BillSplitError.transactionNotEligible }
         return receiver
     }
@@ -447,27 +449,33 @@ struct BillSplitService {
     }
 
     /// Resolves every participant to a distinct personal receivable.
-    /// `existing` accounts are validated; `newPerson` names are trimmed,
-    /// folded and either bound to a like-named active personal
-    /// receivable or built as a new account — nothing is inserted yet,
-    /// so a late failure still leaves the context untouched.
+    /// `existing` accounts are validated; `newPerson` names are trimmed
+    /// and folded — a name matching a *pre-existing* active personal
+    /// receivable is rejected (`participantNameMatchesExisting`) rather
+    /// than silently bound, while one matching an account created in
+    /// this same pass resolves to it so the duplicate check can reject
+    /// it. Nothing is inserted yet, so a late failure still leaves the
+    /// context untouched.
     private func resolveParticipants(
         _ participants: [BillSplitParticipant],
         in context: ModelContext
     ) throws -> (receivables: [Account], created: [Account]) {
-        let accounts = (try? context.fetch(FetchDescriptor<Account>())) ?? []
-        // Folded-name index of active personal receivables — a new
-        // person named like an existing client binds to that account
-        // instead of duplicating it.
-        var byFoldedName: [String: Account] = [:]
+        let accounts = try context.fetch(FetchDescriptor<Account>())
+        // Folded-name index of pre-existing active personal receivables.
+        var existingByFoldedName: [String: Account] = [:]
         for account in accounts where account.kind == .receivable
             && account.business == nil && !account.isArchived {
             let key = SettingsNameNormalizer.fold(account.name)
-            if byFoldedName[key] == nil { byFoldedName[key] = account }
+            if existingByFoldedName[key] == nil {
+                existingByFoldedName[key] = account
+            }
         }
 
         var receivables: [Account] = []
         var created: [Account] = []
+        // Names typed twice in this same split fold onto the account the
+        // first entry created — the `seen` check then rejects it.
+        var createdByFoldedName: [String: Account] = [:]
         var nextSort = (accounts.map(\.sortOrder).max() ?? -1) + 1
         var seen = Set<UUID>()
         for participant in participants {
@@ -485,14 +493,17 @@ struct BillSplitService {
                 guard !name.isEmpty
                 else { throw BillSplitError.emptyParticipantName }
                 let key = SettingsNameNormalizer.fold(name)
-                if let existing = byFoldedName[key] {
-                    receivable = existing
+                if existingByFoldedName[key] != nil {
+                    throw BillSplitError.participantNameMatchesExisting
+                }
+                if let already = createdByFoldedName[key] {
+                    receivable = already
                 } else {
                     receivable = Account(
                         name: name, kind: .receivable, sortOrder: nextSort)
                     nextSort += 1
                     created.append(receivable)
-                    byFoldedName[key] = receivable
+                    createdByFoldedName[key] = receivable
                 }
             }
             guard seen.insert(receivable.id).inserted
@@ -531,5 +542,35 @@ struct BillSplitService {
             context.rollback()
             throw BillSplitError.saveFailed(error)
         }
+    }
+}
+
+/// Row-level eligibility checks for the UI — the exact conditions the
+/// service's private guards apply, minus the modelContext check a view
+/// cannot make (the service still re-validates on save).
+extension BillSplitService {
+    /// Mirrors `requireSplittableExpense`: a personal, unlinked expense
+    /// on an account that can fund advances. Drives the editor's
+    /// "Chia bill" entry.
+    static func canSplitExpense(_ transaction: LedgerTransaction) -> Bool {
+        transaction.kind == .expense
+            && transaction.business == nil
+            && transaction.rentalLease == nil
+            && transaction.rentalPeriod == nil
+            && transaction.toAccount == nil
+            && transaction.account.map(ReceivableActions.canAdvance) == true
+    }
+
+    /// Mirrors `requireAssignableIncome`: a positive, personal, unlinked
+    /// income on an account that can receive repayments. Drives the
+    /// editor's "Ghi nhận hoàn tiền" entry.
+    static func canAssignRepayment(_ transaction: LedgerTransaction) -> Bool {
+        transaction.kind == .income
+            && transaction.amount > 0
+            && transaction.business == nil
+            && transaction.rentalLease == nil
+            && transaction.rentalPeriod == nil
+            && transaction.toAccount == nil
+            && transaction.account.map(ReceivableActions.canReceive) == true
     }
 }

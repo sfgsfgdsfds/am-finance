@@ -96,12 +96,10 @@ struct BillSplitTests {
             == [300_000, 300_000, 300_000, 300_000])
     }
 
-    /// A new name that folds onto an existing personal receivable binds
-    /// to that account — no duplicate client is created. A name that
-    /// only collides with a *business* client does not bind: the split
-    /// needs a personal receivable, so a new account is the right
-    /// identity.
-    @Test func newPersonNameBindsToExistingReceivable() throws {
+    /// A typed name that folds onto an existing personal receivable is a
+    /// validation error — the user must pick that client explicitly —
+    /// never a silent re-use. Nothing is written.
+    @Test func newPersonNameMatchingExistingReceivableFails() throws {
         let context = try makeContext()
         let cash = Account(name: "Tiền mặt", kind: .cash, openingBalance: 2_000_000)
         let an = Account(name: "An", kind: .receivable)
@@ -114,22 +112,47 @@ struct BillSplitTests {
         context.insert(businessClient)
         try context.save()
 
+        // "an" folds onto the existing personal client — refused, and
+        // the second participant is never resolved either.
+        #expect(throws: BillSplitError.participantNameMatchesExisting) {
+            _ = try BillSplitService().splitNewBill(
+                total: 600_000, payer: cash, date: day(2026, 11, 21),
+                category: nil, note: "Cà phê",
+                participants: [.newPerson("  an  "), .newPerson("bình")],
+                in: context)
+        }
+        #expect(try fetchAll(LedgerTransaction.self, in: context).isEmpty)
+        #expect(try fetchAll(Account.self, in: context).count == 3)
+        #expect(an.balance == 0)
+        #expect(!context.hasChanges)
+    }
+
+    /// A name that only collides with a *business* client does not trip
+    /// the personal-receivable check: the split needs a personal
+    /// receivable, so a new account is the right identity.
+    @Test func newPersonNameCollidingWithBusinessClientCreatesPersonal() throws {
+        let context = try makeContext()
+        let cash = Account(name: "Tiền mặt", kind: .cash, openingBalance: 2_000_000)
+        let business = Business(name: "Làm web")
+        let businessClient = Account(name: "Bình", kind: .receivable)
+        businessClient.business = business
+        context.insert(cash)
+        context.insert(business)
+        context.insert(businessClient)
+        try context.save()
+
         let result = try BillSplitService().splitNewBill(
             total: 600_000, payer: cash, date: day(2026, 11, 21),
             category: nil, note: "Cà phê",
-            participants: [.newPerson("  an  "), .newPerson("bình")],
+            participants: [.newPerson("bình"), .newPerson("Chi")],
             in: context)
 
-        // "an" folded onto the existing personal client.
-        #expect(result.receivables[0].id == an.id)
-        #expect(result.advances[0].toAccount?.id == an.id)
         // "bình" only collided with a business client — a new personal
         // receivable was created instead of touching it.
-        #expect(result.createdAccounts.count == 1)
-        #expect(result.createdAccounts[0].name == "bình")
-        #expect(result.createdAccounts[0].business == nil)
-        #expect(result.receivables[1].id == result.createdAccounts[0].id)
-        #expect(an.balance == 200_000)
+        #expect(result.createdAccounts.map(\.name) == ["bình", "Chi"])
+        #expect(result.createdAccounts.allSatisfy { $0.business == nil })
+        #expect(result.receivables.map(\.id)
+            == result.createdAccounts.map(\.id))
         #expect(result.createdAccounts[0].balance == 200_000)
         #expect(businessClient.balance == 0)
     }
@@ -153,8 +176,17 @@ struct BillSplitTests {
                 participants: [.newPerson("Thu"), .newPerson("  thu ")],
                 in: context)
         }
-        // An existing client and a same-named new person collide too.
+        // The same client picked twice collides too.
         #expect(throws: BillSplitError.duplicateParticipant) {
+            _ = try service.splitNewBill(
+                total: 600_000, payer: cash, date: .now,
+                category: nil, note: "",
+                participants: [.existing(an), .existing(an)],
+                in: context)
+        }
+        // An existing client and a same-named new person: the typed name
+        // is rejected up front — explicit selection is required.
+        #expect(throws: BillSplitError.participantNameMatchesExisting) {
             _ = try service.splitNewBill(
                 total: 600_000, payer: cash, date: .now,
                 category: nil, note: "",
@@ -453,9 +485,10 @@ struct BillSplitTests {
         #expect(!context.hasChanges)
     }
 
-    /// With no category supplied the row keeps its own — and the review
-    /// flag still clears, because the split itself is the review.
-    @Test func splitExistingWithoutCategoryClearsReviewAnyway() throws {
+    /// With no category supplied the row keeps its own — and keeps the
+    /// review flag too: a split is not a classification, so a still-
+    /// uncategorized row stays "Chờ phân loại".
+    @Test func splitExistingWithoutCategoryKeepsReviewFlag() throws {
         let context = try makeContext()
         let cash = Account(name: "Tiền mặt", kind: .cash)
         context.insert(cash)
@@ -466,7 +499,7 @@ struct BillSplitTests {
         _ = try BillSplitService().splitExistingExpense(
             row, expected: snapshot, category: nil,
             participants: [.newPerson("An")], in: context)
-        #expect(!row.needsReview)
+        #expect(row.needsReview)
         #expect(row.category == nil)
         #expect(row.amount == 300_000)
     }
@@ -583,6 +616,28 @@ struct BillSplitTests {
         }
         #expect(income.kind == .income)
         #expect(ReceivableSnapshot.make(account: an).outstanding == 900_000)
+        #expect(!context.hasChanges)
+    }
+
+    /// A zero-amount income is not a repayment — the conversion would
+    /// write a meaningless zero movement.
+    @Test func assignRepaymentRejectsNonPositiveIncome() throws {
+        let context = try makeContext()
+        let bank = Account(name: "Ngân hàng", kind: .bank)
+        let an = Account(name: "An", kind: .receivable, openingBalance: 100_000)
+        context.insert(bank)
+        context.insert(an)
+        let income = LedgerTransaction(
+            kind: .income, amount: 0, account: bank)
+        context.insert(income)
+        try context.save()
+        let snapshot = BillSplitOriginal(of: income)
+
+        #expect(throws: BillSplitError.transactionNotEligible) {
+            try BillSplitService().assignRepayment(
+                income, expected: snapshot, to: an, in: context)
+        }
+        #expect(income.kind == .income)
         #expect(!context.hasChanges)
     }
 
@@ -739,7 +794,8 @@ struct BillSplitTests {
         let cases: [BillSplitError] = [
             .nonPositiveTotal, .tooFewParticipants, .tooManyParticipants,
             .shareWouldBeZero, .invalidPayer, .emptyParticipantName,
-            .duplicateParticipant, .invalidParticipant, .invalidCategory,
+            .duplicateParticipant, .invalidParticipant,
+            .participantNameMatchesExisting, .invalidCategory,
             .transactionNotEligible, .staleTransaction, .contextHasChanges,
             .invalidReceivable, .repaymentExceedsOutstanding,
             .saveFailed(URLError(.cannotConnectToHost)),
@@ -749,5 +805,53 @@ struct BillSplitTests {
         }
         #expect(BillSplitError.staleTransaction.errorDescription
             == "Giao dịch đã thay đổi — hãy mở lại màn hình xác nhận.")
+    }
+
+    // MARK: - UI eligibility mirrors
+
+    /// `canSplitExpense` / `canAssignRepayment` expose the service's
+    /// row-level rules to the editor — every ineligible shape is hidden,
+    /// every eligible shape passes.
+    @Test func uiEligibilityMirrorsServiceGuards() throws {
+        let context = try makeContext()
+        let cash = Account(name: "Tiền mặt", kind: .cash)
+        let card = Account(name: "Thẻ", kind: .creditCard)
+        let client = Account(name: "Khách", kind: .receivable)
+        let business = Business(name: "Làm web")
+        for model in [cash, card, client] { context.insert(model) }
+        context.insert(business)
+        try context.save()
+
+        let expense = LedgerTransaction(
+            kind: .expense, amount: 100_000, account: cash)
+        let cardExpense = LedgerTransaction(
+            kind: .expense, amount: 100_000, account: card)
+        let receivableExpense = LedgerTransaction(
+            kind: .expense, amount: 100_000, account: client)
+        let businessExpense = LedgerTransaction(
+            kind: .expense, amount: 100_000, account: cash)
+        businessExpense.business = business
+        let income = LedgerTransaction(
+            kind: .income, amount: 100_000, account: cash)
+        let zeroIncome = LedgerTransaction(
+            kind: .income, amount: 0, account: cash)
+        let cardIncome = LedgerTransaction(
+            kind: .income, amount: 100_000, account: card)
+        let transfer = LedgerTransaction(
+            kind: .transfer, amount: 100_000,
+            account: cash, toAccount: client)
+
+        #expect(BillSplitService.canSplitExpense(expense))
+        #expect(BillSplitService.canSplitExpense(cardExpense))
+        #expect(!BillSplitService.canSplitExpense(receivableExpense))
+        #expect(!BillSplitService.canSplitExpense(businessExpense))
+        #expect(!BillSplitService.canSplitExpense(income))
+        #expect(!BillSplitService.canSplitExpense(transfer))
+
+        #expect(BillSplitService.canAssignRepayment(income))
+        #expect(!BillSplitService.canAssignRepayment(zeroIncome))
+        #expect(!BillSplitService.canAssignRepayment(cardIncome))
+        #expect(!BillSplitService.canAssignRepayment(expense))
+        #expect(!BillSplitService.canAssignRepayment(transfer))
     }
 }
