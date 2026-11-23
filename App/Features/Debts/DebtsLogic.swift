@@ -184,7 +184,8 @@ enum DebtsUpcoming {
 
 /// Maps live `Account` models to `DebtsUpcoming` inputs, reusing
 /// `CreditCardOverview` and `LoanPlan` so every number matches the detail
-/// screens. Shared by the debts tab and the dashboard card.
+/// screens. Shared by the debts tab, the reminder scheduler and the AI
+/// context loader.
 enum DebtsUpcomingMapper {
     /// `balanceOf`/`cardEntriesOf` default to the straightforward
     /// relationship walks; screens with a `LedgerBalanceStore` feed the

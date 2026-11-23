@@ -21,6 +21,15 @@ struct AccountKindTests {
         #expect(AccountKind.loan.isLiability)
     }
 
+    @Test func liquidKinds() {
+        #expect(AccountKind.cash.isLiquid)
+        #expect(AccountKind.bank.isLiquid)
+        #expect(AccountKind.eWallet.isLiquid)
+        #expect(AccountKind.receivable.isLiquid == false)
+        #expect(AccountKind.creditCard.isLiquid == false)
+        #expect(AccountKind.loan.isLiquid == false)
+    }
+
     @Test func displayNames() {
         #expect(AccountKind.cash.displayName == "Tiền mặt")
         #expect(AccountKind.bank.displayName == "Ngân hàng")

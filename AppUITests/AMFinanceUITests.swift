@@ -43,12 +43,12 @@ final class AMFinanceUITests: XCTestCase {
     // MARK: - 1. Tabs, reports and settings
 
     func testTabsReportsAndSettings() throws {
-        // Dashboard: the net-worth card renders.
+        // Dashboard: the money-on-hand card renders.
         let tabBar = app.tabBars.firstMatch
         XCTAssertTrue(tabBar.waitForExistence(timeout: 20), "tab bar missing")
         XCTAssertTrue(
-            app.staticTexts["Tài sản ròng"].waitForExistence(timeout: 8),
-            "dashboard net-worth card missing")
+            app.staticTexts["Tiền đang có"].waitForExistence(timeout: 8),
+            "dashboard money card missing")
 
         openTab("Giao dịch")
         XCTAssertTrue(
@@ -255,7 +255,7 @@ final class AMFinanceUITests: XCTestCase {
         tapWhenReady(app.alerts.buttons["OK"], "success OK missing")
 
         XCTAssertTrue(
-            app.staticTexts["Tài sản ròng"].waitForExistence(timeout: 10),
+            app.staticTexts["Tiền đang có"].waitForExistence(timeout: 10),
             "dashboard did not come back after reset")
         openTab("Giao dịch")
         XCTAssertTrue(
@@ -265,10 +265,10 @@ final class AMFinanceUITests: XCTestCase {
         // The seeded cash account's detail must still open — no screen
         // may hold a reference to a deleted object.
         openTab("Tổng quan")
-        let netWorthAfter = scopedElement("dashboard.netWorthCard")
-        XCTAssertTrue(netWorthAfter.waitForExistence(timeout: 8),
-                      "net-worth card missing after reset")
-        netWorthAfter.tap()
+        let moneyCardAfter = scopedElement("dashboard.moneyCard")
+        XCTAssertTrue(moneyCardAfter.waitForExistence(timeout: 8),
+                      "money card missing after reset")
+        moneyCardAfter.tap()
         XCTAssertTrue(
             app.navigationBars.staticTexts["Tài khoản"]
                 .waitForExistence(timeout: 5),
@@ -285,11 +285,11 @@ final class AMFinanceUITests: XCTestCase {
     // MARK: - 3. Accounts, cards, loans, debts
 
     func testAccountsAndDebts() throws {
-        // Net worth card → accounts list.
-        let netWorth = scopedElement("dashboard.netWorthCard")
-        XCTAssertTrue(netWorth.waitForExistence(timeout: 15),
-                      "net-worth card missing")
-        netWorth.tap()
+        // Money-on-hand card → full accounts list.
+        let moneyCard = scopedElement("dashboard.moneyCard")
+        XCTAssertTrue(moneyCard.waitForExistence(timeout: 15),
+                      "money card missing")
+        moneyCard.tap()
         XCTAssertTrue(
             app.navigationBars.staticTexts["Tài khoản"].waitForExistence(timeout: 5),
             "accounts screen missing")
@@ -394,10 +394,10 @@ final class AMFinanceUITests: XCTestCase {
         saveSheet()
 
         // A credit card — the receivable advance is paid from it.
-        let netWorth = scopedElement("dashboard.netWorthCard")
-        XCTAssertTrue(netWorth.waitForExistence(timeout: 15),
-                      "net-worth card missing")
-        netWorth.tap()
+        let moneyCard = scopedElement("dashboard.moneyCard")
+        XCTAssertTrue(moneyCard.waitForExistence(timeout: 15),
+                      "money card missing")
+        moneyCard.tap()
         XCTAssertTrue(
             app.navigationBars.staticTexts["Tài khoản"]
                 .waitForExistence(timeout: 5),

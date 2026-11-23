@@ -2,10 +2,11 @@ import SwiftUI
 import SwiftData
 import FinanceCore
 
-/// "Tổng quan" tab root: one glance at net worth, this month's cash flow,
-/// where the money went and how each business did. All aggregation lives in
-/// `DashboardSnapshot`, fed by a six-month transaction window so the whole
-/// table is never loaded; this view only renders the snapshot.
+/// "Tổng quan" tab root: one glance at the money in hand, this month's
+/// cash flow, where the money went and how each business did. All
+/// aggregation lives in `DashboardSnapshot`, fed by a six-month
+/// transaction window so the whole table is never loaded; this view only
+/// renders the snapshot.
 struct DashboardView: View {
     @Environment(\.modelContext) private var context
 
@@ -58,7 +59,7 @@ struct DashboardView: View {
                             isCreating = true
                         })
                     }
-                    DashboardNetWorthCard(netWorth: snapshot.netWorth)
+                    DashboardMoneyCard(amount: snapshot.moneyOnHand)
                     if !snapshot.isEmpty {
                         DashboardMonthCard(month: snapshot.month)
                         SpendingShareCard(
@@ -69,11 +70,6 @@ struct DashboardView: View {
                         BudgetsSummaryCard()
                         if !snapshot.accountChips.isEmpty {
                             DashboardAccountsCard(chips: snapshot.accountChips) { id in
-                                accounts.first { $0.id == id }
-                            }
-                        }
-                        if !upcomingItems.isEmpty {
-                            DashboardUpcomingCard(items: upcomingItems) { id in
                                 accounts.first { $0.id == id }
                             }
                         }
@@ -151,18 +147,6 @@ struct DashboardView: View {
         accounts.contains { $0.externalSource == WalletSyncEngine.externalSource }
     }
 
-    /// Debt payments due within the next 14 days (overdue ones included) —
-    /// drives the "Sắp đến hạn" card, hidden when empty.
-    private var upcomingItems: [DebtsUpcomingItem] {
-        let ledger = LedgerBalanceStores.shared(for: context.container)
-        return DebtsUpcomingMapper.items(
-            for: accounts, now: .now, calendar: AppCalendar.vietnam,
-            withinDays: 14,
-            balanceOf: { ledger.balance(of: $0) },
-            cardEntriesOf: { ledger.creditCardEntries(of: $0) }
-        )
-    }
-
     // MARK: - Snapshot
 
     private var snapshot: DashboardSnapshot {
@@ -197,7 +181,7 @@ struct DashboardView: View {
                 DashboardSnapshot.AccountInput(
                     id: account.id,
                     name: account.name,
-                    isLiability: account.kind.isLiability,
+                    isLiquid: account.kind.isLiquid,
                     icon: account.icon,
                     colorHex: account.colorHex,
                     balance: ledger.balance(of: account),
