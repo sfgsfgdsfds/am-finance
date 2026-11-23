@@ -691,6 +691,9 @@ struct AIAgentTests {
             .duplicateTransaction, .staleTransaction,
             .transactionNotEligible, .invalidCategory, .noOpEdit,
             .saveFailed(URLError(.cannotConnectToHost)),
+            .unparseableModelReply, .unsupportedTool, .malformedQuery,
+            .unknownHandle, .invalidProposal, .tooManyProposals,
+            .staleCategory,
         ]
         for error in cases {
             #expect(error.errorDescription?.isEmpty == false)
