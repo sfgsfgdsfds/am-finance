@@ -43,8 +43,12 @@ struct AIAgentView: View {
 
     /// The active provider, resolved from `AIProviderStore` on appear
     /// and re-resolved whenever the settings screen returns.
+    /// `providerProfile` is the exact non-secret snapshot `client` was
+    /// built from — compared whole (URL, model, style, headers, limits…),
+    /// never by id alone, so a same-id edit counts as "provider changed".
+    /// The API key is never part of it: keys live only in the Keychain.
     @State private var client: (any AIChatClientProtocol)?
-    @State private var providerID: UUID?
+    @State private var providerProfile: AIProviderProfile?
     @State private var providerName = ""
     @State private var providerChecked = false
     @State private var providerNotice: String?
@@ -448,13 +452,22 @@ struct AIAgentView: View {
     private func runSearch() {
         guard canSearch, let permission = currentPermission,
               let client else { return }
+        guard providerIsCurrent else { providerStale(); return }
         resetFlow()
         running = .search
         let generation = flowGeneration
         let question = trimmedQuestion
         let context = self.context
         inFlight = Task { @MainActor in
-            defer { running = nil }
+            defer {
+                // A superseded task must not clear a newer request's
+                // busy state or task handle — only the live generation
+                // cleans up.
+                if generation == flowGeneration {
+                    running = nil
+                    inFlight = nil
+                }
+            }
             do {
                 let orchestrator = AIAgentOrchestrator(client: client)
                 let result = try await orchestrator.search(
@@ -481,22 +494,26 @@ struct AIAgentView: View {
     private func runAnalyze() {
         guard running == nil, let prepared,
               let permission = currentPermission, let client else { return }
-        guard providerStore.activeProfileID == providerID else {
-            resetFlow()
-            providerNotice =
-                "Nhà cung cấp AI đã đổi — hãy tìm lại để gửi đúng cấu hình."
-            return
-        }
+        guard providerIsCurrent else { providerStale(); return }
         running = .analyze
         let generation = flowGeneration
         inFlight = Task { @MainActor in
-            defer { running = nil }
+            defer {
+                if generation == flowGeneration {
+                    running = nil
+                    inFlight = nil
+                }
+            }
             do {
                 let result = try await AIAgentOrchestrator(client: client)
                     .analyze(prepared, permission: permission)
                 try Task.checkCancellation()
                 guard generation == flowGeneration else { return }
                 analysis = result
+                // A fresh analysis supersedes every earlier error in
+                // this generation — a stale apply/analyze failure must
+                // not linger over the new result.
+                flowError = nil
             } catch is CancellationError {
             } catch {
                 guard generation == flowGeneration else { return }
@@ -509,15 +526,13 @@ struct AIAgentView: View {
     /// Stage 3: the one explicit write — validated proposals → one
     /// atomic apply inside the effective lookup window, re-checked
     /// against the current grant by the tools themselves.
+    /// Runs ONLY from the confirmation dialog's "Áp dụng" action — never
+    /// from a retry shortcut or any other caller.
     private func applyNow() {
-        guard running == nil, let analysis,
+        guard running == nil, let analysis, !analysis.proposals.isEmpty,
+              appliedCount == nil,
               let permission = currentPermission else { return }
-        guard providerStore.activeProfileID == providerID else {
-            resetFlow()
-            providerNotice =
-                "Nhà cung cấp AI đã đổi — hãy tìm lại để gửi đúng cấu hình."
-            return
-        }
+        guard providerIsCurrent else { providerStale(); return }
         running = .apply
         defer { running = nil }
         do {
@@ -526,6 +541,7 @@ struct AIAgentView: View {
                 edits, permission: permission, in: context,
                 lookupWindow: analysis.effectiveWindow)
             appliedCount = result.appliedCount
+            flowError = nil
         } catch {
             flowError = FlowError(
                 stage: .apply, message: error.localizedDescription)
@@ -536,7 +552,14 @@ struct AIAgentView: View {
         switch stage {
         case .search: runSearch()
         case .analyze: runAnalyze()
-        case .apply: applyNow()
+        case .apply:
+            // Re-applying goes through the same explicit confirmation of
+            // the current non-empty proposal — never straight into the
+            // write, and never once a count was already applied.
+            if let analysis, !analysis.proposals.isEmpty,
+               appliedCount == nil {
+                confirmApply = true
+            }
         }
     }
 
@@ -577,7 +600,7 @@ struct AIAgentView: View {
         appliedCount = nil
         flowError = nil
         guard let searchResult, let permission = currentPermission,
-              let client else {
+              let client, providerIsCurrent else {
             prepared = nil
             return
         }
@@ -600,28 +623,52 @@ struct AIAgentView: View {
               let made = try? providerStore.makeClient(profile: profile)
         else {
             client = nil
-            providerID = nil
+            providerProfile = nil
             providerName = ""
             providerChecked = true
             return
         }
         client = made
-        providerID = profile.id
+        providerProfile = profile
         let name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
         providerName = name.isEmpty ? profile.trimmedModel : name
         providerChecked = true
     }
 
-    /// Back from settings: a different active provider discards every
-    /// artifact the old one produced — the same provider keeps the flow.
-    private func providerReturned() {
-        let previousID = providerID
+    /// True only while the store's ACTIVE profile still equals, field by
+    /// field, the non-secret snapshot `client` was built from. Editing
+    /// the saved profile in place — same id, new URL/model/style —
+    /// makes this false, so no reviewed payload can silently leave for
+    /// a destination different from the one the flow started on.
+    private var providerIsCurrent: Bool {
+        guard let providerProfile else { return false }
+        return providerStore.activeProfile() == providerProfile
+    }
+
+    /// A stage caught the active profile no longer matching the client's
+    /// snapshot (edited, switched or removed): rebind to whatever is
+    /// active now, drop every artifact the old destination produced and
+    /// leave a retry hint. Nothing profile-shaped is ever shown or
+    /// logged — the notice is a fixed string.
+    private func providerStale() {
         refreshProvider()
-        guard providerID != previousID else { return }
         resetFlow()
-        if previousID != nil {
+        providerNotice =
+            "Cấu hình nhà cung cấp AI đã đổi — hãy tìm lại để gửi đúng nơi nhận."
+    }
+
+    /// Back from settings: any change to the active provider — a switch
+    /// OR an in-place edit of the same profile — discards every artifact
+    /// the previous configuration produced. Byte-identical profile keeps
+    /// the flow.
+    private func providerReturned() {
+        let previous = providerProfile
+        refreshProvider()
+        guard providerProfile != previous else { return }
+        resetFlow()
+        if previous != nil {
             providerNotice =
-                "Nhà cung cấp AI đã đổi — kết quả trước đã được xoá."
+                "Cấu hình nhà cung cấp AI đã đổi — kết quả trước đã được xoá."
         }
     }
 
