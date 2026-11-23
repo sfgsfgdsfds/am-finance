@@ -1113,4 +1113,131 @@ struct AIAssistantTests {
         // JPEG magic bytes.
         #expect(prepared[0].jpeg.prefix(2) == Data([0xFF, 0xD8]))
     }
+
+    // MARK: - AM Router preset
+
+    @Test func amRouterPresetFillsDraftButLeavesModelAndKeyOpen() {
+        var draft = AIProfileDraft()
+        draft.applyPreset(.amRouter)
+        #expect(draft.name == "AM Router")
+        #expect(draft.style == .openAICompatible)
+        #expect(draft.baseURL == "https://provider.amx.vn/v1")
+        #expect(draft.normalizedBaseURLString == "https://provider.amx.vn/v1")
+        #expect(draft.baseURLError == nil)
+        #expect(draft.supportsJSONMode)
+        // Model, vision model and key stay empty until the user picks/types.
+        #expect(draft.model.isEmpty)
+        #expect(draft.visionModel.isEmpty)
+        #expect(draft.apiKey.isEmpty)
+        // Not yet valid — a model is still required to save.
+        #expect(!draft.isValid)
+        #expect(draft.matchingPreset == .amRouter)
+    }
+
+    @Test func amRouterPresetClearsFieldsCarriedOverFromAnotherProvider() {
+        var draft = AIProfileDraft()
+        draft.name = "OpenAI của tôi"
+        draft.apiKey = "sk-third-party"
+        draft.model = "gpt-4o"
+        draft.visionModel = "gpt-4o"
+        draft.extraHeaders = "X-Tenant: blue"
+        draft.supportsJSONMode = false
+        draft.applyPreset(.amRouter)
+        // A key typed for another provider is wiped — it must never be
+        // sent to the AM Router origin by tapping the preset.
+        #expect(draft.apiKey.isEmpty)
+        #expect(draft.model.isEmpty)
+        #expect(draft.visionModel.isEmpty)
+        #expect(draft.extraHeaders.isEmpty)
+        #expect(draft.name == "AM Router")
+        #expect(draft.supportsJSONMode)
+    }
+
+    @Test func styleChangeNeverOverwritesAMRouterPreset() {
+        var draft = AIProfileDraft()
+        draft.applyPreset(.amRouter)
+        // The style picker's onChange hook calls applyStyleDefaults — it
+        // may tune flags but must never retarget the gateway or rename.
+        draft.style = .anthropic
+        draft.applyStyleDefaults()
+        #expect(draft.baseURL == "https://provider.amx.vn/v1")
+        #expect(draft.name == "AM Router")
+        #expect(draft.matchingPreset == nil)   // wrong style → no match
+        draft.style = .openAICompatible
+        draft.applyStyleDefaults()
+        #expect(draft.baseURL == "https://provider.amx.vn/v1")
+        #expect(draft.matchingPreset == .amRouter)
+    }
+
+    @Test func matchingPresetDetectsHandTypedGatewayURL() {
+        var draft = AIProfileDraft()
+        #expect(draft.matchingPreset == nil)
+        // Scheme-less and trailing-slash spellings normalize to the same
+        // gateway and count as the preset.
+        draft.baseURL = "provider.amx.vn/v1/"
+        #expect(draft.matchingPreset == .amRouter)
+        draft.baseURL = "https://provider.amx.vn/v1"
+        draft.style = .anthropic
+        #expect(draft.matchingPreset == nil)
+        draft.style = .openAICompatible
+        draft.baseURL = "https://api.openai.com/v1"
+        #expect(draft.matchingPreset == nil)
+    }
+
+    @Test func amRouterDraftLeavesNoSavedKeyReachable() throws {
+        let keys = AIInMemoryAPIKeyStore()
+        let (store, _, defaults, suite) = try makeStore(keys: keys)
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        // Another profile already saved with its own third-party key.
+        let other = openAIProfile()
+        store.save(other)
+        try store.setAPIKey("sk-third-party", for: other.id)
+
+        var draft = AIProfileDraft()
+        draft.apiKey = "sk-third-party"   // typed before noticing the preset
+        draft.applyPreset(.amRouter)
+        #expect(draft.apiKey.isEmpty)
+        #expect(!draft.hasSavedKey)
+        // The new profile's id owns no key until the user types one; the
+        // third-party key stays bound to its own profile.
+        let saved = draft.makeProfile()
+        #expect(try store.apiKey(for: saved.id) == nil)
+        #expect(try store.apiKey(for: other.id) == "sk-third-party")
+    }
+
+    @Test func amRouterProfileUsesGatewayRoutesWithBearerKey() async throws {
+        var draft = AIProfileDraft()
+        draft.applyPreset(.amRouter)
+        draft.model = "am-text-1"
+        draft.apiKey = "amr-secret"
+        let profile = draft.makeProfile()
+        #expect(profile.isUsable)
+
+        let server = StubServer { request in
+            if request.url?.path.hasSuffix("/models") == true {
+                return .data(url: request.url!, json:
+                    #"{"data":[{"id":"am-vision-1"},{"id":"am-text-1"}],"object":"list"}"#)
+            }
+            return .data(url: request.url!, json: self.openAIReplyJSON("ok"))
+        }
+        let aiClient = client(profile: profile, server: server, key: "amr-secret")
+
+        _ = try await aiClient.complete(.text("hi"))
+        let completion = try #require(server.capturedRequests.first)
+        #expect(completion.url?.absoluteString
+            == "https://provider.amx.vn/v1/chat/completions")
+        #expect(completion.value(forHTTPHeaderField: "Authorization")
+            == "Bearer amr-secret")
+
+        // The existing fetched-model picker is fed by GET /models on the
+        // same gateway with the same bearer key.
+        let ids = try await aiClient.listModels()
+        #expect(ids == ["am-vision-1", "am-text-1"])
+        let modelsRequest = try #require(server.capturedRequests.last)
+        #expect(modelsRequest.url?.absoluteString
+            == "https://provider.amx.vn/v1/models")
+        #expect(modelsRequest.value(forHTTPHeaderField: "Authorization")
+            == "Bearer amr-secret")
+    }
 }
