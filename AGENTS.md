@@ -17,9 +17,11 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   transient simulator failures retry once.
 - `./scripts/test-ui.sh` — the slow UI gate: runs only the `AMFinanceUITests`
   XCUITest smoke suite under the same lock and retry logic, on the dedicated
-  `AMFinanceUITests` scheme. Integration jobs run it, and it must pass before
-  device installs. If you change navigation, tab structure or a flow the smoke
-  tests cover, run it yourself and update `AppUITests`.
+  `AMFinanceUITests` scheme. Set `AMFINANCE_UI_TEST_FILTERS` to space-separated
+  `-only-testing:`/`-skip-testing:` selectors to run just a shard. Integration
+  jobs run it, and it must pass before device installs. If you change
+  navigation, tab structure or a flow the smoke tests cover, run it yourself
+  and update `AppUITests`.
 - `scripts/lib-test.sh` — shared lock/simulator/retry helper sourced by both
   test scripts; not meant to be run directly.
 - The generated `.xcodeproj` is a build artifact: git-ignored, never commit it.

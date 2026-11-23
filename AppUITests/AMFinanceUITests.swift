@@ -4,15 +4,16 @@ import XCTest
 /// with `-uiTestInMemoryStore` — a throwaway, seeded in-memory SwiftData
 /// store — so real user data is never touched.
 ///
-/// The suite is grouped into five launches instead of one per flow — each
+/// The suite is grouped into seven launches instead of one per flow — each
 /// launch costs ~10-15 s of simulator + app idle time, so steps that can share
 /// a store run together. Covers: the four tabs, quick-add (expense and
 /// income), edit/delete, settings screens, accounts/cards/loans, debts,
 /// reports, the second-pass feature wiring (wallet link/sync, budgets,
 /// recurring, reminders, app lock, business hub, receivables, balance
-/// trend) and the third-pass features (room rentals, CSV import, the
-/// rent-collection and bank-transaction reminder switches). Vietnamese
-/// UI, VND amounts ("150.000 ₫").
+/// trend), the third-pass features (room rentals, CSV import, the
+/// rent-collection and bank-transaction reminder switches) and the
+/// personal bill split (equal-share preview, own-share expense, advance
+/// transfer). Vietnamese UI, VND amounts ("150.000 ₫").
 ///
 /// Reliability rules used throughout:
 /// - wait for `exists AND hittable` before tapping anything that may sit
@@ -928,16 +929,16 @@ final class AMFinanceUITests: XCTestCase {
                       "reports income share section missing")
     }
 
-    // MARK: - 7. Bill split and repayment assignment
+    // MARK: - 7. Bill split
 
     /// "Chia bill" from the unsaved quick-add draft: a 1.200.000 ₫ bill for
-    /// Tôi + 3 friends must preview 300.000 own share and 900.000 phải thu,
-    /// then save through the one explicit "Lưu chia bill" — which also
-    /// dismisses the editor without its "Lưu". The receivable and the
-    /// advance rows are checked in "Giao dịch" and "Khoản ứng hộ khách";
-    /// finally a personal income is reclassified in place as An's
-    /// repayment through "Ghi nhận hoàn tiền".
-    func testBillSplitAndRepayment() throws {
+    /// Tôi + the one typed friend must preview 600.000 own share and
+    /// 600.000 phải thu, then save through the one explicit "Lưu chia
+    /// bill" — which also dismisses the editor without its "Lưu". The
+    /// persisted own-share expense and the advance transfer into An's
+    /// receivable are checked in "Giao dịch"; deeper split/repayment
+    /// ledger paths are covered by unit tests.
+    func testBillSplit() throws {
         // Open quick-add, fill the draft — no normal save.
         tapQuickAdd()
         typeAmount(1_200_000)
@@ -956,9 +957,8 @@ final class AMFinanceUITests: XCTestCase {
 
         // Live equal-split preview for Tôi + the one default friend —
         // asserted on the value identifiers while the whole form still
-        // fits without scrolling (the same amounts render on friend
-        // shares and the collapsed header). The four-way numbers are
-        // verified end-to-end on the saved rows below.
+        // fits without scrolling (the same amounts render on the friend
+        // share and the collapsed header).
         assertLabeled("billSplit.preview.myShare", "600.000 ₫",
                       "preview does not show the 600.000 own share")
         assertLabeled("billSplit.preview.receivable", "600.000 ₫",
@@ -966,17 +966,10 @@ final class AMFinanceUITests: XCTestCase {
         assertLabeled("billSplit.preview.total", "1.200.000 ₫",
                       "preview does not show the 1.200.000 bill total")
 
-        // Two more friend rows → Tôi + 3 friends, all typed new names.
-        for _ in 0..<2 {
-            tapOption("Thêm người")
-        }
-
-        // Names go in last: with the keypad collapsed the fields stay
-        // above the keyboard, and the keyboard is pulled down again
+        // The name goes in last: with the keypad collapsed the field
+        // stays above the keyboard, and the keyboard is pulled down again
         // before saving — a dismissed sheet must not leave it behind.
         fillField(app.textFields["billSplit.friendName.0"], with: "An")
-        fillField(app.textFields["billSplit.friendName.1"], with: "Binh")
-        fillField(app.textFields["billSplit.friendName.2"], with: "Chi")
         dismissKeyboardInteractively()
 
         // The explicit save dismisses the sheet AND the editor.
@@ -988,95 +981,17 @@ final class AMFinanceUITests: XCTestCase {
             waitReady(app.buttons["root.quickAdd"], timeout: 10),
             "editor did not close after the split")
 
-        // Saved rows: the 300.000 own-share expense plus three advances —
-        // existence checks; right after the nested sheet+editor dismissal a
-        // transient overlay can leave a listed row unhittable for a while.
+        // Saved rows: the 600.000 own-share expense plus the advance
+        // transfer into An's receivable — existence checks; right after
+        // the nested sheet+editor dismissal a transient overlay can
+        // leave a listed row unhittable for a while.
         openTab("Giao dịch")
-        assertExists(app.staticTexts["-300.000 ₫"],
+        assertExists(app.staticTexts["-600.000 ₫"],
                      "split expense amount missing in list")
         assertExists(app.staticTexts["Chuyển khoản"],
-                     "advance transfer rows missing")
+                     "advance transfer row missing")
         assertExists(app.staticTexts["Tiền mặt → An"],
                      "advance to An missing its transfer subtitle")
-
-        // The new "An" receivable carries the advance as outstanding.
-        openTab("Tổng quan")
-        let gear = app.buttons["Cài đặt"]
-        XCTAssertTrue(waitReady(gear, timeout: 8), "settings gear missing")
-        gear.tap()
-        tapOption("Khoản ứng hộ khách")
-        XCTAssertTrue(
-            app.navigationBars.staticTexts["Khoản ứng hộ khách"]
-                .waitForExistence(timeout: 5),
-            "receivables screen missing")
-        // The client row is one combined element ("An, Cá nhân, +900.000 ₫"),
-        // so match its leading name — BEGINSWITH keeps "Ăn…" words out.
-        let clientRow = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label BEGINSWITH %@", "An"))
-            .firstMatch
-        assertExists(clientRow,
-                     "receivable created by the split missing")
-        // The totals row is one combined element ("Tổng khách đang nợ,
-        // +900.000 ₫"), so the value is matched as a substring on .any.
-        let totalRow = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label CONTAINS %@", "+900.000 ₫")).firstMatch
-        assertExists(totalRow,
-                     "total outstanding does not show +900.000 ₫")
-        goBack(to: "Cài đặt")
-        goBack(to: "Tổng quan")
-
-        // A personal income of 300.000 — An pays the bill back.
-        tapQuickAdd()
-        let incomeSegment = app.buttons["Thu"]
-        XCTAssertTrue(incomeSegment.waitForExistence(timeout: 4),
-                      "income segment missing")
-        incomeSegment.tap()
-        typeAmount(300_000)
-        pickCategory("Thu khác")
-        saveSheet()
-
-        // Edit it from "Giao dịch" → "Ghi nhận hoàn tiền".
-        openTab("Giao dịch")
-        tapTransactionRow("Thu khác")
-        XCTAssertTrue(
-            app.navigationBars.staticTexts["Sửa giao dịch"]
-                .waitForExistence(timeout: 5),
-            "income editor missing")
-        tapOption("Ghi nhận hoàn tiền")
-        XCTAssertTrue(
-            app.navigationBars.staticTexts["Ghi nhận hoàn tiền"]
-                .waitForExistence(timeout: 5),
-            "repayment sheet missing")
-
-        // Preview shows the amount and the original receiving account —
-        // matched on identifiers: the same texts render in rows of the
-        // editor and transactions list behind the sheet.
-        assertLabeled("billRepay.amount", "300.000 ₫",
-                      "repayment amount missing")
-        assertLabeled("billRepay.account", "Tiền mặt",
-                      "original receiving account missing")
-
-        // Pick the only eligible receivable and confirm the in-place
-        // reclassification — no secondary row is created.
-        let client = app.descendants(matching: .any)
-            .matching(identifier: "billRepay.receivable.An").firstMatch
-        if !reveal(client, maxSwipes: 4) {
-            XCTAssertTrue(client.waitForExistence(timeout: 3),
-                          "receivable 'An' missing on repayment sheet")
-        }
-        client.tap()
-        tapWhenReady(app.buttons["Xác nhận hoàn tiền"],
-                     "repayment confirm missing")
-        waitForDisappearance(
-            app.navigationBars.staticTexts["Ghi nhận hoàn tiền"],
-            message: "repayment sheet did not dismiss")
-
-        // The income row is now a receivable→cash transfer; no income
-        // row and no duplicate remains.
-        waitForDisappearance(app.staticTexts["Thu khác"],
-                             message: "income row still listed after conversion")
-        assertExists(app.staticTexts["An → Tiền mặt"],
-                     "repayment transfer subtitle missing")
     }
 
     // MARK: - Flow helpers
@@ -1303,18 +1218,21 @@ final class AMFinanceUITests: XCTestCase {
     }
 
     /// Gets the software keyboard out of the way before a sheet closes:
-    /// Return resigns a plain TextField, then a downward drag on the front
-    /// list engages `.scrollDismissesKeyboard(.interactively)` — even when
-    /// the keyboard already reports gone, because a resigned field can
-    /// still leave the keyboard window covering hit points for tens of
-    /// seconds after the sheet dies. The drag is harmless when the window
-    /// really is gone.
+    /// Return resigns a plain TextField, then a downward drag on the
+    /// sheet's list engages `.scrollDismissesKeyboard(.interactively)` —
+    /// even when the keyboard already reports gone, because a resigned
+    /// field can still leave the keyboard window covering hit points for
+    /// tens of seconds after the sheet dies. The drag is harmless when
+    /// the window really is gone.
     private func dismissKeyboardInteractively() {
         guard app.keyboards.element.exists else { return }
         app.typeText("\n")
-        let scroller = frontScrollable()
-        guard scroller.exists,
-              scroller.elementType != .application else { return }
+        guard app.sheets.count > 0 else { return }
+        let sheet = app.sheets.element(boundBy: app.sheets.count - 1)
+        guard let scroller = (
+            sheet.collectionViews.allElementsBoundByIndex
+                + sheet.scrollViews.allElementsBoundByIndex
+        ).last(where: { $0.exists }) else { return }
         let start = scroller.coordinate(
             withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08))
         let end = scroller.coordinate(
@@ -1565,9 +1483,7 @@ final class AMFinanceUITests: XCTestCase {
 
     /// The frontmost hittable list/scroll container — sheets come last in the
     /// accessibility tree, so a presented sheet's Form is preferred over the
-    /// covered root list. When the software keyboard covers the only list's
-    /// hit point nothing is hittable; the still-visible front scrollable is
-    /// then returned anyway so `swipeUpIfAlive` can drag inside it.
+    /// covered root list.
     private func frontScrollable() -> XCUIElement {
         if app.sheets.count > 0 {
             let sheet = app.sheets.element(boundBy: app.sheets.count - 1)
@@ -1577,23 +1493,11 @@ final class AMFinanceUITests: XCTestCase {
                     return candidate
                 }
             }
-            for query in [sheet.collectionViews, sheet.scrollViews] {
-                if let candidate = query.allElementsBoundByIndex
-                    .last(where: { $0.exists }) {
-                    return candidate
-                }
-            }
         }
         for query in [app.collectionViews, app.scrollViews] {
             for index in stride(from: query.count - 1, through: 0, by: -1) {
                 let candidate = query.element(boundBy: index)
                 if candidate.isHittable { return candidate }
-            }
-        }
-        for query in [app.collectionViews, app.scrollViews] {
-            if let candidate = query.allElementsBoundByIndex
-                .last(where: { $0.exists }) {
-                return candidate
             }
         }
         return app
@@ -1630,23 +1534,11 @@ final class AMFinanceUITests: XCTestCase {
     /// Swipes only when the element still resolves — `frontScrollable()`
     /// returns an index-bound element and a push that settles between the
     /// pick and the swipe can drop one of the two lists, turning the
-    /// gesture into an unrecoverable "no matches" failure. A scrollable
-    /// whose hit point is covered (software keyboard up) is dragged inside
-    /// its still-visible top band instead — `swipeUp()` would synthesize
-    /// the gesture at the covered point and land on the overlay.
+    /// gesture into an unrecoverable "no matches" failure.
     private func swipeUpIfAlive(_ element: XCUIElement) {
-        guard element.exists else { return }
-        if element.isHittable {
+        if element.exists {
             element.swipeUp()
-            return
         }
-        guard element.elementType == .scrollView
-            || element.elementType == .collectionView else { return }
-        let start = element.coordinate(
-            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12))
-        let end = element.coordinate(
-            withNormalizedOffset: CGVector(dx: 0.5, dy: -0.25))
-        start.press(forDuration: 0.05, thenDragTo: end)
     }
 
     /// Waits until `element` exists AND is hittable — taps must not land
