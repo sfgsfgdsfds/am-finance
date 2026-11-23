@@ -4,15 +4,16 @@ import XCTest
 /// with `-uiTestInMemoryStore` — a throwaway, seeded in-memory SwiftData
 /// store — so real user data is never touched.
 ///
-/// The suite is grouped into five launches instead of one per flow — each
+/// The suite is grouped into seven launches instead of one per flow — each
 /// launch costs ~10-15 s of simulator + app idle time, so steps that can share
 /// a store run together. Covers: the four tabs, quick-add (expense and
 /// income), edit/delete, settings screens, accounts/cards/loans, debts,
 /// reports, the second-pass feature wiring (wallet link/sync, budgets,
 /// recurring, reminders, app lock, business hub, receivables, balance
-/// trend) and the third-pass features (room rentals, CSV import, the
-/// rent-collection and bank-transaction reminder switches). Vietnamese
-/// UI, VND amounts ("150.000 ₫").
+/// trend), the third-pass features (room rentals, CSV import, the
+/// rent-collection and bank-transaction reminder switches) and the
+/// personal bill split (equal-share preview, own-share expense, advance
+/// transfer). Vietnamese UI, VND amounts ("150.000 ₫").
 ///
 /// Reliability rules used throughout:
 /// - wait for `exists AND hittable` before tapping anything that may sit
@@ -928,6 +929,71 @@ final class AMFinanceUITests: XCTestCase {
                       "reports income share section missing")
     }
 
+    // MARK: - 7. Bill split
+
+    /// "Chia bill" from the unsaved quick-add draft: a 1.200.000 ₫ bill for
+    /// Tôi + the one typed friend must preview 600.000 own share and
+    /// 600.000 phải thu, then save through the one explicit "Lưu chia
+    /// bill" — which also dismisses the editor without its "Lưu". The
+    /// persisted own-share expense and the advance transfer into An's
+    /// receivable are checked in "Giao dịch"; deeper split/repayment
+    /// ledger paths are covered by unit tests.
+    func testBillSplit() throws {
+        // Open quick-add, fill the draft — no normal save.
+        tapQuickAdd()
+        typeAmount(1_200_000)
+        pickCategory("Ăn uống")
+        tapOption("Chia bill")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Chia bill"]
+                .waitForExistence(timeout: 5),
+            "bill split sheet missing")
+
+        // Collapse the sheet's own amount keypad — it holds ~300 pt that
+        // would otherwise leave the participants/preview sections cramped
+        // above the software keyboard once a name field is focused.
+        tapWhenReady(app.buttons["Tổng hoá đơn"],
+                     "bill-total keypad toggle missing")
+
+        // Live equal-split preview for Tôi + the one default friend —
+        // asserted on the value identifiers while the whole form still
+        // fits without scrolling (the same amounts render on the friend
+        // share and the collapsed header).
+        assertLabeled("billSplit.preview.myShare", "600.000 ₫",
+                      "preview does not show the 600.000 own share")
+        assertLabeled("billSplit.preview.receivable", "600.000 ₫",
+                      "preview does not show the 600.000 receivable total")
+        assertLabeled("billSplit.preview.total", "1.200.000 ₫",
+                      "preview does not show the 1.200.000 bill total")
+
+        // The name goes in last: with the keypad collapsed the field
+        // stays above the keyboard, and the keyboard is pulled down again
+        // before saving — a dismissed sheet must not leave it behind.
+        fillField(app.textFields["billSplit.friendName.0"], with: "An")
+        dismissKeyboardInteractively()
+
+        // The explicit save dismisses the sheet AND the editor.
+        tapWhenReady(app.buttons["Lưu chia bill"], "split save button missing")
+        waitForDisappearance(
+            app.navigationBars.staticTexts["Chia bill"],
+            message: "split sheet did not dismiss")
+        XCTAssertTrue(
+            waitReady(app.buttons["root.quickAdd"], timeout: 10),
+            "editor did not close after the split")
+
+        // Saved rows: the 600.000 own-share expense plus the advance
+        // transfer into An's receivable — existence checks; right after
+        // the nested sheet+editor dismissal a transient overlay can
+        // leave a listed row unhittable for a while.
+        openTab("Giao dịch")
+        assertExists(app.staticTexts["-600.000 ₫"],
+                     "split expense amount missing in list")
+        assertExists(app.staticTexts["Chuyển khoản"],
+                     "advance transfer row missing")
+        assertExists(app.staticTexts["Tiền mặt → An"],
+                     "advance to An missing its transfer subtitle")
+    }
+
     // MARK: - Flow helpers
 
     /// Taps the floating "+" (identifier `root.quickAdd`) and waits for the
@@ -1151,6 +1217,29 @@ final class AMFinanceUITests: XCTestCase {
         }
     }
 
+    /// Gets the software keyboard out of the way before a sheet closes:
+    /// Return resigns a plain TextField, then a downward drag on the
+    /// sheet's list engages `.scrollDismissesKeyboard(.interactively)` —
+    /// even when the keyboard already reports gone, because a resigned
+    /// field can still leave the keyboard window covering hit points for
+    /// tens of seconds after the sheet dies. The drag is harmless when
+    /// the window really is gone.
+    private func dismissKeyboardInteractively() {
+        guard app.keyboards.element.exists else { return }
+        app.typeText("\n")
+        guard app.sheets.count > 0 else { return }
+        let sheet = app.sheets.element(boundBy: app.sheets.count - 1)
+        guard let scroller = (
+            sheet.collectionViews.allElementsBoundByIndex
+                + sheet.scrollViews.allElementsBoundByIndex
+        ).last(where: { $0.exists }) else { return }
+        let start = scroller.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08))
+        let end = scroller.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+        start.press(forDuration: 0.05, thenDragTo: end)
+    }
+
     /// Taps a text field (scrolling to it if needed) and types into it.
     private func fillField(_ field: XCUIElement, with text: String) {
         if !reveal(field, maxSwipes: 6) {
@@ -1267,6 +1356,40 @@ final class AMFinanceUITests: XCTestCase {
             XCTWaiter.wait(for: [ready], timeout: timeout), .completed,
             message, file: file, line: line)
         element.tap()
+    }
+
+    /// Asserts an element is listed — existence is the meaningful check for
+    /// "the row is there" (a row covered by a transient overlay still
+    /// counts, and is materialized already). Only when the element never
+    /// materializes does it fall back to the scrolling reveal.
+    private func assertExists(
+        _ element: XCUIElement,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        if !element.waitForExistence(timeout: 3) {
+            assertVisible(element, message, file: file, line: line)
+        }
+    }
+
+    /// Asserts the element carrying `identifier` is on screen AND labelled
+    /// `label` — `LabeledContent` merges row title and value into one
+    /// accessibility element ("Phần của tôi, 600.000 ₫"), so the value
+    /// matches either the whole label or its trailing ", "-component.
+    private func assertLabeled(
+        _ identifier: String,
+        _ label: String,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let element = scopedElement(identifier)
+        assertVisible(element, message, file: file, line: line)
+        let actual = element.label
+        XCTAssertTrue(
+            actual == label || actual.hasSuffix(", \(label)"),
+            "\(message) — got '\(actual)'", file: file, line: line)
     }
 
     /// Asserts an element is on screen — scrolls to materialize it first so

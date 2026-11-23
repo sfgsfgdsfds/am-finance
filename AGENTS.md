@@ -17,9 +17,11 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   transient simulator failures retry once.
 - `./scripts/test-ui.sh` — the slow UI gate: runs only the `AMFinanceUITests`
   XCUITest smoke suite under the same lock and retry logic, on the dedicated
-  `AMFinanceUITests` scheme. Integration jobs run it, and it must pass before
-  device installs. If you change navigation, tab structure or a flow the smoke
-  tests cover, run it yourself and update `AppUITests`.
+  `AMFinanceUITests` scheme. Set `AMFINANCE_UI_TEST_FILTERS` to space-separated
+  `-only-testing:`/`-skip-testing:` selectors to run just a shard. Integration
+  jobs run it, and it must pass before device installs. If you change
+  navigation, tab structure or a flow the smoke tests cover, run it yourself
+  and update `AppUITests`.
 - `scripts/lib-test.sh` — shared lock/simulator/retry helper sourced by both
   test scripts; not meant to be run directly.
 - The generated `.xcodeproj` is a build artifact: git-ignored, never commit it.
@@ -79,13 +81,16 @@ workers know what already exists. Pushed views must not create their own
 - `AppLock/` — `AppLockSettingsView`, the `.appLockProtected()` modifier on the root; `AppLockController.shared`.
 - `BackgroundRefresh/` — `BackgroundRefreshScheduler` (BGAppRefreshTask `vn.amx.finance.refresh`, registered in `AMFinanceApp`), `BackgroundRefreshRunner` (background wallet sync + recurring + reminders with local notifications), `BackgroundRefreshNotificationPlan`.
 - `Backup/` — `BackupView` (Settings → Dữ liệu).
-- `BillSplit/` — `BillSplitService` (chia bill accounting, no UI yet):
-  `splitNewBill` posts the payer's own-share expense + one transfer
-  advance per friend; `splitExistingExpense` shrinks an eligible personal
-  expense in place (keeps id/external provenance, `BillSplitOriginal`
-  precondition); `assignRepayment` converts an eligible income into a
-  receivable repayment via `WalletSyncTransfer`. Equal-split math lives
-  in `FinanceCore.BillSplit`.
+- `BillSplit/` — `BillSplitView` (chia bill sheet; `seed:` from the
+  transaction editor's unsaved draft or `transaction:` + `BillSplitOriginal`
+  for an in-place split), `BillRepaymentSheet` (income → repayment),
+  `BillSplitService` (`splitNewBill` posts the payer's own-share expense +
+  one transfer advance per friend; `splitExistingExpense` shrinks an
+  eligible personal expense in place; `assignRepayment` converts an
+  eligible income into a receivable repayment via `WalletSyncTransfer`;
+  `canSplitExpense`/`canAssignRepayment` are the editor's eligibility
+  mirrors). Equal-split math lives in `FinanceCore.BillSplit`. Entries:
+  "Chia bill" / "Ghi nhận hoàn tiền" rows in `TransactionEditorView`.
 - `BalanceTrend/` — `BalanceTrendView(account:)`, `BalanceTrendAnchorSheet(account:)`.
 - `Budgets/` — `BudgetsView`, `BudgetsEditSheet`, `BudgetsSummaryCard` (dashboard).
 - `BusinessHub/` — `BusinessHubView`, `BusinessHubDetailView(business:)`.

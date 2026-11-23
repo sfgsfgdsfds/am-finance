@@ -23,6 +23,8 @@ struct TransactionEditorView: View {
     @State private var keypadVisible: Bool
     @State private var deleteConfirmationShown = false
     @State private var saveFailed = false
+    @State private var billSplitShown = false
+    @State private var repaymentShown = false
 
     init(
         transaction: LedgerTransaction? = nil,
@@ -77,6 +79,8 @@ struct TransactionEditorView: View {
             } message: {
                 Text("Giao dịch chưa đầy đủ hoặc dữ liệu không hợp lệ.")
             }
+            .sheet(isPresented: $billSplitShown) { billSplitSheet }
+            .sheet(isPresented: $repaymentShown) { billRepaymentSheet }
             .onAppear(perform: resolveDefaultAccount)
             .onChange(of: draft.account?.id) { _, _ in
                 if draft.toAccount?.id == draft.account?.id {
@@ -157,6 +161,23 @@ struct TransactionEditorView: View {
                     displayedComponents: [.date, .hourAndMinute]
                 )
                 TextField("Ghi chú", text: $draft.note)
+            }
+
+            if showsBillSplitEntry || showsRepaymentEntry {
+                Section {
+                    if showsBillSplitEntry {
+                        Button { billSplitShown = true } label: {
+                            Label("Chia bill", systemImage: "person.2.fill")
+                        }
+                    }
+                    if showsRepaymentEntry {
+                        Button { repaymentShown = true } label: {
+                            Label(
+                                "Ghi nhận hoàn tiền",
+                                systemImage: "arrow.uturn.backward.circle.fill")
+                        }
+                    }
+                }
             }
 
             if transaction != nil {
@@ -292,6 +313,87 @@ struct TransactionEditorView: View {
                 .foregroundStyle(isSelected ? .white : .primary)
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - Bill split & repayment wiring
+
+    /// "Chia bill" is offered for a personal expense: a saved row the
+    /// service would accept, or the unsaved create-mode draft (the sheet
+    /// then seeds from the draft and posts without this form's "Lưu").
+    private var showsBillSplitEntry: Bool {
+        if let transaction {
+            return BillSplitService.canSplitExpense(transaction)
+        }
+        return draft.kind == .expense && draft.business == nil
+    }
+
+    /// "Ghi nhận hoàn tiền" is offered on a saved income the service
+    /// could reclassify — including synced rows reached from "Giao dịch".
+    private var showsRepaymentEntry: Bool {
+        transaction.map(BillSplitService.canAssignRepayment) == true
+    }
+
+    /// True when the draft no longer matches the saved row — disclosed
+    /// on the split/repayment sheets because those edits are not part
+    /// of either conversion.
+    private var draftIsDirty: Bool {
+        guard let transaction else { return false }
+        let baseline = TransactionDraft(transaction: transaction)
+        return draft.kind != baseline.kind
+            || draft.amount != baseline.amount
+            || draft.account?.id != baseline.account?.id
+            || draft.toAccount?.id != baseline.toAccount?.id
+            || draft.category?.id != baseline.category?.id
+            || draft.business?.id != baseline.business?.id
+            || draft.date != baseline.date
+            || draft.note != baseline.note
+    }
+
+    /// The split sheet closes, then this editor closes without its own
+    /// "Lưu" path — the service already committed the rows.
+    private func splitCommitted() {
+        billSplitShown = false
+        dismiss()
+    }
+
+    private func repaymentCommitted() {
+        repaymentShown = false
+        dismiss()
+    }
+
+    /// Sheet content is built when `billSplitShown` flips true, so the
+    /// `BillSplitOriginal` snapshot is taken at open time and the draft
+    /// seed reads the draft as the user left it.
+    @ViewBuilder
+    private var billSplitSheet: some View {
+        if let transaction {
+            BillSplitView(
+                transaction: transaction,
+                expected: BillSplitOriginal(of: transaction),
+                editorHasPendingEdits: draftIsDirty,
+                onSaved: splitCommitted)
+        } else {
+            BillSplitView(
+                seed: BillSplitSeed(
+                    total: draft.amount,
+                    payer: draft.account,
+                    date: draft.date,
+                    category: draft.category?.kind == .expense
+                        ? draft.category : nil,
+                    note: draft.note),
+                onSaved: splitCommitted)
+        }
+    }
+
+    @ViewBuilder
+    private var billRepaymentSheet: some View {
+        if let transaction {
+            BillRepaymentSheet(
+                transaction: transaction,
+                expected: BillSplitOriginal(of: transaction),
+                editorHasPendingEdits: draftIsDirty,
+                onSaved: repaymentCommitted)
+        }
     }
 
     // MARK: - Data
