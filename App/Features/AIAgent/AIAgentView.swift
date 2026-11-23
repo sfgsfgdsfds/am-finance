@@ -11,20 +11,24 @@ import SwiftData
 /// The screen is pushed inside an existing NavigationStack — callers
 /// presenting it as a sheet wrap it in one.
 ///
-/// Disposable state rules mirror the old staged sheet: the active
-/// provider is captured as a whole non-secret profile snapshot — an
-/// in-place edit of the same profile counts as "provider changed" —
-/// and a provider, access-level or notes-switch change stops the
-/// running session and starts a fresh one, so nothing a stale
-/// configuration produced can be sent on.
+/// All session state lives in `AIAgentController`, ONE shared instance
+/// per model container (`AIAgentControllers.shared(for:)`): every
+/// entry point shows the same conversation, an in-flight turn keeps
+/// running when the screen is popped or the tab switched, and the
+/// finished reply is there on return. This view only renders the
+/// controller and forwards the taps.
 @MainActor
 struct AIAgentView: View {
     /// The persisted grant — the AppStorage key `AMFinanceApp` clears on
     /// UI-test launches so every run starts at the real default, `.off`.
-    nonisolated static let accessDefaultsKey = "aiAgent.access"
+    /// Owned by `AIAgentController`; forwarded here so the settings
+    /// screen and tests keep their existing references.
+    nonisolated static let accessDefaultsKey =
+        AIAgentController.accessDefaultsKey
     /// Whether transaction notes ride the agent's tool results —
     /// `AMFinanceApp` clears it on UI-test launches too.
-    nonisolated static let includeNotesDefaultsKey = "aiAgent.includeNotes"
+    nonisolated static let includeNotesDefaultsKey =
+        AIAgentController.includeNotesDefaultsKey
 
     /// Tappable opening questions for the empty conversation.
     private static let suggestions = [
@@ -44,55 +48,40 @@ struct AIAgentView: View {
 
     @Environment(\.modelContext) private var context
 
-    private let providerStore: AIProviderStore
-    private let injectedClient: (any AIChatClientProtocol)?
+    /// Tests and previews may inject a controller; nil resolves to the
+    /// shared per-container one — the point of the design: every entry
+    /// point shows the SAME conversation.
+    private let injectedController: AIAgentController?
 
+    /// The persisted grant + notes switch as AppStorage — their changes
+    /// re-render the screen (the controller reads the same defaults).
     @AppStorage(AIAgentView.accessDefaultsKey)
     private var accessRaw = AIAgentAccess.off.rawValue
     @AppStorage(AIAgentView.includeNotesDefaultsKey)
     private var includeNotes = true
 
-    /// The active provider, resolved on appear and re-resolved whenever
-    /// the screen becomes visible again — `providerProfile` is the exact
-    /// non-secret snapshot `client` was built from, compared whole so a
-    /// same-id edit counts as "provider changed". The API key is never
-    /// part of it: keys live only in the Keychain.
-    @State private var client: (any AIChatClientProtocol)?
-    @State private var providerProfile: AIProviderProfile?
-    @State private var providerName = ""
-    /// nil→checked flip avoids flashing an empty state while the store
-    /// is being read.
-    @State private var providerChecked = false
-    @State private var providerNotice: String?
-    @State private var showsSettings = false
-
-    @State private var session: AIAgentChatSession?
     @State private var input = ""
     @FocusState private var inputFocused: Bool
+    @State private var showsSettings = false
 
-    init(
-        providerStore: AIProviderStore = AIProviderStore(),
-        client: (any AIChatClientProtocol)? = nil
-    ) {
-        self.providerStore = providerStore
-        #if DEBUG
-        // `-uiTestAgentScript` (honoured only beside the in-memory
-        // UI-test store) replaces the provider: the screen counts as
-        // configured and the deterministic script answers.
-        let scripted: (any AIChatClientProtocol)? =
-            AIAgentUITestScript.isEnabled
-                ? AIAgentUITestScript.Client() : nil
-        self.injectedClient = client ?? scripted
-        #else
-        self.injectedClient = client
-        #endif
+    init(controller: AIAgentController? = nil) {
+        self.injectedController = controller
     }
+
+    /// The shared controller — created once per model container and
+    /// kept for the app's lifetime.
+    private var controller: AIAgentController {
+        injectedController
+            ?? AIAgentControllers.shared(for: context.container)
+    }
+
+    private var session: AIAgentChatSession? { controller.session }
 
     var body: some View {
         Group {
-            if !providerChecked {
+            if !controller.providerChecked {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if client == nil {
+            } else if controller.client == nil {
                 EmptyStateView(
                     symbol: "cpu.fill",
                     title: "Chưa cấu hình AI",
@@ -116,12 +105,12 @@ struct AIAgentView: View {
         }
         .navigationTitle("Agent")
         .navigationDestination(isPresented: $showsSettings) {
-            AISettingsView(store: providerStore)
+            AISettingsView(store: controller.providerStore)
         }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button {
-                    newConversation()
+                    controller.newConversation()
                 } label: {
                     Image(systemName: "plus.message")
                 }
@@ -137,27 +126,31 @@ struct AIAgentView: View {
                 .accessibilityIdentifier("agent.openSettings")
             }
         }
-        .onAppear(perform: refreshProvider)
-        .onChange(of: accessRaw) { _, _ in rebuildSession() }
-        .onChange(of: includeNotes) { _, _ in rebuildSession() }
+        .onAppear {
+            controller.refreshProvider()
+            controller.syncSettings()
+            controller.noteScreenAppeared()
+        }
+        .onDisappear { controller.noteScreenDisappeared() }
+        // The grant itself needs no sync — the session re-reads it per
+        // turn; the notes switch is copied into the live session.
+        .onChange(of: includeNotes) { _, _ in controller.syncSettings() }
     }
 
-    /// The current grant — read LIVE from persisted defaults every
-    /// time, so the session's per-turn re-check sees a mid-turn
-    /// revocation. `nonisolated` keeps the `accessProvider` closure a
-    /// plain non-Sendable `() -> AIAgentAccess` in any isolation.
-    private nonisolated var access: AIAgentAccess {
-        Self.accessValue(in: .standard)
+    /// The current grant for what the VIEW shows (mode strip, the
+    /// no-permission state, the suggestion list) — read from the
+    /// AppStorage so a flip re-renders; the session reads the same
+    /// defaults live through `controller.access`.
+    private var access: AIAgentAccess {
+        AIAgentAccess(rawValue: accessRaw) ?? .off
     }
 
     /// Reads the persisted grant straight from the defaults
-    /// `@AppStorage` wraps — `accessRaw`'s storage backend.
+    /// `@AppStorage` wraps — forwarded to the controller's reader.
     nonisolated static func accessValue(
         in defaults: UserDefaults
     ) -> AIAgentAccess {
-        AIAgentAccess(
-            rawValue: defaults.string(forKey: accessDefaultsKey)
-                ?? AIAgentAccess.off.rawValue) ?? .off
+        AIAgentController.accessValue(in: defaults)
     }
 
     // MARK: - Chat layout
@@ -167,7 +160,7 @@ struct AIAgentView: View {
             modeStrip
             Divider()
             messageArea
-            if let providerNotice {
+            if let providerNotice = controller.providerNotice {
                 noticeBar(providerNotice)
             }
             if let error = session?.error {
@@ -184,9 +177,9 @@ struct AIAgentView: View {
         HStack(spacing: 6) {
             Image(systemName: access == .scopedReadAndProposeCategoryEdits
                   ? "square.and.pencil" : "book.closed")
-            Text(providerName.isEmpty
+            Text(controller.providerName.isEmpty
                  ? access.agentModeTitle
-                 : "\(access.agentModeTitle) · \(providerName)")
+                 : "\(access.agentModeTitle) · \(controller.providerName)")
             Spacer()
         }
         .font(.caption2)
@@ -363,7 +356,7 @@ struct AIAgentView: View {
                 .lineLimit(3)
             Spacer(minLength: 8)
             if session?.canRetry == true {
-                Button("Thử lại") { session?.retry() }
+                Button("Thử lại") { controller.retry() }
                     .font(.footnote.weight(.semibold))
             }
         }
@@ -417,98 +410,12 @@ struct AIAgentView: View {
         .background(Color(.systemBackground))
     }
 
-    /// One question leaves the device — the provider snapshot is
-    /// re-checked first so a message never silently goes to a different
-    /// destination than the one the session started on.
+    /// One question leaves the device — the controller re-checks the
+    /// provider snapshot inside `send`, so a stale destination never
+    /// silently receives a message.
     private func send(_ text: String) {
-        ensureSession()
-        guard let session,
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return }
-        guard providerIsCurrent else { providerStale(); return }
-        providerNotice = nil
-        session.send(text)
+        guard controller.send(text) else { return }
         if text == input { input = "" }
         inputFocused = true
-    }
-
-    /// "Cuộc trò chuyện mới" — a fresh session on the current provider
-    /// and grant. Nothing is persisted, so this drops everything.
-    private func newConversation() {
-        rebuildSession()
-        providerNotice = nil
-    }
-
-    // MARK: - Session & provider
-
-    /// Stops any in-flight turn and mints a fresh session when the
-    /// current inputs allow one (provider + a usable grant). Called on
-    /// every access / notes-switch / provider change — a revoked grant
-    /// kills the session outright.
-    private func rebuildSession() {
-        session?.stop()
-        session = nil
-        ensureSession()
-    }
-
-    /// Builds the session if one is due and none exists — the read
-    /// tools' grant is re-read live from the AppStorage so a mid-turn
-    /// revocation still stops the loop.
-    private func ensureSession() {
-        guard session == nil, let client, access.canLookup else { return }
-        session = AIAgentChatSession(
-            client: client,
-            context: context,
-            accessProvider: { self.access },
-            includeNotes: includeNotes)
-    }
-
-    /// Resolves the active provider profile into `client` + snapshot;
-    /// a whole-profile change (switch OR in-place edit) rebuilds the
-    /// session from nothing — what a different destination produced
-    /// must not linger. First resolution only seeds the session.
-    private func refreshProvider() {
-        let previous = providerProfile
-        if let injectedClient {
-            client = injectedClient
-            providerProfile = providerStore.activeProfile()
-            providerName = providerProfile?.name ?? ""
-            providerChecked = true
-        } else if let profile = providerStore.activeProfile(),
-                  let made = try? providerStore.makeClient(profile: profile) {
-            client = made
-            providerProfile = profile
-            let name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            providerName = name.isEmpty ? profile.trimmedModel : name
-            providerChecked = true
-        } else {
-            client = nil
-            providerProfile = nil
-            providerName = ""
-            providerChecked = true
-        }
-        if providerProfile != previous {
-            rebuildSession()
-        } else {
-            ensureSession()
-        }
-    }
-
-    /// True only while the store's ACTIVE profile still equals, field by
-    /// field, the non-secret snapshot `client` was built from.
-    private var providerIsCurrent: Bool {
-        if injectedClient != nil { return true }
-        guard let providerProfile else { return false }
-        return providerStore.activeProfile() == providerProfile
-    }
-
-    /// A send caught the active profile no longer matching the client's
-    /// snapshot: rebind to whatever is active now (which rebuilds the
-    /// session fresh) and leave a retry hint. Nothing profile-shaped is
-    /// ever shown or logged — the notice is a fixed string.
-    private func providerStale() {
-        refreshProvider()
-        providerNotice =
-            "Cấu hình nhà cung cấp AI đã đổi — hãy gửi lại để đúng nơi nhận."
     }
 }

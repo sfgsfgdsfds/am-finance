@@ -110,6 +110,7 @@ struct DashboardView: View {
                             AIAgentView()
                         } label: {
                             Image(systemName: "sparkles")
+                                .agentActivityBadge()
                         }
                         .accessibilityLabel("Agent")
                         NavigationLink {
