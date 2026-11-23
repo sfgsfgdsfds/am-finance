@@ -77,14 +77,16 @@ workers know what already exists. Pushed views must not create their own
 `NavigationStack`.
 
 - `Accounts/` — `AccountsListView`, `AccountDetailView(account:)`, `AccountEditView(account:)`; `AccountBalanceAdjustment` helper.
-- `AIAgent/` — `AIAgentLedgerTools` (the local ledger tools: `lookup`
-  bounded read, `applyCategoryEdits` atomic user-confirmed category
-  edits — `[AIAgentCategoryEdit]` mixed batches scoped by
+- `AIAgent/` — `AIAgentView` (the "Agent giao dịch" sheet, Giao dịch
+  toolbar leading button: persisted `aiAgent.access` picker default
+  `.off`, bounded window picker, exact-payload review, confirmed apply);
+  `AIAgentWindowSelection` bounded local day windows; `AIAgentLedgerTools`
+  (`lookup` bounded read, `applyCategoryEdits` atomic user-confirmed
+  category edits — `[AIAgentCategoryEdit]` mixed batches scoped by
   `lookupWindow`), `AIAgentAccess`/`AIAgentPermission` policy,
   `AIAgentOrchestrator` two-stage pipeline (`search` → `prepareAnalysis`
   → `analyze`; prompts/parsers in `AIAgentPlanner`, value types
   `AIAgentDataPreview`, `AIAgentPreparedAnalysis`, `AIAgentAnalysis`).
-  Service only — no screens, routes or settings yet.
 - `AIAssistant/` — `AISettingsView`, `AIChatView`, `AIInboxSuggestView`, `AICaptureView`; wired at Settings → "Trợ lý AI", the inbox toolbar's "Phân loại bằng AI", the dashboard sparkles button and the `root.aiCapture` satellite beside the "+".
 - `AppLock/` — `AppLockSettingsView`, the `.appLockProtected()` modifier on the root; `AppLockController.shared`.
 - `BackgroundRefresh/` — `BackgroundRefreshScheduler` (BGAppRefreshTask `vn.amx.finance.refresh`, registered in `AMFinanceApp`), `BackgroundRefreshRunner` (background wallet sync + recurring + reminders with local notifications), `BackgroundRefreshNotificationPlan`.

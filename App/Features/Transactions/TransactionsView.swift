@@ -20,6 +20,7 @@ struct TransactionsView: View {
     @State private var filter = TransactionListFilter()
     @State private var filterShown = false
     @State private var addShown = false
+    @State private var agentShown = false
     @State private var editing: LedgerTransaction?
     @State private var pendingDelete: LedgerTransaction?
 
@@ -54,6 +55,12 @@ struct TransactionsView: View {
                 prompt: "Tìm ghi chú, danh mục, số tiền…"
             )
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button { agentShown = true } label: {
+                        Image(systemName: "wand.and.stars")
+                    }
+                    .accessibilityLabel("Agent giao dịch")
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { filterShown = true } label: {
                         Image(systemName: filter.isActive
@@ -71,6 +78,9 @@ struct TransactionsView: View {
             }
             .sheet(isPresented: $addShown) {
                 TransactionEditorView()
+            }
+            .sheet(isPresented: $agentShown) {
+                AIAgentView()
             }
             .sheet(item: $editing) { transaction in
                 TransactionEditorView(transaction: transaction)

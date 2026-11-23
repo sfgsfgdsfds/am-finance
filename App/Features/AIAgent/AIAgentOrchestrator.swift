@@ -197,6 +197,8 @@ struct AIAgentOrchestrator {
     /// call and runs the bounded lookup — all under `permission`.
     /// A denied or oversized grant fails before the request is sent;
     /// a wrong tool name or malformed args fail before the ledger read.
+    /// Cancellation is checked before the request leaves and again
+    /// before the reply is parsed and the ledger read runs.
     func search(
         question: String,
         permission: AIAgentPermission,
@@ -213,7 +215,9 @@ struct AIAgentOrchestrator {
         let request = AIAgentToolPlanner.request(
             question: boundedQuestion, permission: permission,
             now: now(), calendar: calendar)
+        try Task.checkCancellation()
         let reply = try await client.complete(request)
+        try Task.checkCancellation()
         let query = try AIAgentToolPlanner.parse(
             reply.text, grantedWindow: permission.window,
             calendar: calendar)
@@ -229,7 +233,8 @@ struct AIAgentOrchestrator {
     /// `R…` rows projected under `options`, the category handles a
     /// proposal may name (only when the grant allows proposing), the
     /// fixed request and the local handle map. Pure — no network, no
-    /// writes; a revoked grant still refuses.
+    /// writes; a revoked grant still refuses, and a grant narrowed
+    /// since the lookup fails before a payload is minted.
     func prepareAnalysis(
         _ search: AIAgentSearchResult,
         options: AIAgentPreviewOptions = AIAgentPreviewOptions(),
@@ -238,6 +243,7 @@ struct AIAgentOrchestrator {
     ) throws -> AIAgentPreparedAnalysis {
         guard permission.access.canLookup
         else { throw AIAgentError.permissionDenied }
+        try checkWindow(search.result.window, within: permission.window)
 
         var rows: [AIAgentDataPreview.Row] = []
         rows.reserveCapacity(search.result.matches.count)
@@ -298,25 +304,43 @@ struct AIAgentOrchestrator {
 
     /// Sends the prepared request — only when the UI explicitly calls
     /// it — and parses the reply. The grant is re-checked first: full
-    /// revocation means no network at all, and a request minted with
-    /// proposals fails when the grant no longer covers them.
+    /// revocation means no network at all, a request minted with
+    /// proposals fails when the grant no longer covers them, and a
+    /// window the grant no longer contains fails before the request
+    /// leaves. Cancellation is checked before the request and before
+    /// the reply is parsed into proposals.
     func analyze(
         _ prepared: AIAgentPreparedAnalysis,
         permission: AIAgentPermission
     ) async throws -> AIAgentAnalysis {
         guard permission.access.canLookup
         else { throw AIAgentError.permissionDenied }
+        try checkWindow(prepared.effectiveWindow, within: permission.window)
         if prepared.grantsProposals,
            !permission.access.canProposeCategoryEdits {
             throw AIAgentError.permissionDenied
         }
+        try Task.checkCancellation()
         let reply = try await client.complete(prepared.request)
+        try Task.checkCancellation()
         return try AIAgentAnalysisPlanner.parse(
             reply.text, prepared: prepared,
             canPropose: permission.access.canProposeCategoryEdits)
     }
 
     // MARK: - Internals
+
+    /// The scanned/prepared window must still sit inside the current
+    /// grant — a grant narrowed since the lookup must not proceed.
+    /// `window` is half-open, so containment is checked on the bounds.
+    private func checkWindow(
+        _ window: DateInterval, within grant: DateInterval
+    ) throws {
+        guard grant.duration <= AIAgentLedgerTools.maxWindow
+        else { throw AIAgentError.windowTooWide }
+        guard window.start >= grant.start, window.end <= grant.end
+        else { throw AIAgentError.queryOutsideWindow }
+    }
 
     /// Active categories for handle minting — bounded fetch, stable
     /// order (sort order then name).
