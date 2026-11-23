@@ -88,9 +88,11 @@ struct BillRepaymentSheet: View {
             Section {
                 LabeledContent("Số tiền") {
                     Text(VND.format(expected.amount)).monospacedDigit()
+                        .accessibilityIdentifier("billRepay.amount")
                 }
                 LabeledContent("Nhận vào") {
                     Text(transaction.account?.name ?? "—")
+                        .accessibilityIdentifier("billRepay.account")
                 }
                 LabeledContent("Ngày") {
                     Text("\(AppDateFormat.shortDate(expected.date)) \(AppDateFormat.time(expected.date))")

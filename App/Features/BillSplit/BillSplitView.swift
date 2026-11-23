@@ -431,16 +431,19 @@ struct BillSplitView: View {
         Section("Xem trước") {
             LabeledContent("Tổng hoá đơn") {
                 Text(VND.format(billTotal)).monospacedDigit()
+                    .accessibilityIdentifier("billSplit.preview.total")
             }
             if let plan {
                 LabeledContent("Phần của tôi") {
                     Text(VND.format(plan.ownShare))
                         .monospacedDigit()
                         .foregroundStyle(AppTheme.expense)
+                        .accessibilityIdentifier("billSplit.preview.myShare")
                 }
                 LabeledContent("Tổng phải thu") {
                     Text(VND.format(plan.total - plan.ownShare))
                         .monospacedDigit()
+                        .accessibilityIdentifier("billSplit.preview.receivable")
                 }
                 if plan.remainder > 0 {
                     Text("Lẻ \(VND.format(plan.remainder)) — chia một đồng một người từ Tôi trở đi.")

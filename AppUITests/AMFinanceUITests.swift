@@ -948,25 +948,36 @@ final class AMFinanceUITests: XCTestCase {
                 .waitForExistence(timeout: 5),
             "bill split sheet missing")
 
+        // Collapse the sheet's own amount keypad — it holds ~300 pt that
+        // would otherwise leave the participants/preview sections cramped
+        // above the software keyboard once a name field is focused.
+        tapWhenReady(app.buttons["Tổng hoá đơn"],
+                     "bill-total keypad toggle missing")
+
+        // Live equal-split preview for Tôi + the one default friend —
+        // asserted on the value identifiers while the whole form still
+        // fits without scrolling (the same amounts render on friend
+        // shares and the collapsed header). The four-way numbers are
+        // verified end-to-end on the saved rows below.
+        assertLabeled("billSplit.preview.myShare", "600.000 ₫",
+                      "preview does not show the 600.000 own share")
+        assertLabeled("billSplit.preview.receivable", "600.000 ₫",
+                      "preview does not show the 600.000 receivable total")
+        assertLabeled("billSplit.preview.total", "1.200.000 ₫",
+                      "preview does not show the 1.200.000 bill total")
+
         // Two more friend rows → Tôi + 3 friends, all typed new names.
         for _ in 0..<2 {
             tapOption("Thêm người")
         }
+
+        // Names go in last: with the keypad collapsed the fields stay
+        // above the keyboard, and the keyboard is pulled down again
+        // before saving — a dismissed sheet must not leave it behind.
         fillField(app.textFields["billSplit.friendName.0"], with: "An")
         fillField(app.textFields["billSplit.friendName.1"], with: "Binh")
         fillField(app.textFields["billSplit.friendName.2"], with: "Chi")
-
-        // Live preview: exact own share, total phải thu and bill total.
-        assertVisible(app.staticTexts["Phần của tôi"],
-                      "own-share preview row missing")
-        assertVisible(app.staticTexts["300.000 ₫"],
-                      "preview does not show the 300.000 share")
-        assertVisible(app.staticTexts["Tổng phải thu"],
-                      "receivable-total preview row missing")
-        assertVisible(app.staticTexts["900.000 ₫"],
-                      "preview does not show the 900.000 receivable total")
-        assertVisible(app.staticTexts["1.200.000 ₫"],
-                      "preview does not show the 1.200.000 total")
+        dismissKeyboardInteractively()
 
         // The explicit save dismisses the sheet AND the editor.
         tapWhenReady(app.buttons["Lưu chia bill"], "split save button missing")
@@ -977,14 +988,16 @@ final class AMFinanceUITests: XCTestCase {
             waitReady(app.buttons["root.quickAdd"], timeout: 10),
             "editor did not close after the split")
 
-        // Saved rows: the 300.000 own-share expense plus three advances.
+        // Saved rows: the 300.000 own-share expense plus three advances —
+        // existence checks; right after the nested sheet+editor dismissal a
+        // transient overlay can leave a listed row unhittable for a while.
         openTab("Giao dịch")
-        assertVisible(app.staticTexts["-300.000 ₫"],
-                      "split expense amount missing in list")
-        assertVisible(app.staticTexts["Chuyển khoản"],
-                      "advance transfer rows missing")
-        assertVisible(app.staticTexts["Tiền mặt → An"],
-                      "advance to An missing its transfer subtitle")
+        assertExists(app.staticTexts["-300.000 ₫"],
+                     "split expense amount missing in list")
+        assertExists(app.staticTexts["Chuyển khoản"],
+                     "advance transfer rows missing")
+        assertExists(app.staticTexts["Tiền mặt → An"],
+                     "advance to An missing its transfer subtitle")
 
         // The new "An" receivable carries the advance as outstanding.
         openTab("Tổng quan")
@@ -996,10 +1009,19 @@ final class AMFinanceUITests: XCTestCase {
             app.navigationBars.staticTexts["Khoản ứng hộ khách"]
                 .waitForExistence(timeout: 5),
             "receivables screen missing")
-        assertVisible(app.staticTexts["An"],
-                      "receivable created by the split missing")
-        assertVisible(app.staticTexts["+900.000 ₫"],
-                      "total outstanding does not show +900.000 ₫")
+        // The client row is one combined element ("An, Cá nhân, +900.000 ₫"),
+        // so match its leading name — BEGINSWITH keeps "Ăn…" words out.
+        let clientRow = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "An"))
+            .firstMatch
+        assertExists(clientRow,
+                     "receivable created by the split missing")
+        // The totals row is one combined element ("Tổng khách đang nợ,
+        // +900.000 ₫"), so the value is matched as a substring on .any.
+        let totalRow = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label CONTAINS %@", "+900.000 ₫")).firstMatch
+        assertExists(totalRow,
+                     "total outstanding does not show +900.000 ₫")
         goBack(to: "Cài đặt")
         goBack(to: "Tổng quan")
 
@@ -1026,10 +1048,12 @@ final class AMFinanceUITests: XCTestCase {
                 .waitForExistence(timeout: 5),
             "repayment sheet missing")
 
-        // Preview shows the amount and the original receiving account.
-        assertVisible(app.staticTexts["300.000 ₫"],
+        // Preview shows the amount and the original receiving account —
+        // matched on identifiers: the same texts render in rows of the
+        // editor and transactions list behind the sheet.
+        assertLabeled("billRepay.amount", "300.000 ₫",
                       "repayment amount missing")
-        assertVisible(app.staticTexts["Tiền mặt"],
+        assertLabeled("billRepay.account", "Tiền mặt",
                       "original receiving account missing")
 
         // Pick the only eligible receivable and confirm the in-place
@@ -1051,8 +1075,8 @@ final class AMFinanceUITests: XCTestCase {
         // row and no duplicate remains.
         waitForDisappearance(app.staticTexts["Thu khác"],
                              message: "income row still listed after conversion")
-        assertVisible(app.staticTexts["An → Tiền mặt"],
-                      "repayment transfer subtitle missing")
+        assertExists(app.staticTexts["An → Tiền mặt"],
+                     "repayment transfer subtitle missing")
     }
 
     // MARK: - Flow helpers
@@ -1278,6 +1302,26 @@ final class AMFinanceUITests: XCTestCase {
         }
     }
 
+    /// Gets the software keyboard out of the way before a sheet closes:
+    /// Return resigns a plain TextField, then a downward drag on the front
+    /// list engages `.scrollDismissesKeyboard(.interactively)` — even when
+    /// the keyboard already reports gone, because a resigned field can
+    /// still leave the keyboard window covering hit points for tens of
+    /// seconds after the sheet dies. The drag is harmless when the window
+    /// really is gone.
+    private func dismissKeyboardInteractively() {
+        guard app.keyboards.element.exists else { return }
+        app.typeText("\n")
+        let scroller = frontScrollable()
+        guard scroller.exists,
+              scroller.elementType != .application else { return }
+        let start = scroller.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08))
+        let end = scroller.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4))
+        start.press(forDuration: 0.05, thenDragTo: end)
+    }
+
     /// Taps a text field (scrolling to it if needed) and types into it.
     private func fillField(_ field: XCUIElement, with text: String) {
         if !reveal(field, maxSwipes: 6) {
@@ -1396,6 +1440,40 @@ final class AMFinanceUITests: XCTestCase {
         element.tap()
     }
 
+    /// Asserts an element is listed — existence is the meaningful check for
+    /// "the row is there" (a row covered by a transient overlay still
+    /// counts, and is materialized already). Only when the element never
+    /// materializes does it fall back to the scrolling reveal.
+    private func assertExists(
+        _ element: XCUIElement,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        if !element.waitForExistence(timeout: 3) {
+            assertVisible(element, message, file: file, line: line)
+        }
+    }
+
+    /// Asserts the element carrying `identifier` is on screen AND labelled
+    /// `label` — `LabeledContent` merges row title and value into one
+    /// accessibility element ("Phần của tôi, 600.000 ₫"), so the value
+    /// matches either the whole label or its trailing ", "-component.
+    private func assertLabeled(
+        _ identifier: String,
+        _ label: String,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let element = scopedElement(identifier)
+        assertVisible(element, message, file: file, line: line)
+        let actual = element.label
+        XCTAssertTrue(
+            actual == label || actual.hasSuffix(", \(label)"),
+            "\(message) — got '\(actual)'", file: file, line: line)
+    }
+
     /// Asserts an element is on screen — scrolls to materialize it first so
     /// no existence timeout is burned on a merely off-screen element.
     private func assertVisible(
@@ -1487,7 +1565,9 @@ final class AMFinanceUITests: XCTestCase {
 
     /// The frontmost hittable list/scroll container — sheets come last in the
     /// accessibility tree, so a presented sheet's Form is preferred over the
-    /// covered root list.
+    /// covered root list. When the software keyboard covers the only list's
+    /// hit point nothing is hittable; the still-visible front scrollable is
+    /// then returned anyway so `swipeUpIfAlive` can drag inside it.
     private func frontScrollable() -> XCUIElement {
         if app.sheets.count > 0 {
             let sheet = app.sheets.element(boundBy: app.sheets.count - 1)
@@ -1497,11 +1577,23 @@ final class AMFinanceUITests: XCTestCase {
                     return candidate
                 }
             }
+            for query in [sheet.collectionViews, sheet.scrollViews] {
+                if let candidate = query.allElementsBoundByIndex
+                    .last(where: { $0.exists }) {
+                    return candidate
+                }
+            }
         }
         for query in [app.collectionViews, app.scrollViews] {
             for index in stride(from: query.count - 1, through: 0, by: -1) {
                 let candidate = query.element(boundBy: index)
                 if candidate.isHittable { return candidate }
+            }
+        }
+        for query in [app.collectionViews, app.scrollViews] {
+            if let candidate = query.allElementsBoundByIndex
+                .last(where: { $0.exists }) {
+                return candidate
             }
         }
         return app
@@ -1538,11 +1630,23 @@ final class AMFinanceUITests: XCTestCase {
     /// Swipes only when the element still resolves — `frontScrollable()`
     /// returns an index-bound element and a push that settles between the
     /// pick and the swipe can drop one of the two lists, turning the
-    /// gesture into an unrecoverable "no matches" failure.
+    /// gesture into an unrecoverable "no matches" failure. A scrollable
+    /// whose hit point is covered (software keyboard up) is dragged inside
+    /// its still-visible top band instead — `swipeUp()` would synthesize
+    /// the gesture at the covered point and land on the overlay.
     private func swipeUpIfAlive(_ element: XCUIElement) {
-        if element.exists {
+        guard element.exists else { return }
+        if element.isHittable {
             element.swipeUp()
+            return
         }
+        guard element.elementType == .scrollView
+            || element.elementType == .collectionView else { return }
+        let start = element.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12))
+        let end = element.coordinate(
+            withNormalizedOffset: CGVector(dx: 0.5, dy: -0.25))
+        start.press(forDuration: 0.05, thenDragTo: end)
     }
 
     /// Waits until `element` exists AND is hittable — taps must not land
