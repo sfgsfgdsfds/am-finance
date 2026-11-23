@@ -565,6 +565,60 @@ struct AICaptureTests {
         #expect(model.modelMessage != nil)
     }
 
+    // MARK: - Mealtime context
+
+    /// 2026-11-24 00:30 UTC = 07:30 in Vietnam — inside bữa sáng.
+    private var breakfastUTC: Date {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        return utc.date(from: DateComponents(
+            year: 2026, month: 11, day: 24, hour: 0, minute: 30))!
+    }
+
+    @Test func captureCarriesMealtimeContextAndOneInstant() async throws {
+        let fixture = try makeFixture()
+        let defaults = try makeDefaults()
+        let box = RequestBox()
+        var nowCalls = 0
+        let model = makeModel(
+            fixture: fixture, defaults: defaults,
+            handler: { request in
+                box.record(request)
+                return AIResponse(
+                    text: """
+                    {"items":[{"kind":"expense","amount":50000,
+                      "note":"Phở sáng","category":"Ăn uống",
+                      "account":"Tiền mặt","confidence":0.9}]}
+                    """,
+                    model: "fake", inputTokens: nil, outputTokens: nil)
+            },
+            now: {
+                defer { nowCalls += 1 }
+                // A second reading would land an hour later — one shared
+                // capture instant keeps prompt and parse aligned.
+                return breakfastUTC.addingTimeInterval(
+                    TimeInterval(nowCalls) * 3600)
+            })
+        model.prompt = "đá tô phở 50K"
+
+        await model.performAnalysis(context: fixture.context)
+
+        #expect(model.phase == .review)
+        #expect(nowCalls == 1)
+        let item = try #require(model.items.first)
+        #expect(item.amount == 50_000)
+        #expect(item.note == "Phở sáng")
+        #expect(item.categoryID == fixture.food.id)
+        #expect(item.accountID == fixture.cash.id)
+        // The missing date defaults to the same instant the prompt
+        // announced — not a second, later clock read.
+        #expect(item.date == breakfastUTC)
+        let system = try #require(box.requests.first?.system)
+        #expect(system.contains("07:30"))
+        #expect(system.contains("đang trong bữa sáng"))
+        #expect(system.contains("05:00–10:59"))
+    }
+
     // MARK: - Rejections
 
     @Test func rejectedRowsAreSurfacedForDisplay() async throws {

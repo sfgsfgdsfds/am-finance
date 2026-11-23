@@ -276,8 +276,11 @@ final class AICaptureModel {
         let userText = trimmed.isEmpty
             ? "Hãy đọc hoá đơn trong ảnh và trích xuất các giao dịch."
             : trimmed
+        // One capture instant for the whole analysis: the prompt's clock,
+        // its mealtime hint and the parser's default date all agree.
+        let capturedAt = now()
         let system = AITransactionExtraction.systemPrompt(
-            for: catalog.promptInput(now: now()))
+            for: catalog.promptInput(now: capturedAt))
         let request = AIRequest.text(
             userText, system: system, images: prepared, jsonMode: true)
 
@@ -287,7 +290,7 @@ final class AICaptureModel {
             // here; nothing stores them.
             images = []
             let result = AITransactionExtraction.parse(
-                response.text, tables: catalog.matchTables(), now: now())
+                response.text, tables: catalog.matchTables(), now: capturedAt)
             apply(result: result)
             guard !result.drafts.isEmpty else {
                 phase = .review
