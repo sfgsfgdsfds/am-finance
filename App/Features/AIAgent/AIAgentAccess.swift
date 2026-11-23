@@ -3,20 +3,21 @@ import Foundation
 /// What the on-device AI agent may do with the local ledger.
 ///
 /// The default is `off`: nothing is readable or writable until the user
-/// grants a level. Both tool entry points re-check the level on every
+/// grants a level. Every tool entry point re-checks the level on every
 /// call, so a revoked or weakened grant fails loudly instead of leaking
 /// or mutating rows. There is no automatic write path at any level —
-/// the highest level only lets the agent *propose* category edits, which
-/// still land solely through the user-confirmed `applyCategoryEdits`.
+/// the highest level only lets the agent *propose* edits, which still
+/// land solely through the user-confirmed `apply` batch.
 enum AIAgentAccess: String, CaseIterable, Sendable {
     /// No ledger access at all — lookup and apply both refuse.
     case off
     /// Bounded, read-only lookup inside the granted date window.
     case scopedRead
-    /// `scopedRead` plus proposing category edits: the confirmed apply
-    /// may re-categorize existing income/expense rows the lookup
-    /// surfaced. Still no model-initiated writes — the batch the user
-    /// confirms is the batch that lands, or nothing does.
+    /// `scopedRead` plus proposing ledger actions: the confirmed apply
+    /// may re-categorize, add, edit and delete rows the lookup
+    /// surfaced (adds need no match). Still no model-initiated writes —
+    /// the batch the user confirms is the batch that lands, or nothing
+    /// does.
     case scopedReadAndProposeCategoryEdits
 
     /// Whether `lookup` may run at all.
@@ -24,6 +25,13 @@ enum AIAgentAccess: String, CaseIterable, Sendable {
 
     /// Whether `applyCategoryEdits` may run.
     var canProposeCategoryEdits: Bool {
+        self == .scopedReadAndProposeCategoryEdits
+    }
+
+    /// Whether `apply(_:permission:in:lookupWindow:)` may run — the
+    /// mixed action batch. Same grant as `canProposeCategoryEdits`:
+    /// the single write level covers every confirmed action kind.
+    var canProposeActions: Bool {
         self == .scopedReadAndProposeCategoryEdits
     }
 }
@@ -38,7 +46,7 @@ enum AIAgentAccess: String, CaseIterable, Sendable {
 struct AIAgentPermission: Equatable, Sendable {
     var access: AIAgentAccess
     /// The user-allowed window. Must not exceed
-    /// `AIAgentLedgerTools.maxWindow` (~3 months); wider grants are
+    /// `AIAgentLedgerTools.maxWindow` (366 days); wider grants are
     /// refused, not silently clipped. Ignored while `access == .off`.
     var window: DateInterval
 

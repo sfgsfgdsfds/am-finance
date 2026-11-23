@@ -249,7 +249,7 @@ struct AIAgentOrchestratorTests {
                 question: "x", permission: .off, in: context)
         }
         let wide = permission(window: DateInterval(
-            start: day(2026, 1, 1, 0), end: day(2026, 6, 1, 0)))
+            start: day(2026, 1, 1, 0), end: day(2027, 2, 1, 0)))
         await #expect(throws: AIAgentError.windowTooWide) {
             _ = try await orchestrator.search(
                 question: "x", permission: wide, in: context)
@@ -650,7 +650,7 @@ struct AIAgentOrchestratorTests {
             #"{"answer":"ok","proposals":{"row":"R1"}}"#)
             == .invalidProposal)
         // Over the cap.
-        let many = (1...31).map {
+        let many = (1...(AIAgentAnalysisPlanner.maxProposals + 1)).map {
             #"{"action":"setCategory","row":"R\#($0)","category":"\#(foodHandle)"}"#
         }.joined(separator: ",")
         #expect(try await rejection(for: reply("[\(many)]"))
@@ -966,7 +966,7 @@ struct AIAgentOrchestratorTests {
         }
         // Oversized grants regress the same way — refused, not clipped.
         let tooWide = permission(window: DateInterval(
-            start: day(2026, 9, 1, 0), end: day(2027, 1, 1, 0)))
+            start: day(2025, 9, 1, 0), end: day(2027, 1, 1, 0)))
         #expect(throws: AIAgentError.windowTooWide) {
             try orchestrator.prepareAnalysis(
                 search, permission: tooWide, in: context)

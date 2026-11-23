@@ -133,8 +133,8 @@ struct AIAgentTests {
         #expect(row.needsReview == false)
     }
 
-    /// A grant wider than ~3 months is refused, not clipped — on both
-    /// tools. Three real calendar months still pass.
+    /// A grant wider than 366 days is refused, not clipped — on both
+    /// tools. A full-year grant still passes.
     @Test func windowTooWideIsRejected() throws {
         let context = try makeContext()
         let (cash, _, food, _) = try seedBasics(in: context)
@@ -143,7 +143,7 @@ struct AIAgentTests {
         let tools = AIAgentLedgerTools()
         let wide = permission(
             window: DateInterval(
-                start: day(2026, 1, 1, 0), end: day(2026, 6, 1, 0)))
+                start: day(2026, 1, 1, 0), end: day(2027, 2, 1, 0)))
 
         #expect(throws: AIAgentError.windowTooWide) {
             _ = try tools.lookup(permission: wide, in: context)
@@ -153,11 +153,11 @@ struct AIAgentTests {
                 [], to: food, permission: wide, in: context)
         }
 
-        // Aug 1 → Nov 1 is 92 days — a full three-month grant works.
-        let threeMonths = permission(
+        // Dec 1 2025 → Dec 1 2026 is 365 days — a full-year grant works.
+        let fullYear = permission(
             window: DateInterval(
-                start: day(2026, 8, 1, 0), end: day(2026, 11, 1, 0)))
-        _ = try tools.lookup(permission: threeMonths, in: context)
+                start: day(2025, 12, 1, 0), end: day(2026, 12, 1, 0)))
+        _ = try tools.lookup(permission: fullYear, in: context)
     }
 
     /// The query interval may narrow the grant, never escape it.
@@ -314,13 +314,13 @@ struct AIAgentTests {
         #expect(result.matches.allSatisfy { $0.preview.unclassified })
     }
 
-    /// The result cap and the bounded scan are app-controlled: 35
-    /// matching rows return 30 newest-first with `truncated`, and a
-    /// shrunken scan bound shortens the search honestly.
+    /// The result cap and the bounded scan are app-controlled: 55
+    /// matching rows return `resultLimit` newest-first with `truncated`,
+    /// and a shrunken scan bound shortens the search honestly.
     @Test func lookupCapsResultsAndMarksTruncation() throws {
         let context = try makeContext()
         let (cash, _, _, _) = try seedBasics(in: context)
-        for index in 1...35 {
+        for index in 1...55 {
             seed(in: context, amount: Int64(index) * 10_000,
                  date: day(2026, 11, 1, 0)
                      .addingTimeInterval(TimeInterval(index * 60)),
@@ -332,9 +332,9 @@ struct AIAgentTests {
             permission: permission(), in: context)
         #expect(capped.matches.count == AIAgentLedgerTools.resultLimit)
         #expect(capped.truncated)
-        #expect(capped.scanned == 35)
-        // Newest first — row 35 was inserted last in the window.
-        #expect(capped.matches.first?.preview.note == "Row 35")
+        #expect(capped.scanned == 55)
+        // Newest first — row 55 was inserted last in the window.
+        #expect(capped.matches.first?.preview.note == "Row 55")
 
         let tiny = try AIAgentLedgerTools(scanLimit: 5).lookup(
             permission: permission(), in: context)
@@ -693,7 +693,7 @@ struct AIAgentTests {
             .saveFailed(URLError(.cannotConnectToHost)),
             .unparseableModelReply, .unsupportedTool, .malformedQuery,
             .unknownHandle, .invalidProposal, .tooManyProposals,
-            .staleCategory,
+            .staleCategory, .tooManyActions, .invalidDraft, .invalidEdit,
         ]
         for error in cases {
             #expect(error.errorDescription?.isEmpty == false)
@@ -753,14 +753,15 @@ struct AIAgentTests {
             now: day(2026, 11, 20), calendar: calendar)
             == "Ngày kết thúc phải bằng hoặc sau ngày bắt đầu.")
 
-        // Exactly at the ~3-month bound is allowed.
+        // Exactly at the ~3-month bound is allowed — the picker's own
+        // cap, tighter than the tools' `maxWindow`.
         selection = AIAgentWindowSelection(
             kind: .custom,
             customStart: day(2026, 8, 10),
             customEnd: day(2026, 11, 10))
         #expect(selection.interval(
             now: day(2026, 11, 20), calendar: calendar)?.duration
-            == AIAgentLedgerTools.maxWindow)
+            == AIAgentWindowSelection.maxCustomWindow)
         #expect(selection.errorText(
             now: day(2026, 11, 20), calendar: calendar) == nil)
 

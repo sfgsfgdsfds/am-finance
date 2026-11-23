@@ -2,8 +2,8 @@ import Foundation
 
 /// The bounded date windows the agent sheet offers. Every option resolves
 /// to a half-open `DateInterval` of whole Vietnam-local days and can never
-/// exceed `AIAgentLedgerTools.maxWindow` (~3 months) — the tools refuse
-/// anything wider, so the picker never offers it.
+/// exceed `AIAgentWindowSelection.maxCustomWindow` (~3 months) — a
+/// deliberate picker bound, tighter than the tools' `maxWindow`.
 enum AIAgentWindowKind: String, CaseIterable, Sendable {
     /// The calendar month containing `now`.
     case thisMonth
@@ -29,6 +29,11 @@ enum AIAgentWindowKind: String, CaseIterable, Sendable {
 /// The picker's editable state: the preset plus the two custom days.
 /// Pure value type — every computation takes `now` and the calendar.
 struct AIAgentWindowSelection: Equatable, Sendable {
+    /// The widest `.custom` range the picker allows — kept at ~3 months
+    /// on purpose even though `AIAgentLedgerTools.maxWindow` grew: the
+    /// legacy sheet's picker stays a small, day-granularity choice.
+    nonisolated static let maxCustomWindow: TimeInterval = 93 * 86_400
+
     var kind: AIAgentWindowKind = .thisMonth
     /// First day of a `.custom` range — ignored by the presets.
     var customStart: Date
@@ -70,7 +75,7 @@ struct AIAgentWindowSelection: Equatable, Sendable {
                   let end = calendar.date(byAdding: .day, value: 1, to: last)
             else { return nil }
             let interval = DateInterval(start: start, end: end)
-            guard interval.duration <= AIAgentLedgerTools.maxWindow
+            guard interval.duration <= Self.maxCustomWindow
             else { return nil }
             return interval
         }
