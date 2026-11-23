@@ -159,24 +159,22 @@ struct AICaptureView: View {
                     thumbnails
                 }
 
-                HStack(spacing: 16) {
-                    if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                        Button {
-                            showsCamera = true
-                        } label: {
-                            Label("Chụp ảnh", systemImage: "camera.fill")
-                        }
-                        .disabled(!canAddImage)
-                    }
-                    PhotosPicker(
-                        selection: $photoSelection,
-                        maxSelectionCount: max(1, remainingPhotoSlots),
-                        matching: .images
-                    ) {
-                        Label("Thư viện ảnh", systemImage: "photo.on.rectangle")
+                if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                    Button {
+                        showsCamera = true
+                    } label: {
+                        Label("Chụp ảnh", systemImage: "camera.fill")
                     }
                     .disabled(!canAddImage)
                 }
+                PhotosPicker(
+                    selection: $photoSelection,
+                    maxSelectionCount: max(1, remainingPhotoSlots),
+                    matching: .images
+                ) {
+                    Label("Thư viện ảnh", systemImage: "photo.on.rectangle")
+                }
+                .disabled(!canAddImage)
             } header: {
                 Text("Hoá đơn & mô tả")
             } footer: {
