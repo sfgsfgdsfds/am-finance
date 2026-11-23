@@ -117,6 +117,33 @@ struct AIExtractionResult: Sendable, Equatable {
     var message: String?
 }
 
+/// Vietnamese mealtime buckets the extraction prompt offers the model when
+/// a *typed* food/drink line carries no explicit time or meal. Simple
+/// non-overlapping wall-clock ranges in the Vietnam calendar; late-night
+/// and early-morning hours stay neutral so no meal is inferred.
+enum AIMealtime: String, Sendable {
+    case sang = "sáng"
+    case trua = "trưa"
+    case chieu = "chiều"
+    case toi = "tối"
+
+    /// The bucket `date`'s Vietnam hour falls into — sáng 05–10,
+    /// trưa 11–13, chiều 14–17, tối 18–22 — or nil for the neutral
+    /// 23:00–04:59 stretch.
+    static func at(
+        _ date: Date,
+        calendar: Calendar = AppCalendar.vietnam
+    ) -> AIMealtime? {
+        switch calendar.component(.hour, from: date) {
+        case 5...10: return .sang
+        case 11...13: return .trua
+        case 14...17: return .chieu
+        case 18...22: return .toi
+        default: return nil
+        }
+    }
+}
+
 /// Builds the extraction system prompt (bill photo and/or typed sentence →
 /// transactions) and parses the model's JSON reply into validated drafts.
 enum AITransactionExtraction {
@@ -144,10 +171,19 @@ enum AITransactionExtraction {
                 + "thành các giao dịch.")
         let day = AppDateFormat.shortDate(input.now, calendar: calendar)
         let weekday = calendar.component(.weekday, from: input.now)
+        let clock = AppDateFormat.time(input.now, calendar: calendar)
+        let meal = AIMealtime.at(input.now, calendar: calendar)
         parts.append(
             "Hôm nay là \(weekday == 1 ? "Chủ nhật" : "thứ \(weekday)"), \(day), "
                 + "múi giờ Asia/Ho_Chi_Minh (UTC+7). "
                 + "Ngày tương đối (hôm nay, hôm qua, thứ 6 tuần trước…) quy về múi giờ này.")
+        parts.append(
+            "Bây giờ là \(clock) giờ Việt Nam — "
+                + (meal.map { "đang trong bữa \($0.rawValue)" }
+                     ?? "ngoài khung bữa ăn")
+                + ". Khung bữa không chồng nhau: 05:00–10:59 sáng, "
+                + "11:00–13:59 trưa, 14:00–17:59 chiều, 18:00–22:59 tối; "
+                + "giờ còn lại trung tính.")
         if !input.expenseCategories.isEmpty {
             parts.append(
                 "Danh mục CHI hợp lệ: " + input.expenseCategories.joined(separator: ", "))
@@ -169,6 +205,15 @@ enum AITransactionExtraction {
         parts.append(
             "Tiền là đồng Việt Nam, số nguyên không phần thập phân. Hiểu cả cách nói tắt: "
                 + "85k = 85.000, 1tr2 = 1.200.000, 2 củ = 2.000.000, 3,5 tỷ = 3.500.000.000.")
+        parts.append(
+            """
+            Bữa ăn CHỈ gợi ý cho món ăn/thức uống trong câu người dùng GÕ (gắn một danh mục ăn uống có sẵn — không tạo danh mục mới):
+            - Câu không nêu giờ hay bữa và giao dịch là hôm nay: note ngắn có thể kèm bữa hiện tại — "đá tô phở 50K" vào bữa sáng → note "Phở sáng".
+            - Câu nói rõ giờ hoặc bữa ("phở sáng", "cơm trưa", "cf chiều", "ăn tối 19h30"): theo đúng lời người dùng — không ghi đè.
+            - Giao dịch ngày trước thiếu giờ, hoặc câu mơ hồ/không chắc: note trung tính — không đoán bữa theo giờ gửi câu.
+            - Ảnh hoá đơn/bill: ngày giờ và tên món in trên bill luôn được ưu tiên — không suy ra bữa từ giờ chụp.
+            - Khoản ngoài ăn uống (mua sắm, dịch vụ…): giữ note trung tính, không gắn bữa.
+            """)
         parts.append(
             """
             Chỉ trả lời bằng JSON đúng dạng sau, không thêm lời nào khác:
