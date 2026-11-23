@@ -6,8 +6,8 @@ import FinanceCore
 /// One visible chat entry: a user message, an assistant answer, or a
 /// short tool-activity line ("Đã tìm 12 giao dịch") marking that the
 /// agent read the ledger locally.
-struct AIAgentChatMessage: Equatable, Sendable, Identifiable {
-    enum Kind: Equatable, Sendable {
+struct AIAgentChatMessage: Equatable, Sendable, Identifiable, Codable {
+    enum Kind: Equatable, Sendable, Codable {
         case user
         case assistant
         /// A local tool ran — the entry summarizes it for the UI.
@@ -23,16 +23,6 @@ struct AIAgentChatMessage: Equatable, Sendable, Identifiable {
         self.kind = kind
         self.text = text
     }
-}
-
-/// One transcript entry — what actually rides in `AIRequest`s. Tool
-/// calls and answers keep the model's raw JSON reply so it can reason
-/// over its own calls; `isToolResult` marks the entries the trimmer
-/// drops before real turns (the newest one is never dropped).
-private struct AIAgentChatTranscriptEntry: Equatable, Sendable {
-    var role: AIRole
-    var text: String
-    var isToolResult = false
 }
 
 /// The chat-style agent session: the user types one message and the
@@ -107,6 +97,13 @@ final class AIAgentChatSession {
     var maxToolSteps: Int
     var maxCorrections: Int
 
+    /// Fires when a turn ends — an answer, a parked proposal, an error
+    /// or a `stop()` — plus after `confirmProposal()` and
+    /// `discardProposal()`, so an owner can auto-save `snapshot()`
+    /// without watching keystroke-level mutations: a handful of calls
+    /// per turn, never one per streamed entry.
+    var onStateChange: (@MainActor () -> Void)?
+
     private let client: any AIChatClientProtocol
     private let tools: AIAgentLedgerTools
     private let context: ModelContext
@@ -117,7 +114,7 @@ final class AIAgentChatSession {
 
     /// The model-bound transcript — a superset of `messages` that also
     /// carries the raw JSON replies and the tool results.
-    private var transcript: [AIAgentChatTranscriptEntry] = []
+    private var transcript: [AIAgentTranscriptEntry] = []
     /// `R…` handle → the lookup match it names. Stable across turns —
     /// the same transaction never earns a second handle; write-action
     /// proposals resolve through this map.
@@ -171,7 +168,8 @@ final class AIAgentChatSession {
         characterBudget: Int = AIAgentChatSession.defaultCharacterBudget,
         contextCharBudget: Int = AIFinanceContextBuilder.defaultCharacterBudget,
         maxToolSteps: Int = AIAgentChatSession.defaultMaxToolSteps,
-        maxCorrections: Int = AIAgentChatSession.defaultMaxCorrections
+        maxCorrections: Int = AIAgentChatSession.defaultMaxCorrections,
+        restoring state: AIAgentConversationState? = nil
     ) {
         self.client = client
         self.tools = tools
@@ -185,6 +183,7 @@ final class AIAgentChatSession {
         self.contextCharBudget = max(0, contextCharBudget)
         self.maxToolSteps = max(0, maxToolSteps)
         self.maxCorrections = max(0, maxCorrections)
+        if let state { restore(state) }
     }
 
     /// The lookup match an `R…` handle names — the map the write-action
@@ -198,6 +197,58 @@ final class AIAgentChatSession {
     var canRetry: Bool {
         !isWorking && error != nil && !transcript.isEmpty
     }
+
+    // MARK: - Conversation persistence
+
+    /// A persistable copy of the conversation: the visible messages,
+    /// the model-bound transcript and the full handle numbering so a
+    /// restored session keeps the same `R…`/`A…`/`C…` map. Live
+    /// matches, match windows, the pending proposal, errors and
+    /// in-flight work are never part of a snapshot.
+    func snapshot() -> AIAgentConversationState {
+        AIAgentConversationState(
+            messages: messages,
+            transcript: transcript,
+            handleByTransactionID: handleByTransactionID,
+            nextHandleNumber: nextHandleNumber,
+            accountHandles: accountHandles,
+            categoryHandles: categoryHandles,
+            nextAccountHandle: nextAccountHandle,
+            nextCategoryHandle: nextCategoryHandle)
+    }
+
+    /// Rebuilds a persisted conversation — messages, transcript and
+    /// the handle maps come back exactly as saved, EXCEPT live
+    /// matches: every restored `R…` handle keeps its number but
+    /// resolves to no match until a fresh `search` returns that
+    /// transaction and re-mints it under the SAME handle (the refresh
+    /// path post-apply invalidation already uses). One transcript
+    /// note tells the model. A restored conversation never has a
+    /// pending proposal, an error or in-flight work.
+    private func restore(_ state: AIAgentConversationState) {
+        guard state.version == AIAgentConversationState.currentVersion
+        else { return }
+        messages = state.messages
+        transcript = state.transcript
+        handleByTransactionID = state.handleByTransactionID
+        nextHandleNumber = max(1, state.nextHandleNumber)
+        accountHandles = state.accountHandles
+        categoryHandles = state.categoryHandles
+        nextAccountHandle = max(1, state.nextAccountHandle)
+        nextCategoryHandle = max(1, state.nextCategoryHandle)
+        transcript.append(.init(
+            role: .user, text: Self.restoredTranscriptNote))
+    }
+
+    /// The transcript note appended on restore: earlier `R…` handles
+    /// kept their numbers but carry no live match — a fresh `search`
+    /// must re-mint them before `actions` can touch those rows.
+    static let restoredTranscriptNote =
+        "[HỆ THỐNG — cuộc trò chuyện đã khôi phục] Các handle R… từ "
+        + "phần trước của cuộc trò chuyện chưa trỏ tới trạng thái hiện "
+        + "tại — phải gọi \"search\" lại để lấy trạng thái mới trước "
+        + "khi dùng chúng trong \"actions\" (handle giữ nguyên cho "
+        + "cùng giao dịch)."
 
     /// Appends the question and starts the loop. Ignores blank text
     /// and any send while a turn is already running; a still-pending
@@ -269,6 +320,7 @@ final class AIAgentChatSession {
                     + " Đợt đề xuất đã bị huỷ — hãy tra cứu lại và đề "
                     + "xuất lại nếu người dùng vẫn muốn."))
         }
+        onStateChange?()
     }
 
     /// Drops the pending proposal untouched and records the decline in
@@ -280,6 +332,7 @@ final class AIAgentChatSession {
             role: .user,
             text: AIAgentChatProtocol.declinedPrefix
                 + " Người dùng đã từ chối đề xuất — không có gì được ghi."))
+        onStateChange?()
     }
 
     /// Resets every piece of pending state together — the proposal,
@@ -376,8 +429,13 @@ final class AIAgentChatSession {
         workTask = Task {
             // One task runs at a time (send is gated on `isWorking`),
             // so cleanup is unconditional — the generation check inside
-            // `run` guards the OUTPUT, not this block.
-            defer { isWorking = false; workTask = nil }
+            // `run` guards the OUTPUT, not this block. The hook fires
+            // for every turn end: answer, parked proposal, error, stop.
+            defer {
+                isWorking = false
+                workTask = nil
+                onStateChange?()
+            }
             do {
                 try await run(ticket: ticket)
             } catch is CancellationError {
@@ -1159,7 +1217,7 @@ final class AIAgentChatSession {
     /// tool results go first (the newest one is never dropped), then
     /// the oldest remaining turns — the newest entry always survives,
     /// hard-truncated if the protected entries alone bust the budget.
-    private func trimmedTranscript() -> [AIAgentChatTranscriptEntry] {
+    private func trimmedTranscript() -> [AIAgentTranscriptEntry] {
         var kept = transcript
         var total = kept.reduce(0) { $0 + $1.text.count }
 
