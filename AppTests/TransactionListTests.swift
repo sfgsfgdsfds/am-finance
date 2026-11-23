@@ -371,4 +371,114 @@ struct TransactionListTests {
         let fetched = try context.fetch(descriptor)
         #expect(fetched.map(\.amount) == [3, 2])
     }
+
+    // MARK: - Scope strip
+
+    @Test func unclassifiedScopeHoldsNilCategoryAndReviewRows() {
+        let classified = row(date: date(2026, 11, 20),
+                             categoryID: UUID(), categoryName: "Ăn uống")
+        let loose = row(date: date(2026, 11, 21))
+        // A needsReview row keeps queueing even with a category set —
+        // the review flag, not the nil, is what matters.
+        let reviewWithCategory = row(date: date(2026, 11, 22),
+                                     needsReview: true,
+                                     categoryID: UUID(), categoryName: "Di chuyển")
+        let reviewNoCategory = row(date: date(2026, 11, 23), needsReview: true)
+        let transfer = row(kind: .transfer, date: date(2026, 11, 24))
+        let rows = [classified, loose, reviewWithCategory, reviewNoCategory, transfer]
+
+        let kept = rows.filter(TransactionListScope.unclassified.matches)
+        #expect(kept == [loose, reviewWithCategory, reviewNoCategory])
+        // A transfer never lands in the queue just for lacking a category.
+        #expect(!TransactionListScope.unclassified.matches(transfer))
+    }
+
+    @Test func transfersScopeHoldsOnlyTransfers() {
+        let transfer = row(kind: .transfer, date: date(2026, 11, 20))
+        let expense = row(date: date(2026, 11, 21))
+        let income = row(kind: .income, date: date(2026, 11, 22),
+                         categoryID: UUID(), categoryName: "Lương")
+        let rows = [transfer, expense, income]
+
+        #expect(rows.filter(TransactionListScope.transfers.matches) == [transfer])
+    }
+
+    @Test func categoryScopeKeepsOnlyClassifiedRowsOfThatCategory() {
+        let food = UUID(), fuel = UUID()
+        let rows = [
+            row(date: date(2026, 11, 20), categoryID: food),
+            row(date: date(2026, 11, 21), categoryID: fuel),
+            // Same category but still in review — stays in the queue.
+            row(date: date(2026, 11, 22), needsReview: true, categoryID: food),
+            row(kind: .transfer, date: date(2026, 11, 23)),
+            row(date: date(2026, 11, 24)),
+        ]
+
+        let kept = rows.filter(TransactionListScope.category(food).matches)
+        #expect(kept.count == 1)
+        #expect(kept.first?.categoryID == food)
+    }
+
+    @Test func allScopeKeepsEveryKind() {
+        let rows = [
+            row(date: date(2026, 11, 20)),
+            row(kind: .income, date: date(2026, 11, 21)),
+            row(kind: .transfer, date: date(2026, 11, 22)),
+            row(date: date(2026, 11, 23), needsReview: true),
+            row(date: date(2026, 11, 24), categoryID: UUID()),
+        ]
+        #expect(rows.filter(TransactionListScope.all.matches) == rows)
+        #expect(TransactionListScope.all.showsMonthTotals)
+        #expect(!TransactionListScope.unclassified.showsMonthTotals)
+    }
+
+    @Test func scopeItemsListOnlyUsedCategoriesPlusPinned() throws {
+        let context = try makeContext()
+        let food = LedgerCategory(name: "Ăn uống", kind: .expense, sortOrder: 0)
+        let fuel = LedgerCategory(name: "Di chuyển", kind: .expense, sortOrder: 1)
+        let unused = LedgerCategory(name: "Mua sắm", kind: .expense, sortOrder: 2)
+        let cash = Account(name: "Tiền mặt", kind: .cash)
+        for category in [food, fuel, unused] { context.insert(category) }
+        context.insert(cash)
+        // Classified row → chip. needsReview rows and transfers never
+        // produce a chip on their own.
+        context.insert(LedgerTransaction(
+            kind: .expense, amount: 1, date: .now,
+            account: cash, category: food))
+        context.insert(LedgerTransaction(
+            kind: .expense, amount: 2, date: .now,
+            account: cash, category: unused, needsReview: true))
+        context.insert(LedgerTransaction(
+            kind: .transfer, amount: 3, date: .now,
+            account: cash, toAccount: cash))
+        let transactions = try context.fetch(
+            FetchDescriptor<LedgerTransaction>())
+        let all = [food, fuel, unused]
+
+        let items = TransactionListScopes.categoryItems(
+            in: transactions, categories: all)
+        // Only "Ăn uống" — never one chip per seeded-but-unused category.
+        #expect(items.map(\.id) == [food.id])
+        #expect(items.first?.name == "Ăn uống")
+
+        // The selected category stays pinned even when this slice has no
+        // rows for it — and it keeps the categories' sort order.
+        let pinnedItems = TransactionListScopes.categoryItems(
+            in: transactions, categories: all, pinned: fuel.id)
+        #expect(pinnedItems.map(\.id) == [food.id, fuel.id])
+    }
+
+    @Test func resolvingResetsOnlyWhenCategoryIsGone() {
+        let food = LedgerCategory(name: "Ăn uống", kind: .expense)
+        // Still resolvable → passes through, even with no rows this month.
+        #expect(TransactionListScopes.resolving(
+            .category(food.id), categories: [food]) == .category(food.id))
+        // Deleted entirely → intentional reset to the default queue.
+        #expect(TransactionListScopes.resolving(
+            .category(UUID()), categories: [food]) == .unclassified)
+        // Non-category scopes are never touched.
+        #expect(TransactionListScopes.resolving(.all, categories: []) == .all)
+        #expect(TransactionListScopes.resolving(
+            .transfers, categories: []) == .transfers)
+    }
 }

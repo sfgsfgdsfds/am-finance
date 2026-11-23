@@ -3,8 +3,10 @@ import SwiftData
 import FinanceCore
 
 /// The transactions tab: a month-by-month, searchable, filterable history
-/// of every money movement. Owns its NavigationStack; adding, editing and
-/// filtering all happen in sheets.
+/// of every money movement, browsed through the scope strip — the
+/// unclassified queue by default, category tabs for classified rows,
+/// transfers and the combined "Tất cả". Owns its NavigationStack; adding,
+/// editing and filtering all happen in sheets.
 struct TransactionsView: View {
     @Environment(\.modelContext) private var modelContext
 
@@ -77,7 +79,6 @@ struct TransactionsView: View {
                 TransactionListFilterSheet(
                     filter: $filter,
                     accounts: accounts,
-                    categories: categories,
                     businesses: businesses
                 )
             }
@@ -115,12 +116,16 @@ struct TransactionsView: View {
 /// a new month range or search mode so `@Query` refetches: without search
 /// only the visible month is loaded (date-range predicate); while a search
 /// text is present every month is scanned and the visible result is capped
-/// at `TransactionListSearch.resultCap` rows.
+/// at `TransactionListSearch.resultCap` rows. Its `scope` state is stable
+/// across those re-inits — the view identity never changes.
 struct TransactionListContent: View {
     @Query private var transactions: [LedgerTransaction]
 
     @Binding var monthAnchor: Date
     @Binding var filter: TransactionListFilter
+    /// Browsing scope of the strip — survives re-init because this view's
+    /// identity is stable across month and search changes.
+    @State private var scope: TransactionListScope = .unclassified
     let searching: Bool
     let searchText: String
     let accounts: [Account]
@@ -176,6 +181,7 @@ struct TransactionListContent: View {
             if !searching {
                 monthHeader(scan.rows)
             }
+            scopeStrip
             if !chips.isEmpty {
                 chipBar
             }
@@ -190,6 +196,26 @@ struct TransactionListContent: View {
         Dictionary(transactions.map { ($0.id, $0) }) { first, _ in first }
     }
 
+    /// The scope actually rendered: a category selection whose category
+    /// was deleted resets to the default queue — anything still resolvable
+    /// passes through so the strip can pin it.
+    private var resolvedScope: TransactionListScope {
+        TransactionListScopes.resolving(scope, categories: categories)
+    }
+
+    /// One tab per category used by a classified row in the loaded slice —
+    /// seeded categories with no history never get a chip. The selected
+    /// category stays pinned when this slice has no rows for it, so the
+    /// selection stays readable next to its empty state.
+    private var scopeItems: [TransactionListScopeItem] {
+        var pinned: UUID? {
+            if case .category(let id) = resolvedScope { return id }
+            return nil
+        }
+        return TransactionListScopes.categoryItems(
+            in: transactions, categories: categories, pinned: pinned)
+    }
+
     /// Matched rows plus whether the full scan had more than the cap.
     /// While searching the query folds once and iteration stops at
     /// `resultCap + 1` matches, so a 30k-row ledger never materializes the
@@ -197,10 +223,12 @@ struct TransactionListContent: View {
     /// feeds the month totals, the sections and the cap notice.
     private var matchedScan: (rows: [TransactionListRow], capped: Bool) {
         let query = TransactionListSearch.normalizedQuery(searchText)
+        let scope = resolvedScope
         var iterator = transactions.lazy
             .map { TransactionListRow(transaction: $0) }
             .filter { row in
-                filter.matches(row)
+                scope.matches(row)
+                    && filter.matches(row)
                     && (!searching
                         || TransactionListSearch.matches(
                             row, query: query,
@@ -254,22 +282,26 @@ struct TransactionListContent: View {
                 .accessibilityLabel("Tháng sau")
             }
 
-            HStack(spacing: 0) {
-                totalCell(
-                    "Thu",
-                    TransactionListGrouping.incomeTotal(of: rows),
-                    kind: .income
-                )
-                totalCell(
-                    "Chi",
-                    TransactionListGrouping.expenseTotal(of: rows),
-                    kind: .expense
-                )
-                totalCell(
-                    "Chênh lệch",
-                    TransactionListGrouping.netTotal(of: rows),
-                    kind: nil
-                )
+            // The combined Thu/Chi/Chênh lệch summary belongs to "Tất cả"
+            // only — the scoped queues keep just the month switcher.
+            if resolvedScope.showsMonthTotals {
+                HStack(spacing: 0) {
+                    totalCell(
+                        "Thu",
+                        TransactionListGrouping.incomeTotal(of: rows),
+                        kind: .income
+                    )
+                    totalCell(
+                        "Chi",
+                        TransactionListGrouping.expenseTotal(of: rows),
+                        kind: .expense
+                    )
+                    totalCell(
+                        "Chênh lệch",
+                        TransactionListGrouping.netTotal(of: rows),
+                        kind: nil
+                    )
+                }
             }
         }
         .padding(16)
@@ -302,6 +334,82 @@ struct TransactionListContent: View {
     private func shiftMonth(_ offset: Int) {
         monthAnchor = TransactionListGrouping.shiftingMonth(
             of: monthAnchor, by: offset)
+    }
+
+    // MARK: - Scope strip
+
+    /// The always-visible browsing scopes: the unclassified queue first
+    /// (it is the default), the combined history and transfers one tap
+    /// away, then one tab per category used in the loaded slice. The strip
+    /// scrolls horizontally so long category lists never crowd the rows.
+    private var scopeStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                scopeChip(
+                    .unclassified,
+                    title: "Chưa phân loại",
+                    symbol: TransactionListRow.uncategorizedSymbol,
+                    colorHex: TransactionListRow.uncategorizedColorHex,
+                    identifier: "txList.scope.unclassified")
+                scopeChip(
+                    .all,
+                    title: "Tất cả",
+                    symbol: nil,
+                    colorHex: "",
+                    identifier: "txList.scope.all")
+                scopeChip(
+                    .transfers,
+                    title: "Chuyển khoản",
+                    symbol: TransactionListRow.transferSymbol,
+                    colorHex: TransactionListRow.transferColorHex,
+                    identifier: "txList.scope.transfers")
+                ForEach(scopeItems) { item in
+                    scopeChip(
+                        .category(item.id),
+                        title: item.name,
+                        symbol: item.icon.isEmpty ? nil : item.icon,
+                        colorHex: item.colorHex,
+                        identifier:
+                            "txList.scope.category.\(item.id.uuidString)")
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
+        .accessibilityIdentifier("txList.scopeStrip")
+    }
+
+    private func scopeChip(
+        _ chipScope: TransactionListScope,
+        title: String,
+        symbol: String?,
+        colorHex: String,
+        identifier: String
+    ) -> some View {
+        let selected = resolvedScope == chipScope
+        return Button { scope = chipScope } label: {
+            HStack(spacing: 5) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(
+                            selected ? Color.white : Color(hex: colorHex))
+                }
+                Text(title)
+                    .lineLimit(1)
+            }
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .foregroundStyle(selected ? Color.white : .primary)
+            .background(
+                selected ? Color.accentColor : Color(.tertiarySystemFill),
+                in: Capsule()
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     // MARK: - Active filter chips
@@ -472,13 +580,49 @@ struct TransactionListContent: View {
                 title: "Không tìm thấy giao dịch",
                 message: "Không có giao dịch nào khớp. Thử đổi từ khoá hoặc xoá bộ lọc."
             )
-        } else {
+        } else if transactions.isEmpty {
             EmptyStateView(
                 symbol: "arrow.left.arrow.right",
                 title: "Chưa có giao dịch",
                 message: "Tháng này chưa có giao dịch nào.",
                 actionTitle: "Thêm giao dịch",
                 action: onAdd
+            )
+        } else {
+            scopeEmptyState
+        }
+    }
+
+    /// The slice has rows but the selected scope has none — a readable,
+    /// contextual empty state rather than invisible filtering.
+    @ViewBuilder private var scopeEmptyState: some View {
+        switch resolvedScope {
+        case .unclassified:
+            EmptyStateView(
+                symbol: "checkmark.circle",
+                title: "Không còn gì chờ phân loại",
+                message: "Tất cả giao dịch tháng này đã có danh mục.",
+                actionTitle: "Xem tất cả",
+                action: { scope = .all }
+            )
+        case .transfers:
+            EmptyStateView(
+                symbol: "arrow.left.arrow.right",
+                title: "Chưa có chuyển khoản",
+                message: "Tháng này không có giao dịch chuyển khoản nào."
+            )
+        case .category(let id):
+            let name = categories.first { $0.id == id }?.name ?? ""
+            EmptyStateView(
+                symbol: "tag",
+                title: "Danh mục trống",
+                message: "Không có giao dịch nào trong \"\(name)\" tháng này."
+            )
+        case .all:
+            EmptyStateView(
+                symbol: "arrow.left.arrow.right",
+                title: "Chưa có giao dịch",
+                message: "Tháng này chưa có giao dịch nào."
             )
         }
     }

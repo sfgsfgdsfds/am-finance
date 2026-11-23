@@ -108,7 +108,10 @@ workers know what already exists. Pushed views must not create their own
 - `Settings/` — `SettingsView` (hub) + `CategoriesListView`, `BusinessesListView`, `BusinessEditView`, `CategoryEditView`.
 - `SpendingShare/` — `SpendingShareCard(interval:title:)` (dashboard, "Tỉ lệ chi tiêu tháng này") and `SpendingShareSection(interval:scope:kind:onSelectCategory:onSelectBusiness:)` (reports donuts, drill-down by slice); off-main aggregation in `SpendingShareBuilder`, chart in `App/Shared/ShareDonutChart.swift`.
 - `TransactionEditor/` — `TransactionEditorView` (quick-add and edit sheet).
-- `Transactions/` — `TransactionsView` ("Giao dịch" tab).
+- `Transactions/` — `TransactionsView` ("Giao dịch" tab) with the
+  `TransactionListScope` strip (`txList.scope.*` AX ids): "Chưa phân loại"
+  default queue, "Tất cả" (only scope showing the month Thu/Chi summary),
+  "Chuyển khoản", one tab per used category.
 - `WalletLink/` — `WalletLinkSettingsView` (OIDC sign-in to wallet.amx.vn via auth.amx.vn).
 - `WalletSync/` — `WalletSyncAccountsView`, `WalletSyncInboxView`, `WalletSyncRulesView`, `WalletSyncStatusBanner`, `.walletSyncAutoRefresh()` modifier; shared `WalletSyncCoordinator` created in `AMFinanceApp`.
 

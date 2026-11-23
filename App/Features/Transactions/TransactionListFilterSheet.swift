@@ -4,12 +4,12 @@ import FinanceCore
 
 /// The filter form for the transactions list. Edits the shared
 /// `TransactionListFilter` binding live, so the chips and the list update
-/// as the user taps. Archived accounts/categories/businesses stay
-/// selectable — their history still exists.
+/// as the user taps. Archived accounts/businesses stay selectable — their
+/// history still exists. Category browsing lives on the scope strip, so
+/// the sheet offers no competing category filter.
 struct TransactionListFilterSheet: View {
     @Binding var filter: TransactionListFilter
     let accounts: [Account]
-    let categories: [LedgerCategory]
     let businesses: [Business]
 
     @Environment(\.dismiss) private var dismiss
@@ -43,9 +43,6 @@ struct TransactionListFilterSheet: View {
                         }
                     }
                 }
-
-                categorySection(kind: .expense, title: "Danh mục chi")
-                categorySection(kind: .income, title: "Danh mục thu")
 
                 Section("Kinh doanh") {
                     optionRow("Tất cả", selected: filter.business == .any) {
@@ -100,25 +97,6 @@ struct TransactionListFilterSheet: View {
         .presentationDetents([.medium, .large])
     }
 
-    @ViewBuilder
-    private func categorySection(kind: CategoryKind, title: String) -> some View {
-        let rows = categories.filter { $0.kind == kind }
-        if !rows.isEmpty {
-            Section(title) {
-                ForEach(rows, id: \.id) { category in
-                    optionRow(
-                        category.name,
-                        symbol: category.icon,
-                        colorHex: category.colorHex,
-                        selected: filter.categoryID == category.id
-                    ) {
-                        filter.categoryID = category.id
-                    }
-                }
-            }
-        }
-    }
-
     private func optionRow(
         _ title: String,
         symbol: String? = nil,
@@ -156,7 +134,6 @@ struct TransactionListFilterSheet: View {
     return TransactionListFilterSheet(
         filter: $filter,
         accounts: try! context.fetch(FetchDescriptor<Account>()),
-        categories: try! context.fetch(FetchDescriptor<LedgerCategory>()),
         businesses: try! context.fetch(FetchDescriptor<Business>())
     )
 }

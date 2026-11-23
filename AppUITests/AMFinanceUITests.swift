@@ -4,16 +4,18 @@ import XCTest
 /// with `-uiTestInMemoryStore` — a throwaway, seeded in-memory SwiftData
 /// store — so real user data is never touched.
 ///
-/// The suite is grouped into seven launches instead of one per flow — each
+/// The suite is grouped into eight launches instead of one per flow — each
 /// launch costs ~10-15 s of simulator + app idle time, so steps that can share
 /// a store run together. Covers: the four tabs, quick-add (expense and
 /// income), edit/delete, settings screens, accounts/cards/loans, debts,
 /// reports, the second-pass feature wiring (wallet link/sync, budgets,
 /// recurring, reminders, app lock, business hub, receivables, balance
 /// trend), the third-pass features (room rentals, CSV import, the
-/// rent-collection and bank-transaction reminder switches) and the
-/// personal bill split (equal-share preview, own-share expense, advance
-/// transfer). Vietnamese UI, VND amounts ("150.000 ₫").
+/// rent-collection and bank-transaction reminder switches), the personal
+/// bill split (equal-share preview, own-share expense, advance transfer)
+/// and the transactions scope strip (default unclassified queue, category
+/// tabs, combined "Tất cả" with the month summary). Vietnamese UI, VND
+/// amounts ("150.000 ₫").
 ///
 /// Reliability rules used throughout:
 /// - wait for `exists AND hittable` before tapping anything that may sit
@@ -158,8 +160,10 @@ final class AMFinanceUITests: XCTestCase {
             .staticTexts["Ăn nhậu"]
         assertVisible(recentItem, "recent-transactions card does not show Ăn nhậu")
 
-        // The expense row is also in "Giao dịch".
+        // The expense row is also in "Giao dịch" — the default scope is
+        // the unclassified queue, so switch to the combined history first.
         openTab("Giao dịch")
+        tapScope("txList.scope.all")
         XCTAssertTrue(
             app.staticTexts["Ăn nhậu"].waitForExistence(timeout: 5),
             "transaction row missing in list")
@@ -358,8 +362,9 @@ final class AMFinanceUITests: XCTestCase {
         assertVisible(app.staticTexts["Lịch trả nợ"], "loan schedule missing")
         goBack(to: "Nợ & Thẻ")
 
-        // The payment shows up as a transfer in the transactions list.
+        // The payment shows up under the "Chuyển khoản" scope.
         openTab("Giao dịch")
+        tapScope("txList.scope.transfers")
         let transferRow = app.staticTexts
             .matching(NSPredicate(format: "label CONTAINS %@", "Trả nợ thẻ Thẻ Visa"))
             .firstMatch
@@ -984,14 +989,77 @@ final class AMFinanceUITests: XCTestCase {
         // Saved rows: the 600.000 own-share expense plus the advance
         // transfer into An's receivable — existence checks; right after
         // the nested sheet+editor dismissal a transient overlay can
-        // leave a listed row unhittable for a while.
+        // leave a listed row unhittable for a while. Both kinds sit in the
+        // combined "Tất cả" scope.
         openTab("Giao dịch")
+        tapScope("txList.scope.all")
         assertExists(app.staticTexts["-600.000 ₫"],
                      "split expense amount missing in list")
         assertExists(app.staticTexts["Chuyển khoản"],
                      "advance transfer row missing")
         assertExists(app.staticTexts["Tiền mặt → An"],
                      "advance to An missing its transfer subtitle")
+    }
+
+    // MARK: - 8. Transaction scopes
+
+    /// The "Giao dịch" scope strip: the list lands on the unclassified
+    /// queue ("Chưa phân loại"), classified history is browsed through one
+    /// tab per used category, and only "Tất cả" shows the combined month
+    /// with its Thu/Chi/Chênh lệch summary.
+    func testTransactionScopes() throws {
+        // An expense saved with no category lands in the unclassified
+        // queue; a categorized one does not.
+        tapQuickAdd()
+        typeAmount(30_000)
+        saveSheet()
+        quickAddExpense(amount: 150_000, category: "Ăn uống")
+
+        openTab("Giao dịch")
+
+        // Default scope: the uncategorized row is listed, the classified
+        // expense is not, and the month summary stays hidden.
+        let unclassified = app.buttons["txList.scope.unclassified"]
+        XCTAssertTrue(unclassified.waitForExistence(timeout: 5),
+                      "unclassified scope chip missing")
+        XCTAssertTrue(unclassified.isSelected,
+                      "default scope is not 'Chưa phân loại'")
+        XCTAssertTrue(
+            app.staticTexts["-30.000 ₫"].waitForExistence(timeout: 5),
+            "uncategorized row missing in the default queue")
+        XCTAssertFalse(app.staticTexts["-150.000 ₫"].exists,
+                       "classified expense leaked into the unclassified queue")
+        XCTAssertFalse(app.staticTexts["Chênh lệch"].exists,
+                       "month summary must not show outside 'Tất cả'")
+        XCTAssertTrue(app.buttons["Tháng trước"].exists,
+                      "month switcher missing in the default scope")
+
+        // Seeded categories with no rows get no tab.
+        XCTAssertFalse(
+            categoryScopeChip("Mua sắm").exists,
+            "unused seed category got a scope chip")
+
+        // The "Ăn uống" tab browses only its classified rows — still no
+        // month summary.
+        tapScopeElement(categoryScopeChip("Ăn uống"),
+                        "category scope chip for 'Ăn uống' missing")
+        XCTAssertTrue(
+            app.staticTexts["-150.000 ₫"].waitForExistence(timeout: 5),
+            "category scope does not list its expense")
+        XCTAssertFalse(app.staticTexts["-30.000 ₫"].exists,
+                       "unclassified row leaked into a category scope")
+        XCTAssertFalse(app.staticTexts["Chênh lệch"].exists,
+                       "month summary must not show in a category scope")
+
+        // "Tất cả" combines every kind and restores the month summary.
+        tapScope("txList.scope.all")
+        XCTAssertTrue(
+            app.staticTexts["-150.000 ₫"].waitForExistence(timeout: 5),
+            "classified expense missing in 'Tất cả'")
+        XCTAssertTrue(app.staticTexts["-30.000 ₫"].exists,
+                      "uncategorized row missing in 'Tất cả'")
+        assertVisible(app.staticTexts["Chênh lệch"],
+                      "month summary missing in 'Tất cả'")
     }
 
     // MARK: - Flow helpers
@@ -1247,6 +1315,36 @@ final class AMFinanceUITests: XCTestCase {
         }
         field.tap()
         app.typeText(text)
+    }
+
+    /// Taps a scope chip in the transactions strip by its identifier
+    /// (`txList.scope.*`), swiping the strip sideways until the chip is
+    /// hittable — it scrolls horizontally once categories overflow.
+    private func tapScope(_ identifier: String) {
+        tapScopeElement(
+            app.descendants(matching: .any)[identifier],
+            "scope chip \(identifier) missing")
+    }
+
+    /// The category tab named `name` — chips are identified by category
+    /// id, so the test matches the `txList.scope.category.` prefix plus the
+    /// visible label.
+    private func categoryScopeChip(_ name: String) -> XCUIElement {
+        app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label == %@",
+            "txList.scope.category.", name)).firstMatch
+    }
+
+    /// Reveals then taps one chip element inside the scope strip.
+    private func tapScopeElement(_ chip: XCUIElement, _ message: String) {
+        let strip = app.descendants(matching: .any)["txList.scopeStrip"]
+        XCTAssertTrue(strip.waitForExistence(timeout: 5),
+                      "scope strip missing")
+        for _ in 0..<6 where !(chip.exists && chip.isHittable) {
+            strip.swipeLeft()
+        }
+        XCTAssertTrue(waitReady(chip, timeout: 5), message)
+        chip.tap()
     }
 
     /// Taps a transaction row by its title — the row carries identifier
