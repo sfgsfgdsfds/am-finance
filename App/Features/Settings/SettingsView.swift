@@ -77,9 +77,9 @@ struct SettingsView: View {
                     Label("Nhà cung cấp AI", systemImage: "cpu.fill")
                 }
                 NavigationLink {
-                    LazyDestination { AIChatView() }
+                    LazyDestination { AIAgentView() }
                 } label: {
-                    Label("Phân tích tài chính", systemImage: "sparkles")
+                    Label("Agent", systemImage: "sparkles")
                 }
             }
 

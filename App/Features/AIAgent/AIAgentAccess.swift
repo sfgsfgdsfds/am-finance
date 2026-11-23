@@ -34,6 +34,25 @@ enum AIAgentAccess: String, CaseIterable, Sendable {
     var canProposeActions: Bool {
         self == .scopedReadAndProposeCategoryEdits
     }
+
+    /// The label the "Quyền truy cập" picker shows in Cài đặt → AI —
+    /// `allCases` declaration order is the picker order.
+    var settingsTitle: String {
+        switch self {
+        case .off: return "Tắt"
+        case .scopedRead: return "Chỉ đọc sổ"
+        case .scopedReadAndProposeCategoryEdits: return "Đọc và thao tác"
+        }
+    }
+
+    /// The short mode caption the Agent screen shows while working.
+    var agentModeTitle: String {
+        switch self {
+        case .off: return "Tắt"
+        case .scopedRead: return "Chỉ đọc"
+        case .scopedReadAndProposeCategoryEdits: return "Đọc và thao tác"
+        }
+    }
 }
 
 /// The grant a caller holds for one agent interaction — the access

@@ -20,7 +20,6 @@ struct TransactionsView: View {
     @State private var filter = TransactionListFilter()
     @State private var filterShown = false
     @State private var addShown = false
-    @State private var agentShown = false
     @State private var editing: LedgerTransaction?
     @State private var pendingDelete: LedgerTransaction?
 
@@ -56,10 +55,12 @@ struct TransactionsView: View {
             )
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button { agentShown = true } label: {
+                    NavigationLink {
+                        AIAgentView()
+                    } label: {
                         Image(systemName: "wand.and.stars")
                     }
-                    .accessibilityLabel("Agent giao dịch")
+                    .accessibilityLabel("Agent")
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button { filterShown = true } label: {
@@ -78,9 +79,6 @@ struct TransactionsView: View {
             }
             .sheet(isPresented: $addShown) {
                 TransactionEditorView()
-            }
-            .sheet(isPresented: $agentShown) {
-                AIAgentView()
             }
             .sheet(item: $editing) { transaction in
                 TransactionEditorView(transaction: transaction)

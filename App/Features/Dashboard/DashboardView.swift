@@ -107,11 +107,11 @@ struct DashboardView: View {
                 ToolbarItem(placement: .primaryAction) {
                     HStack(spacing: 16) {
                         NavigationLink {
-                            AIChatView()
+                            AIAgentView()
                         } label: {
                             Image(systemName: "sparkles")
                         }
-                        .accessibilityLabel("Trợ lý AI")
+                        .accessibilityLabel("Agent")
                         NavigationLink {
                             SettingsView()
                         } label: {
