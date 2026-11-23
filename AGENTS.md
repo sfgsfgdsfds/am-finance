@@ -34,6 +34,10 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   `AMFinanceUITests` scheme; the default `./scripts/test-app.sh` gate uses the
   `AMFinance` scheme, which only contains the unit-test bundle.
 - Tests launch the app with `-uiTestInMemoryStore` → in-memory store + seed.
+- Adding `-uiTestAgentScript` (honoured only beside the in-memory store,
+  DEBUG-only) makes the Agent screen count as configured — a scripted
+  offline client proposes one canned expense — so
+  `testAgentProposalConfirm` drives the proposal card end to end.
 - Row taps need `.onTapGesture` (List-row `Button` actions don't fire on
   iOS 26); assertions on off-screen list items must scroll first.
 

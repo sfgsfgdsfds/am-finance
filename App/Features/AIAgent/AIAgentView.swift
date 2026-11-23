@@ -35,6 +35,13 @@ struct AIAgentView: View {
         "Thu nhập tháng này là bao nhiêu?",
     ]
 
+    /// Extra hints while the write grant is on — the agent may also add,
+    /// edit, delete and re-categorize, always behind one confirmation.
+    private static let actionSuggestions = [
+        "Thêm: ăn phở 50k",
+        "Phân loại giúp các giao dịch chưa phân loại",
+    ]
+
     @Environment(\.modelContext) private var context
 
     private let providerStore: AIProviderStore
@@ -68,7 +75,17 @@ struct AIAgentView: View {
         client: (any AIChatClientProtocol)? = nil
     ) {
         self.providerStore = providerStore
+        #if DEBUG
+        // `-uiTestAgentScript` (honoured only beside the in-memory
+        // UI-test store) replaces the provider: the screen counts as
+        // configured and the deterministic script answers.
+        let scripted: (any AIChatClientProtocol)? =
+            AIAgentUITestScript.isEnabled
+                ? AIAgentUITestScript.Client() : nil
+        self.injectedClient = client ?? scripted
+        #else
         self.injectedClient = client
+        #endif
     }
 
     var body: some View {
@@ -194,6 +211,13 @@ struct AIAgentView: View {
                     if session?.isWorking == true {
                         workingRow.id("working")
                     }
+                    if let proposal = session?.pendingProposal {
+                        AIAgentProposalCard(
+                            proposal: proposal,
+                            onApply: { session?.confirmProposal() },
+                            onDiscard: { session?.discardProposal() })
+                            .id("proposal")
+                    }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(12)
@@ -203,6 +227,9 @@ struct AIAgentView: View {
                 withAnimation { proxy.scrollTo("bottom") }
             }
             .onChange(of: session?.isWorking) { _, _ in
+                proxy.scrollTo("bottom")
+            }
+            .onChange(of: session?.pendingProposal != nil) { _, _ in
                 proxy.scrollTo("bottom")
             }
         }
@@ -217,7 +244,7 @@ struct AIAgentView: View {
             Text("Agent tự đọc sổ trong quyền đã cấp để trả lời. Chạm một gợi ý hoặc nhập câu hỏi của bạn.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            ForEach(Self.suggestions, id: \.self) { suggestion in
+            ForEach(suggestionList, id: \.self) { suggestion in
                 Button {
                     send(suggestion)
                 } label: {
@@ -240,6 +267,14 @@ struct AIAgentView: View {
         .background(
             Color(.secondarySystemGroupedBackground),
             in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// The read hints plus the action examples while the write grant is
+    /// on — under "Đọc và thao tác" the agent may propose writes.
+    private var suggestionList: [String] {
+        access.canProposeActions
+            ? Self.suggestions + Self.actionSuggestions
+            : Self.suggestions
     }
 
     @ViewBuilder
