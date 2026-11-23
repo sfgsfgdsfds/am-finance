@@ -848,4 +848,113 @@ struct AIAgentActionTests {
         #expect(AIAgentApplyError.batch(.emptyBatch).actionIndex == nil)
         #expect(AIAgentApplyError.batch(.emptyBatch).reason == .emptyBatch)
     }
+
+    // MARK: - validate (the dry run)
+
+    /// `validate` runs the same checks as `apply` — permission, batch
+    /// shape, snapshot freshness, eligibility, drafts — but mutates
+    /// nothing, never calls the commit seam and leaves no pending
+    /// changes. The chat session dry-runs proposals through it.
+    @Test func validateChecksWithoutWritingOrSaving() throws {
+        let context = try makeContext()
+        let (cash, _, food, _) = try seedBasics(in: context)
+        let categorize = seed(in: context, date: day(2026, 11, 9),
+                              account: cash)
+        let row = seed(in: context, date: day(2026, 11, 10),
+                       account: cash)
+        let doomed = seed(in: context, amount: 10_000,
+                          date: day(2026, 11, 11), account: cash)
+        try context.save()
+        let stamp = row.updatedAt
+        let looked = try AIAgentLedgerTools().lookup(
+            permission: permission(), in: context)
+        func match(_ row: LedgerTransaction) throws -> AIAgentLookupMatch {
+            try #require(looked.matches.first { $0.original.id == row.id })
+        }
+        var addDraft = TransactionDraft(kind: .expense, account: cash)
+        addDraft.amount = 30_000
+        addDraft.date = day(2026, 11, 12)
+        var editDraft = TransactionDraft(transaction: row)
+        editDraft.amount = 99_000
+
+        var saved = false
+        let probing = AIAgentLedgerTools(saveAndCheck: { _ in
+            saved = true
+        })
+        try probing.validate(
+            [.setCategory(match: try match(categorize), category: food),
+             .add(draft: addDraft),
+             .edit(match: try match(row), draft: editDraft),
+             .delete(match: try match(doomed))],
+            permission: permission(), in: context)
+        #expect(!saved)
+        #expect(categorize.category == nil)
+        #expect(row.category == nil && row.amount == 400_000)
+        #expect(row.updatedAt == stamp)
+        #expect(try fetchAll(LedgerTransaction.self, in: context).count == 3)
+        #expect(!context.hasChanges)
+    }
+
+    /// `validate` throws the same indexed `.action`/`.batch` shapes
+    /// `apply` throws — a dry-run refusal reads identically.
+    @Test func validateThrowsTheSameErrorShapes() throws {
+        let context = try makeContext()
+        let (cash, _, food, _) = try seedBasics(in: context)
+        let row = seed(in: context, date: day(2026, 11, 10),
+                       account: cash)
+        try context.save()
+        let tools = AIAgentLedgerTools()
+        let m = try match(row, in: context)
+
+        // Batch-level: permission and empty batch.
+        #expect(throws: AIAgentApplyError.batch(.permissionDenied)) {
+            try tools.validate(
+                [.setCategory(match: m, category: food)],
+                permission: permission(.scopedRead), in: context)
+        }
+        #expect(throws: AIAgentApplyError.batch(.emptyBatch)) {
+            try tools.validate([], permission: permission(), in: context)
+        }
+        // Indexed: a stale target fails at its index.
+        row.note = "đổi"
+        row.updatedAt = .now
+        try context.save()
+        #expect(throws: AIAgentApplyError.action(0, .staleTransaction)) {
+            try tools.validate(
+                [.delete(match: m)],
+                permission: permission(), in: context)
+        }
+        // A dirty context is refused before looking at actions.
+        context.insert(LedgerTransaction(
+            kind: .expense, amount: 1_000, account: cash))
+        #expect(throws: AIAgentApplyError.batch(.contextHasChanges)) {
+            try tools.validate(
+                [.delete(match: m)],
+                permission: permission(), in: context)
+        }
+        context.rollback()
+        #expect(!context.hasChanges)
+    }
+
+    /// A batch that validates applies identically afterwards — the
+    /// dry-run consumes nothing: no handle state, no staleness.
+    @Test func validateThenApplyLandsTheBatch() throws {
+        let context = try makeContext()
+        let (cash, _, food, _) = try seedBasics(in: context)
+        let row = seed(in: context, date: day(2026, 11, 10),
+                       account: cash, needsReview: true)
+        try context.save()
+        let tools = AIAgentLedgerTools()
+        let m = try match(row, in: context)
+        let actions: [AIAgentLedgerAction] = [
+            .setCategory(match: m, category: food)]
+
+        try tools.validate(
+            actions, permission: permission(), in: context)
+        let summary = try tools.apply(
+            actions, permission: permission(), in: context)
+        #expect(summary.categorized == 1)
+        #expect(row.category?.id == food.id)
+        #expect(!row.needsReview)
+    }
 }

@@ -379,6 +379,58 @@ struct AIAgentLedgerTools {
         lookupWindow: DateInterval? = nil
     ) throws -> AIAgentApplySummary {
         do {
+            let resolved = try resolveBatch(
+                actions, permission: permission,
+                in: context, lookupWindow: lookupWindow)
+            var summary = AIAgentApplySummary()
+            for (index, action) in resolved.enumerated() {
+                do {
+                    try perform(action, into: &summary, in: context)
+                } catch let error as AIAgentError {
+                    // Validated actions cannot realistically fail — if
+                    // one somehow does, undo the partial batch rather
+                    // than leave half of it behind.
+                    context.rollback()
+                    throw AIAgentApplyError.action(index, error)
+                }
+            }
+            try commit(context)
+            return summary
+        } catch let error as AIAgentApplyError {
+            throw error
+        } catch let error as AIAgentError {
+            throw AIAgentApplyError.batch(error)
+        }
+    }
+
+    /// Runs exactly the validation phase of `apply` — permission,
+    /// window, clean context, batch size, snapshot freshness,
+    /// per-action eligibility, draft sanity, no-ops — without
+    /// mutating or saving anything. Throws the same
+    /// `AIAgentApplyError` shape `apply` throws, so a dry-run refusal
+    /// reports the same indexed reason the confirmed batch would.
+    func validate(
+        _ actions: [AIAgentLedgerAction],
+        permission: AIAgentPermission,
+        in context: ModelContext,
+        lookupWindow: DateInterval? = nil
+    ) throws {
+        _ = try resolveBatch(
+            actions, permission: permission,
+            in: context, lookupWindow: lookupWindow)
+    }
+
+    /// The whole-batch validation `apply` and `validate` share —
+    /// every check that must pass before any write, bound per action
+    /// to its live row. Only `AIAgentApplyError` escapes: indexed
+    /// `.action` for per-action failures, `.batch` for everything else.
+    private func resolveBatch(
+        _ actions: [AIAgentLedgerAction],
+        permission: AIAgentPermission,
+        in context: ModelContext,
+        lookupWindow: DateInterval?
+    ) throws -> [ResolvedAction] {
+        do {
             guard permission.access.canProposeActions
             else { throw AIAgentError.permissionDenied }
             let window = try checked(permission.window)
@@ -414,21 +466,7 @@ struct AIAgentLedgerTools {
                     throw AIAgentApplyError.action(index, error)
                 }
             }
-
-            var summary = AIAgentApplySummary()
-            for (index, action) in resolved.enumerated() {
-                do {
-                    try perform(action, into: &summary, in: context)
-                } catch let error as AIAgentError {
-                    // Validated actions cannot realistically fail — if
-                    // one somehow does, undo the partial batch rather
-                    // than leave half of it behind.
-                    context.rollback()
-                    throw AIAgentApplyError.action(index, error)
-                }
-            }
-            try commit(context)
-            return summary
+            return resolved
         } catch let error as AIAgentApplyError {
             throw error
         } catch let error as AIAgentError {
