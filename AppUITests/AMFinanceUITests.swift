@@ -492,13 +492,13 @@ final class AMFinanceUITests: XCTestCase {
             "AI privacy note missing")
         goBack(to: "Cài đặt")
 
-        tapOption("Phân tích tài chính")
+        tapOption("Agent")
         XCTAssertTrue(
-            app.navigationBars.staticTexts["Trợ lý AI"]
+            app.navigationBars.staticTexts["Agent"]
                 .waitForExistence(timeout: 5),
-            "AI chat screen missing")
+            "Agent screen missing")
         assertVisible(app.staticTexts["Chưa cấu hình AI"],
-                      "AI chat no-provider state missing")
+                      "Agent no-provider state missing")
         goBack(to: "Cài đặt")
 
         // Budgets — create the overall monthly budget; it must land back
@@ -1062,68 +1062,76 @@ final class AMFinanceUITests: XCTestCase {
                       "month summary missing in 'Tất cả'")
     }
 
-    // MARK: - 9. Agent giao dịch
+    // MARK: - 9. Agent
 
-    /// The ledger agent entry point: the Giao dịch toolbar opens the
-    /// sheet, the persisted access picker defaults to "Tắt" (the launch
-    /// flag clears its AppStorage so the default check stays stable), and
-    /// granting "Chỉ đọc" reveals the no-provider state — with no
-    /// provider configured no model call is even rendered possible.
+    /// The unified Agent entry point: the Giao dịch toolbar pushes the
+    /// chat screen, and with no provider configured the "Chưa cấu hình
+    /// AI" state leads into AI settings — where the "Quyền của Agent"
+    /// picker lives now. The persisted grant defaults to "Tắt" (the
+    /// launch flag clears its AppStorage so the default check stays
+    /// stable) and keeps "Chỉ đọc sổ" across a leave-and-return.
     func testAgentLedgerAccess() throws {
         openTab("Giao dịch")
-        let entry = app.buttons["Agent giao dịch"]
+        let entry = app.buttons["Agent"]
         XCTAssertTrue(waitReady(entry, timeout: 10), "agent entry missing")
         entry.tap()
         XCTAssertTrue(
-            app.navigationBars.staticTexts["Agent giao dịch"]
+            app.navigationBars.staticTexts["Agent"]
                 .waitForExistence(timeout: 5),
-            "agent sheet missing")
+            "agent screen missing")
 
-        // Default grant is off — no search affordance, no ledger access.
+        // No provider is configured in tests: the unconfigured state
+        // shows first — no chat affordance is even rendered.
+        assertVisible(app.staticTexts["Chưa cấu hình AI"],
+                      "no-provider state missing")
+        XCTAssertFalse(
+            app.descendants(matching: .any)["agent.input"].exists,
+            "chat input must not exist without a provider")
+
+        // "Mở cài đặt AI" pushes AI settings — the access picker lives
+        // in its "Quyền của Agent" section now, not inside the screen.
+        tapWhenReady(app.buttons["Mở cài đặt AI"],
+                     "AI settings entry missing")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Trí tuệ nhân tạo (AI)"]
+                .waitForExistence(timeout: 5),
+            "AI settings screen missing")
+
+        // Default grant is off.
         let picker = scopedElement("agent.accessPicker")
-        XCTAssertTrue(picker.waitForExistence(timeout: 5),
-                      "access picker missing")
+        assertVisible(picker, "access picker missing")
         let offValue = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", "Tắt"))
             .firstMatch
         XCTAssertTrue(offValue.exists, "default access is not Tắt")
-        XCTAssertFalse(app.buttons["Tìm trong sổ"].exists,
-                       "search must not be offered while access is off")
 
         // Grant read-only access through the persisted picker.
         picker.tap()
-        tapOption("Chỉ đọc")
-
-        // No provider is configured in tests: the empty state shows and
-        // "Tìm trong sổ" is not rendered — no model call is possible.
-        assertVisible(app.staticTexts["Chưa cấu hình AI"],
-                      "no-provider state missing")
-        assertVisible(app.buttons["Mở cài đặt AI"],
-                      "AI settings entry missing")
-        XCTAssertFalse(app.buttons["Tìm trong sổ"].exists,
-                       "search must not exist without a provider")
-
-        // The grant persists for the session — reopening keeps
-        // "Chỉ đọc" and the no-provider state.
-        tapWhenReady(app.buttons["Đóng"], "agent sheet close missing")
-        waitForDisappearance(
-            app.navigationBars.staticTexts["Agent giao dịch"],
-            message: "agent sheet did not dismiss")
-        XCTAssertTrue(waitReady(entry, timeout: 8),
-                      "agent entry missing after close")
-        entry.tap()
-        XCTAssertTrue(
-            app.navigationBars.staticTexts["Agent giao dịch"]
-                .waitForExistence(timeout: 5),
-            "agent sheet did not reopen")
+        tapOption("Chỉ đọc sổ")
         let readValue = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS %@", "Chỉ đọc"))
+            .matching(NSPredicate(format: "label CONTAINS %@", "Chỉ đọc sổ"))
             .firstMatch
-        XCTAssertTrue(readValue.exists,
-                      "access grant did not persist for the session")
+        XCTAssertTrue(readValue.waitForExistence(timeout: 3),
+                      "picker did not switch to 'Chỉ đọc sổ'")
+
+        // Leave back to the Agent screen — still no provider, so the
+        // same unconfigured state greets — then come back into settings:
+        // the grant must have persisted.
+        goBack(to: "Agent")
         assertVisible(app.staticTexts["Chưa cấu hình AI"],
-                      "no-provider state missing after reopen")
-        tapWhenReady(app.buttons["Đóng"], "agent sheet close missing")
+                      "no-provider state missing after grant")
+        tapWhenReady(app.buttons["Mở cài đặt AI"],
+                     "AI settings entry missing on return")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Trí tuệ nhân tạo (AI)"]
+                .waitForExistence(timeout: 5),
+            "AI settings screen missing on return")
+        assertVisible(scopedElement("agent.accessPicker"),
+                      "access picker missing on return")
+        XCTAssertTrue(readValue.waitForExistence(timeout: 3),
+                      "access grant did not persist")
+        goBack(to: "Agent")
+        goBack(to: "Giao dịch")
     }
 
     // MARK: - Flow helpers

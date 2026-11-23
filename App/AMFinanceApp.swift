@@ -20,9 +20,11 @@ struct AMFinanceApp: App {
                 .contains("-uiTestInMemoryStore")
             if inMemory {
                 // UI tests start from factory defaults — the Agent access
-                // picker's persisted value must not leak between launches.
+                // picker's persisted values must not leak between launches.
                 UserDefaults.standard.removeObject(
                     forKey: AIAgentView.accessDefaultsKey)
+                UserDefaults.standard.removeObject(
+                    forKey: AIAgentView.includeNotesDefaultsKey)
             }
             let container = try AppModelContainer.make(inMemory: inMemory)
             try SeedData.seedIfNeeded(context: ModelContext(container))

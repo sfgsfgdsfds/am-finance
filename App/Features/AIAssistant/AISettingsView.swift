@@ -14,6 +14,13 @@ struct AISettingsView: View {
     @State private var editing: AIProviderProfile?
     @State private var deleting: AIProviderProfile?
 
+    /// The Agent's ledger grant — set ONCE here, never inside the
+    /// chat screen. The same AppStorage keys `AIAgentView` reads.
+    @AppStorage(AIAgentView.accessDefaultsKey)
+    private var agentAccessRaw = AIAgentAccess.off.rawValue
+    @AppStorage(AIAgentView.includeNotesDefaultsKey)
+    private var agentIncludeNotes = true
+
     init(
         store: AIProviderStore = AIProviderStore(),
         urlSession: URLSession = .shared
@@ -47,6 +54,20 @@ struct AISettingsView: View {
                 if !profiles.isEmpty {
                     Text("Chạm ✓ để chọn cấu hình đang dùng. Vuốt để xoá — khoá API của cấu hình đó cũng bị xoá.")
                 }
+            }
+
+            Section {
+                Picker("Quyền truy cập", selection: $agentAccessRaw) {
+                    ForEach(AIAgentAccess.allCases, id: \.rawValue) { access in
+                        Text(access.settingsTitle).tag(access.rawValue)
+                    }
+                }
+                .accessibilityIdentifier("agent.accessPicker")
+                Toggle("Gửi kèm ghi chú giao dịch", isOn: $agentIncludeNotes)
+            } header: {
+                Text("Quyền của Agent")
+            } footer: {
+                Text("Agent tự đọc sổ để trả lời câu hỏi của bạn. Thêm, sửa, xoá hay đổi danh mục giao dịch chỉ được ghi sau khi bạn xác nhận — Agent không thể chuyển tiền thật.")
             }
 
             Section {
