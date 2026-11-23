@@ -22,6 +22,14 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   jobs run it, and it must pass before device installs. If you change
   navigation, tab structure or a flow the smoke tests cover, run it yourself
   and update `AppUITests`.
+- AMDev stops a single `--check` after 15 minutes and the whole UI suite
+  takes longer, so gate it as four shards with `AMFINANCE_UI_TEST_FILTERS`
+  (each selector is `-only-testing:AMFinanceUITests/AMFinanceUITests/<name>`):
+  (1) `testWiredFeatureScreens`; (2) `testTabsReportsAndSettings`,
+  `testTransactionsAddEditDelete`, `testAccountsAndDebts`; (3)
+  `testRentalsImportAndReminders`, `testAIEntryPointsAndSpendingShare`,
+  `testTransactionScopes`; (4) `testBillSplit`, `testAgentLedgerAccess`,
+  `testAgentProposalConfirm`. Put a new UI test into the lightest shard.
 - `scripts/lib-test.sh` — shared lock/simulator/retry helper sourced by both
   test scripts; not meant to be run directly.
 - The generated `.xcodeproj` is a build artifact: git-ignored, never commit it.
