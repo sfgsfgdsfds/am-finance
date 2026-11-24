@@ -61,7 +61,13 @@ struct DataResetTests {
         batchStore: CSVImportInMemoryBatchStore =
             CSVImportInMemoryBatchStore(),
         reminderCenter: any ReminderNotificationCentering =
-            DataResetFakeCenter()
+            DataResetFakeCenter(),
+        conversationStore: AIAgentConversationStore =
+            AIAgentConversationStore(
+                directory: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(
+                        "DataResetTests-conv-\(UUID().uuidString)",
+                        isDirectory: true))
     ) -> DataResetService {
         DataResetService(
             stateStore: stateStore,
@@ -71,7 +77,32 @@ struct DataResetTests {
             basisStore: LoanInterestBasisStore(defaults: defaults),
             reminderSettings: ReminderSettingsStore(defaults: defaults),
             reminderCenter: reminderCenter,
+            conversationStore: conversationStore,
             defaults: defaults)
+    }
+
+    /// A temp-directory conversation store holding one saved record —
+    /// the reset levels must erase it.
+    private func makeConversationStore(
+        _ name: String
+    ) throws -> AIAgentConversationStore {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "DataResetTests-\(name)-\(UUID().uuidString)",
+                isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let store = AIAgentConversationStore(directory: directory)
+        var state = AIAgentConversationState()
+        state.messages.append(AIAgentChatMessage(
+            kind: .user, text: "lịch sử"))
+        state.messages.append(AIAgentChatMessage(
+            kind: .assistant, text: "trả lời"))
+        let record = try #require(
+            AIAgentConversationStore.makeRecord(for: state))
+        store.save(record)
+        try #require(store.list().count == 1)
+        return store
     }
 
     private func fetchAll<T: PersistentModel>(
@@ -107,9 +138,11 @@ struct DataResetTests {
         let rules = WalletSyncInMemoryRuleStore()
         let mappings = CSVImportInMemoryMappingStore()
         let batches = CSVImportInMemoryBatchStore()
+        let conversations = try makeConversationStore("levelA")
         let service = makeService(
             defaults: defaults, stateStore: states, ruleStore: rules,
-            mappingStore: mappings, batchStore: batches)
+            mappingStore: mappings, batchStore: batches,
+            conversationStore: conversations)
 
         let sessionID = "sess-1"
         let bank = linkedAccount(
@@ -201,6 +234,10 @@ struct DataResetTests {
         #expect(batches.batch(for: bank.id) == nil)
         #expect(rules.loadRules().count == 1)
         #expect(mappings.mapping(for: bank.id) != nil)
+
+        // The saved Agent conversations are wiped — they quoted the
+        // deleted ledger rows.
+        #expect(conversations.list().isEmpty)
     }
 
     // MARK: - Level B
@@ -216,10 +253,12 @@ struct DataResetTests {
         let center = DataResetFakeCenter()
         let basisStore = LoanInterestBasisStore(defaults: defaults)
         let reminderSettings = ReminderSettingsStore(defaults: defaults)
+        let conversations = try makeConversationStore("levelB")
         let service = DataResetService(
             stateStore: states, ruleStore: rules, mappingStore: mappings,
             batchStore: batches, basisStore: basisStore,
             reminderSettings: reminderSettings, reminderCenter: center,
+            conversationStore: conversations,
             defaults: defaults)
 
         // Extra rows on top of the seed — one of every model.
@@ -335,6 +374,8 @@ struct DataResetTests {
         #expect(rules.loadRules().isEmpty)
         #expect(mappings.mapping(for: bank.id) == nil)
         #expect(batches.batch(for: bank.id) == nil)
+        // The saved Agent conversations are wiped too.
+        #expect(conversations.list().isEmpty)
         // Per-loan interest basis, last-used account, last-backup stamp.
         #expect(defaults.object(
             forKey: "loanInterestBasis.\(loan.id.uuidString)") == nil)

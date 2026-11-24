@@ -63,6 +63,7 @@ struct AIAgentView: View {
     @State private var input = ""
     @FocusState private var inputFocused: Bool
     @State private var showsSettings = false
+    @State private var showsHistory = false
 
     init(controller: AIAgentController? = nil) {
         self.injectedController = controller
@@ -107,8 +108,18 @@ struct AIAgentView: View {
         .navigationDestination(isPresented: $showsSettings) {
             AISettingsView(store: controller.providerStore)
         }
+        .navigationDestination(isPresented: $showsHistory) {
+            AIAgentHistoryView(controller: controller)
+        }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                Button {
+                    showsHistory = true
+                } label: {
+                    Image(systemName: "clock.arrow.circlepath")
+                }
+                .accessibilityLabel("Lịch sử")
+                .accessibilityIdentifier("agent.history")
                 Button {
                     controller.newConversation()
                 } label: {

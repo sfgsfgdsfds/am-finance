@@ -157,7 +157,7 @@ struct DataResetView: View {
         } header: {
             Text("Mức 1 — chỉ giao dịch")
         } footer: {
-            Text("Sẽ xoá \(summaryTransactions.total) giao dịch. Giữ lại tài khoản (số dư về số dư đầu kỳ), danh mục, mảng kinh doanh, ngân sách, quy tắc lặp lại, phòng & hợp đồng, đợt đổi lãi suất và mọi cài đặt. Bộ nhớ nhập ngân hàng (con trỏ đồng bộ, mục đã xoá, lần nhập CSV gần nhất) cũng bị xoá để có thể nhập lại.")
+            Text("Sẽ xoá \(summaryTransactions.total) giao dịch. Giữ lại tài khoản (số dư về số dư đầu kỳ), danh mục, mảng kinh doanh, ngân sách, quy tắc lặp lại, phòng & hợp đồng, đợt đổi lãi suất và mọi cài đặt. Bộ nhớ nhập ngân hàng (con trỏ đồng bộ, mục đã xoá, lần nhập CSV gần nhất) cũng bị xoá để có thể nhập lại. Lịch sử hội thoại Agent cũng bị xoá.")
         }
     }
 
@@ -174,7 +174,7 @@ struct DataResetView: View {
         } header: {
             Text("Mức 2 — xoá hết")
         } footer: {
-            Text("Sẽ xoá \(summaryEverything.total) mục (\(summaryEverything.breakdownText)), rồi tạo lại dữ liệu mẫu: danh mục mặc định, các mảng kinh doanh và tài khoản \"Tiền mặt\". Cũng xoá: liên kết & bộ nhớ đồng bộ ngân hàng, quy tắc tự phân loại, cột nhớ & lần nhập CSV, tuỳ chọn tính lãi từng khoản vay, tài khoản dùng gần nhất, ngày sao lưu gần nhất và các thông báo nhắc đang chờ. Giữ lại: đăng nhập wallet.amx.vn & Client ID, cài đặt nhắc nhở, cài đặt khoá ứng dụng.")
+            Text("Sẽ xoá \(summaryEverything.total) mục (\(summaryEverything.breakdownText)), rồi tạo lại dữ liệu mẫu: danh mục mặc định, các mảng kinh doanh và tài khoản \"Tiền mặt\". Cũng xoá: liên kết & bộ nhớ đồng bộ ngân hàng, quy tắc tự phân loại, cột nhớ & lần nhập CSV, tuỳ chọn tính lãi từng khoản vay, lịch sử hội thoại Agent, tài khoản dùng gần nhất, ngày sao lưu gần nhất và các thông báo nhắc đang chờ. Giữ lại: đăng nhập wallet.amx.vn & Client ID, cài đặt nhắc nhở, cài đặt khoá ứng dụng.")
         }
     }
 
@@ -244,9 +244,9 @@ private extension DataResetLevel {
     func dialogMessage(summary: DataResetSummary) -> String {
         switch self {
         case .transactions:
-            return "Toàn bộ \(summary.total) giao dịch sẽ bị xoá vĩnh viễn. Tài khoản và mọi cài đặt được giữ lại."
+            return "Toàn bộ \(summary.total) giao dịch sẽ bị xoá vĩnh viễn. Lịch sử hội thoại Agent cũng bị xoá. Tài khoản và mọi cài đặt được giữ lại."
         case .everything:
-            return "Toàn bộ dữ liệu sẽ bị xoá vĩnh viễn: \(summary.breakdownText). Đăng nhập wallet.amx.vn, cài đặt nhắc nhở và khoá ứng dụng được giữ lại."
+            return "Toàn bộ dữ liệu sẽ bị xoá vĩnh viễn: \(summary.breakdownText), lịch sử hội thoại Agent. Đăng nhập wallet.amx.vn, cài đặt nhắc nhở và khoá ứng dụng được giữ lại."
         }
     }
 

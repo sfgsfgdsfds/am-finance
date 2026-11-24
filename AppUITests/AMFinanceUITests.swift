@@ -1319,6 +1319,87 @@ final class AMFinanceUITests: XCTestCase {
                       "conversation vanished with the card")
     }
 
+    /// Conversation history end to end: a turn is auto-saved once it
+    /// ends, "Cuộc trò chuyện mới" starts fresh without losing it, and
+    /// the "Lịch sử" list reopens it — the earlier messages render
+    /// exactly like a live conversation.
+    func testAgentHistory() throws {
+        app.terminate()
+        app.launchArguments = ["-uiTestInMemoryStore", "-uiTestAgentScript"]
+        app.launch()
+
+        // Cài đặt → "Nhà cung cấp AI" → "Quyền của Agent" → grant.
+        let gear = app.buttons["Cài đặt"]
+        XCTAssertTrue(waitReady(gear, timeout: 15), "settings gear missing")
+        gear.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Cài đặt"]
+                .waitForExistence(timeout: 5),
+            "settings screen missing")
+        tapOption("Nhà cung cấp AI")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Trí tuệ nhân tạo (AI)"]
+                .waitForExistence(timeout: 5),
+            "AI settings screen missing")
+        let picker = scopedElement("agent.accessPicker")
+        assertVisible(picker, "access picker missing")
+        picker.tap()
+        tapOption("Đọc và thao tác")
+        goBack(to: "Cài đặt")
+
+        // Settings → "Agent" row: send one message, wait for the
+        // scripted proposal card, then discard it — the finished turn
+        // is auto-saved to history.
+        tapOption("Agent")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Agent"]
+                .waitForExistence(timeout: 5),
+            "agent screen missing")
+        sendAgentMessage("ghi lai pho 50k")
+        let apply = app.buttons["agent.proposal.apply"]
+        XCTAssertTrue(waitReady(apply, timeout: 10),
+                      "proposal apply button missing")
+        let discard = app.buttons["agent.proposal.discard"]
+        XCTAssertTrue(discard.exists, "proposal discard button missing")
+        discard.tap()
+        waitForDisappearance(apply, message: "card stayed after Bỏ qua")
+
+        // "Cuộc trò chuyện mới" — the chat is empty again (the hint
+        // card is back), the old conversation is saved.
+        tapWhenReady(app.buttons["agent.newChat"], "new-chat button missing")
+        XCTAssertTrue(
+            app.staticTexts["Hỏi gì cũng được"]
+                .waitForExistence(timeout: 5),
+            "empty hint did not come back after new conversation")
+        XCTAssertFalse(app.staticTexts["ghi lai pho 50k"].exists,
+                       "old conversation still visible after new chat")
+
+        // "Lịch sử" — one row titled with the first user message.
+        tapWhenReady(app.buttons["agent.history"], "history button missing")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Lịch sử"]
+                .waitForExistence(timeout: 5),
+            "history screen missing")
+        let row = app.descendants(matching: .any)
+            .matching(NSPredicate(
+                format: "label CONTAINS %@", "ghi lai pho 50k"))
+            .firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5),
+                      "saved conversation row missing in history")
+
+        // Tapping the row restores the conversation — the earlier user
+        // message renders again, exactly like a live chat.
+        row.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Agent"]
+                .waitForExistence(timeout: 5),
+            "chat screen did not return after opening a conversation")
+        XCTAssertTrue(
+            app.staticTexts["ghi lai pho 50k"]
+                .waitForExistence(timeout: 5),
+            "restored conversation did not show the earlier message")
+    }
+
     // MARK: - Flow helpers
 
     /// Types into the Agent input and taps send. The field may surface as
