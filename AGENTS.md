@@ -25,11 +25,12 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
 - AMDev stops a single `--check` after 15 minutes and the whole UI suite
   takes longer, so gate it as four shards with `AMFINANCE_UI_TEST_FILTERS`
   (each selector is `-only-testing:AMFinanceUITests/AMFinanceUITests/<name>`):
-  (1) `testWiredFeatureScreens`, `testAgentSharedConversation`; (2)
+  (1) `testWiredFeatureScreens`; (2)
   `testTabsReportsAndSettings`, `testTransactionsAddEditDelete`,
   `testAccountsAndDebts`; (3) `testRentalsImportAndReminders`,
   `testAIEntryPointsAndSpendingShare`, `testTransactionScopes`; (4)
-  `testBillSplit`, `testAgentLedgerAccess`, `testAgentProposalConfirm`.
+  `testBillSplit`, `testAgentLedgerAccess`, `testAgentProposalConfirm`,
+  `testAgentSharedConversation`, `testAgentHistory`.
   Put a new UI test into the lightest shard.
 - `scripts/lib-test.sh` — shared lock/simulator/retry helper sourced by both
   test scripts; not meant to be run directly.
@@ -95,11 +96,13 @@ workers know what already exists. Pushed views must not create their own
   toolbar leading button), a thin view over `AIAgentController` —
   `AIAgentControllers.shared(for: container)` keeps ONE shared session
   app-wide so an in-flight turn survives pops and tab switches (the
-  conversation is replaced only on "Cuộc trò chuyện mới", a real
-  provider-destination change or `.dataResetCompleted`; a transient
-  `makeClient` failure keeps it while the screen shows "Chưa cấu hình
-  AI"; `AgentActivityDot`/`agentActivityBadge()` badge the three entry
-  points while the agent works or a reply landed unseen) —
+  conversation is replaced only on "Cuộc trò chuyện mới", a history
+  open/delete or `.dataResetCompleted`; a real provider-destination
+  change rebuilds the session `restoring:` the snapshot under the same
+  record id; a transient `makeClient` failure keeps it while the
+  screen shows "Chưa cấu hình AI"; `AgentActivityDot`/
+  `agentActivityBadge()` badge the three entry points while the agent
+  works or a reply landed unseen) —
   driven by `AIAgentChatSession` (bounded
   loop: max 4 tool steps per turn, one correction round, tool results
   ride back as untrusted user-role text; `pendingProposal` →
@@ -113,6 +116,17 @@ workers know what already exists. Pushed views must not create their own
   `AIAgentAccess`/`AIAgentPermission` policy — the `aiAgent.access` and
   `aiAgent.includeNotes` `@AppStorage` keys set in `AISettingsView`
   → "Quyền của Agent".
+  History: `AIAgentConversationStore` keeps one JSON per conversation
+  in `Application Support/AgentConversations/` (device-local only —
+  no SwiftData, no CloudKit, NOT in Backup export; `.live()` returns a
+  fresh temp dir under `-uiTestInMemoryStore`), capped at 50
+  conversations / 400 messages / 200k transcript chars. The controller
+  auto-saves `session.snapshot()` on `onStateChange`, restores the
+  latest record on the first session of a launch and reopens entries
+  via `openConversation`/`deleteConversation`/`deleteAllConversations`;
+  both data-reset levels wipe it. `AIAgentHistoryView` ("Lịch sử",
+  toolbar id `agent.history`) lists saved conversations — tap to
+  restore, swipe to delete, "Xoá tất cả".
 - `AIAssistant/` — `AISettingsView` (Settings → Trợ lý AI → "Nhà cung cấp AI"; hosts the "Quyền của Agent" pickers), `AIInboxSuggestView` (inbox toolbar's "Phân loại bằng AI"), `AICaptureView` (the `root.aiCapture` satellite beside "+"); shared plumbing `AIClient`/`AIChatClientProtocol`, `AIChatScope` + `AIChatContextLoader`/`AIFinanceContextBuilder` summaries, extraction/categorization parsers.
 - `AppLock/` — `AppLockSettingsView`, the `.appLockProtected()` modifier on the root; `AppLockController.shared`.
 - `BackgroundRefresh/` — `BackgroundRefreshScheduler` (BGAppRefreshTask `vn.amx.finance.refresh`, registered in `AMFinanceApp`), `BackgroundRefreshRunner` (background wallet sync + recurring + reminders with local notifications), `BackgroundRefreshNotificationPlan`.
@@ -133,7 +147,7 @@ workers know what already exists. Pushed views must not create their own
 - `CreditCards/` — `CreditCardDetailView(account:)`, `CreditCardPaymentSheet`.
 - `CSVImport/` — `CSVImportView` (Settings → Dữ liệu → "Nhập sao kê CSV"; pick file + account, map columns, confirm) + `CSVImportParser`/`Detector`/`Mapper`/`Importer`/`Deduper`.
 - `Dashboard/` — `DashboardView` ("Tổng quan" tab) + its card structs.
-- `DataReset/` — `DataResetView` (Settings → Dữ liệu → "Xoá dữ liệu"): level A wipes transactions + import memory, level B wipes every model and reseeds; `DataResetService`, `DataResetSummary`; success posts `.dataResetCompleted` → `AMFinanceApp` rebuilds the root.
+- `DataReset/` — `DataResetView` (Settings → Dữ liệu → "Xoá dữ liệu"): level A wipes transactions + import memory, level B wipes every model and reseeds; BOTH levels also wipe the saved Agent conversation history (`DataResetService.conversationStore.deleteAll()`); `DataResetService`, `DataResetSummary`; success posts `.dataResetCompleted` → `AMFinanceApp` rebuilds the root.
 - `Debts/` — `DebtsView` ("Nợ & Thẻ" tab).
 - `Loans/` — `LoanDetailView(account:)`, `LoanPaymentSheet`, `LoanPrepaymentSheet`, `LoanRateChangeSheet`.
 - `Receivables/` — `ReceivablesView(business:?)`, `ReceivableDetailView(account:)`, `ReceivableActionSheet` (advance/repayment/fee/write-off).

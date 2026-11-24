@@ -119,6 +119,9 @@ struct DataResetService {
     let basisStore: LoanInterestBasisStore
     let reminderSettings: ReminderSettingsStore
     let reminderCenter: any ReminderNotificationCentering
+    /// Saved Agent conversations — they hold ledger excerpts, so both
+    /// levels wipe them.
+    let conversationStore: AIAgentConversationStore
     /// Plain defaults for the two `@AppStorage` scalars — the last-used
     /// account and the last-backup stamp have no store type of their own.
     let defaults: UserDefaults
@@ -140,6 +143,7 @@ struct DataResetService {
         reminderSettings: ReminderSettingsStore = ReminderSettingsStore(),
         reminderCenter: any ReminderNotificationCentering =
             ReminderUserNotificationCenter(),
+        conversationStore: AIAgentConversationStore = .live(),
         defaults: UserDefaults = .standard
     ) {
         self.stateStore = stateStore
@@ -149,6 +153,7 @@ struct DataResetService {
         self.basisStore = basisStore
         self.reminderSettings = reminderSettings
         self.reminderCenter = reminderCenter
+        self.conversationStore = conversationStore
         self.defaults = defaults
     }
 
@@ -229,9 +234,10 @@ struct DataResetService {
     ///
     /// Also clears every app-owned state: wallet sync links/cursors/
     /// tombstones, auto-categorization rules, CSV mappings and undo
-    /// batches, per-loan interest-basis keys, the last-used account, the
-    /// last-backup stamp, the budget warning log and pending reminder
-    /// notifications. Kept on purpose: the wallet sign-in and client id,
+    /// batches, per-loan interest-basis keys, the saved Agent
+    /// conversations, the last-used account, the last-backup stamp,
+    /// the budget warning log and pending reminder notifications.
+    /// Kept on purpose: the wallet sign-in and client id,
     /// reminder settings, app lock settings.
     @discardableResult
     func resetEverything(
@@ -258,7 +264,8 @@ struct DataResetService {
     /// the start cursor — `importFrom` survives, `lastSyncAt` and the
     /// rescan stamp do not. Tombstones die with the wipe, so previously
     /// deleted rows import again too. The CSV "Hoàn tác lần nhập" memory
-    /// also goes (its rows are gone anyway).
+    /// also goes (its rows are gone anyway), and so do the saved Agent
+    /// conversations — they quote ledger rows that no longer exist.
     private func resetImportMemory(in context: ModelContext) {
         var kept: [(sessionID: String, state: WalletSyncAccountState)] = []
         for (sessionID, _) in WalletSyncEngine.linkedAccounts(
@@ -272,6 +279,8 @@ struct DataResetService {
             stateStore.setState(state, for: sessionID)
         }
         batchStore.removeAllBatches()
+        // Agent history quotes ledger rows that no longer exist.
+        conversationStore.deleteAll()
     }
 
     /// Level B: all app-owned UserDefaults state returns to first-launch.
@@ -283,6 +292,7 @@ struct DataResetService {
         mappingStore.removeAllMappings()
         batchStore.removeAllBatches()
         basisStore.removeAll()
+        conversationStore.deleteAll()
         defaults.removeObject(forKey: Self.lastUsedAccountDefaultsKey)
         defaults.removeObject(forKey: Self.lastBackupDefaultsKey)
         // The warning log references budgets that no longer exist.

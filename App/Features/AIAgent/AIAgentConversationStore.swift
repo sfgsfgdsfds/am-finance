@@ -92,6 +92,27 @@ struct AIAgentConversationStore: Sendable {
             .appendingPathComponent("AgentConversations", isDirectory: true)
     }
 
+    /// The store the app itself uses: the default Application Support
+    /// directory in production, and under `-uiTestInMemoryStore` ONE
+    /// fresh temporary directory shared by every `live()` call of the
+    /// launch — the controller and the data-reset service then see the
+    /// same store while UI tests can never read or write real history.
+    static func live() -> AIAgentConversationStore {
+        AIAgentConversationStore(directory: uiTestDirectory)
+    }
+
+    /// nil in production; under `-uiTestInMemoryStore` a unique path
+    /// minted once per launch.
+    private static let uiTestDirectory: URL? = {
+        guard ProcessInfo.processInfo.arguments
+            .contains("-uiTestInMemoryStore")
+        else { return nil }
+        return FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "AgentConversationsUITest-\(UUID().uuidString)",
+                isDirectory: true)
+    }()
+
     // MARK: - Reads
 
     /// Every decodable conversation, newest `updatedAt` first —
