@@ -1144,6 +1144,9 @@ final class AMFinanceUITests: XCTestCase {
     /// Giao dịch → "Tất cả".
     func testAgentProposalConfirm() throws {
         app.terminate()
+        // Wait for the process to die before relaunching — see
+        // testFinanceSync for why.
+        _ = app.wait(for: .notRunning, timeout: 10)
         app.launchArguments = ["-uiTestInMemoryStore", "-uiTestAgentScript"]
         app.launch()
 
@@ -1230,6 +1233,9 @@ final class AMFinanceUITests: XCTestCase {
     /// the screen no longer wipes the session.
     func testAgentSharedConversation() throws {
         app.terminate()
+        // Wait for the process to die before relaunching — see
+        // testFinanceSync for why.
+        _ = app.wait(for: .notRunning, timeout: 10)
         app.launchArguments = ["-uiTestInMemoryStore", "-uiTestAgentScript"]
         app.launch()
 
@@ -1325,6 +1331,9 @@ final class AMFinanceUITests: XCTestCase {
     /// exactly like a live conversation.
     func testAgentHistory() throws {
         app.terminate()
+        // Wait for the process to die before relaunching — see
+        // testFinanceSync for why.
+        _ = app.wait(for: .notRunning, timeout: 10)
         app.launchArguments = ["-uiTestInMemoryStore", "-uiTestAgentScript"]
         app.launch()
 
@@ -1412,6 +1421,12 @@ final class AMFinanceUITests: XCTestCase {
     /// manual button is the only sync — the report stays deterministic.
     func testFinanceSync() throws {
         app.terminate()
+        // `terminate()` returns while the process may still be dying —
+        // relaunching into that window can hand the new launch a stale
+        // proxy ("does not have a process ID"), so wait for the death
+        // first. The timeout only caps the wait; a stuck teardown falls
+        // through to the same launch() that ran before.
+        _ = app.wait(for: .notRunning, timeout: 10)
         app.launchArguments = [
             "-uiTestInMemoryStore", "-uiTestFakeSyncServer",
         ]
