@@ -117,19 +117,29 @@ final class FinanceSyncCoordinator {
     }
 
     /// Reloads enabled/lastSyncAt/quarantines from the shadow — run after
-    /// every operation and whenever the settings screen appears.
+    /// every operation and whenever the settings screen appears. Writes
+    /// only land on real changes: every assignment on an `@Observable`
+    /// property invalidates the views tracking it, and the routine
+    /// triggers would otherwise churn the tree on every 60 s tick even
+    /// while sync sits disabled.
     func refreshState() async {
         stateLoaded = true
         if let state = try? await shadow.state() {
-            enabled = state.isEnabled
-            lastSyncAt = state.lastSyncAt
+            if enabled != state.isEnabled { enabled = state.isEnabled }
+            if lastSyncAt != state.lastSyncAt {
+                lastSyncAt = state.lastSyncAt
+            }
             // The shadow keeps the raw failure text; the coordinator's
             // mapped text wins while both describe the same failure.
-            if lastError == nil { lastError = state.lastError }
+            if lastError == nil, let error = state.lastError {
+                lastError = error
+            }
             let entries = (try? await shadow.entryCount()) ?? 0
-            configured = entries > 0 || state.pullCursor > 0
+            let isConfigured = entries > 0 || state.pullCursor > 0
+            if configured != isConfigured { configured = isConfigured }
         }
-        if let quarantines = try? await shadow.quarantines() {
+        if let quarantines = try? await shadow.quarantines(),
+           quarantined != quarantines {
             quarantined = quarantines
         }
     }
@@ -318,7 +328,7 @@ final class FinanceSyncCoordinator {
         debounceTask?.cancel()
         pendingLocalSave = false
         pendingFullScan = true
-        lastReport = nil
+        if lastReport != nil { lastReport = nil }
         Task { await self.refreshState() }
     }
 
@@ -463,9 +473,17 @@ extension EnvironmentValues {
 /// same pair `LedgerBalanceStore` listens to — `ModelContext.didSave`
 /// plus the Core Data save notification SwiftData still emits on
 /// iOS 17 — so the trigger is best-effort on iOS 17 like everything
-/// else. Everything is inert under `-uiTestInMemoryStore`: UI tests
-/// drive sync through explicit buttons only, keeping reports
-/// deterministic.
+/// else.
+///
+/// Inertness is structural, not just guarded: under
+/// `-uiTestInMemoryStore` the modifier attaches NOTHING — no timer
+/// subscription, no notification observers — so a UI-test run does zero
+/// sync work even when a coordinator exists (the `-uiTestFakeSyncServer`
+/// tests drive sync through explicit buttons, keeping reports
+/// deterministic). A disabled sync is nearly as inert: the timer and
+/// phase/save triggers only ever fire while `coordinator.enabled` —
+/// reading an `@Observable` property inside an action is untracked, so
+/// these checks never re-render the root.
 private struct FinanceSyncAutoRefreshModifier: ViewModifier {
     let coordinator: FinanceSyncCoordinator?
 
@@ -478,33 +496,36 @@ private struct FinanceSyncAutoRefreshModifier: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        content
-            .task {
-                guard automaticTriggersEnabled else { return }
-                await coordinator?.syncIfStale()
-            }
-            .onChange(of: scenePhase) { _, phase in
-                guard automaticTriggersEnabled, phase == .active
-                else { return }
-                Task { await coordinator?.syncIfStale() }
-            }
-            .onReceive(timer) { _ in
-                guard automaticTriggersEnabled, scenePhase == .active
-                else { return }
-                Task { await coordinator?.syncIfStale() }
-            }
-            .onReceive(NotificationCenter.default.publisher(
-                for: ModelContext.didSave
-            )) { _ in
-                guard automaticTriggersEnabled else { return }
-                coordinator?.noteLocalSave()
-            }
-            .onReceive(NotificationCenter.default.publisher(
-                for: .NSManagedObjectContextDidSave
-            )) { _ in
-                guard automaticTriggersEnabled else { return }
-                coordinator?.noteLocalSave()
-            }
+        if automaticTriggersEnabled {
+            content
+                .task {
+                    await coordinator?.syncIfStale()
+                }
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active,
+                          let coordinator, coordinator.enabled
+                    else { return }
+                    Task { await coordinator.syncIfStale() }
+                }
+                .onReceive(timer) { _ in
+                    guard scenePhase == .active,
+                          let coordinator, coordinator.enabled
+                    else { return }
+                    Task { await coordinator.syncIfStale() }
+                }
+                .onReceive(NotificationCenter.default.publisher(
+                    for: ModelContext.didSave
+                )) { _ in
+                    coordinator?.noteLocalSave()
+                }
+                .onReceive(NotificationCenter.default.publisher(
+                    for: .NSManagedObjectContextDidSave
+                )) { _ in
+                    coordinator?.noteLocalSave()
+                }
+        } else {
+            content
+        }
     }
 }
 

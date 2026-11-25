@@ -216,10 +216,15 @@ workers know what already exists. Pushed views must not create their own
   single-flight `syncNow`/`syncIfStale`, `enable(mode:)` via the
   bootstrap, `pause()`/`resume()`/`disconnect()`, the ~3 s debounced
   local-save trigger and Vietnamese `errorText`) is created once in
-  `AMFinanceApp` and injected via `.environment(\.financeSync)`;
-  `.financeSyncAutoRefresh()` on the root adds appear/scenePhase/60 s
-  triggers plus the save-notification debounce (all inert under
-  `-uiTestInMemoryStore`), a `.dataResetCompleted` forces the next
+  `AMFinanceApp` and injected via `.environment(\.financeSync)` —
+  under `-uiTestInMemoryStore` WITHOUT `-uiTestFakeSyncServer` the
+  coordinator is not created at all (like `WalletSyncCoordinator`), so
+  no shadow store or refresh task exists during smoke tests;
+  `.financeSyncAutoRefresh()` on the root attaches appear/scenePhase/
+  60 s triggers plus the save-notification debounce — it attaches
+  NOTHING under `-uiTestInMemoryStore`, and every trigger is further
+  gated on `coordinator.enabled`/`refreshState()` writes only on real
+  changes — a `.dataResetCompleted` forces the next
   cycle FULL, and the engine/bootstrap `addLocalStoreChangeHook`
   invalidates `LedgerBalanceStores`. `FinanceSyncSettingsView`
   (Settings → Dữ liệu → "Đồng bộ với web", AX ids `financeSync.*`)

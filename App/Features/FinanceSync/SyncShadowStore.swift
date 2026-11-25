@@ -381,9 +381,14 @@ actor SyncShadowStore {
 
     // MARK: - State
 
-    /// The whole state row as a value.
+    /// The whole state row as a value. Read-pure: a missing row reads
+    /// back as defaults instead of materializing one — the row is
+    /// created by the first WRITE through `stateRow()`, so a read-only
+    /// session never leaves pending changes on the context.
     func state() throws -> SyncShadowStateSnapshot {
-        let row = try stateRow()
+        guard let row = try modelContext.fetch(
+            FetchDescriptor<SyncShadowState>()).first
+        else { return SyncShadowStateSnapshot() }
         return SyncShadowStateSnapshot(
             pullCursor: row.pullCursor,
             isEnabled: row.isEnabled,
@@ -397,7 +402,7 @@ actor SyncShadowStore {
     }
 
     func pullCursor() throws -> Int64 {
-        try stateRow().pullCursor
+        try existingStateRow()?.pullCursor ?? 0
     }
 
     func setPullCursor(_ cursor: Int64) throws {
@@ -406,7 +411,7 @@ actor SyncShadowStore {
     }
 
     func isEnabled() throws -> Bool {
-        try stateRow().isEnabled
+        try existingStateRow()?.isEnabled ?? false
     }
 
     func setEnabled(_ enabled: Bool) throws {
@@ -437,8 +442,8 @@ actor SyncShadowStore {
     /// The pending push waiting for a replay — nil when nothing is
     /// in flight.
     func pendingPush() throws -> SyncPendingPush? {
-        let row = try stateRow()
-        guard let key = row.pendingPushKey else { return nil }
+        guard let row = try existingStateRow(),
+              let key = row.pendingPushKey else { return nil }
         return SyncPendingPush(
             key: key, body: row.pendingPushBody,
             bodyHash: row.pendingPushBodyHash ?? "")
@@ -508,7 +513,14 @@ actor SyncShadowStore {
         return try modelContext.fetch(descriptor).first
     }
 
-    /// The singleton state row, created on first touch.
+    /// The singleton state row if it exists — nil on a fresh store, so
+    /// pure reads never create it.
+    private func existingStateRow() throws -> SyncShadowState? {
+        try modelContext.fetch(FetchDescriptor<SyncShadowState>()).first
+    }
+
+    /// The singleton state row, created on first touch — write paths
+    /// only; every caller saves the context right after.
     private func stateRow() throws -> SyncShadowState {
         if let existing = try modelContext.fetch(
             FetchDescriptor<SyncShadowState>()).first {

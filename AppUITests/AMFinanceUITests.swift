@@ -1494,11 +1494,21 @@ final class AMFinanceUITests: XCTestCase {
     /// Types into the Agent input and taps send. The field may surface as
     /// a text view (`axis: .vertical`), so it is matched by identifier
     /// whatever element type it carries; the send button is disabled
-    /// until text lands, so the tap waits for enabled too.
+    /// until text lands, so the tap waits for enabled too. Typing waits
+    /// for keyboard focus first — `typeText` fails outright ("Neither
+    /// element nor any descendant has keyboard focus") when it fires
+    /// before the tap's first-responder change lands, which happens on
+    /// loaded simulators.
     private func sendAgentMessage(_ text: String) {
         let input = app.descendants(matching: .any)["agent.input"]
         XCTAssertTrue(waitReady(input, timeout: 8), "agent input missing")
         input.tap()
+        let focused = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "hasKeyboardFocus == true"),
+            object: input)
+        if XCTWaiter.wait(for: [focused], timeout: 8) != .completed {
+            input.tap()
+        }
         app.typeText(text)
         tapWhenReady(app.buttons["agent.send"], "agent send missing")
     }
