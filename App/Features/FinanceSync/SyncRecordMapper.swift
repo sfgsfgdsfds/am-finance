@@ -152,16 +152,57 @@ enum SyncRecordMapper {
         return try SyncContentHasher.hash(jsonData: encode(dto))
     }
 
+    /// The parent references a pulled DTO carries — every non-nil `…ID`
+    /// field as the `(entity, id)` pair it must resolve against the local
+    /// store. The engine parks children whose references don't resolve
+    /// yet and re-applies them once every parent exists.
+    static func references(of dto: SyncBackupDTO) -> [SyncRecordKey] {
+        var refs: [SyncRecordKey] = []
+        func ref(_ entity: SyncEntity, _ id: UUID?) {
+            if let id { refs.append(SyncRecordKey(entity: entity, id: id)) }
+        }
+        switch dto {
+        case .account(let value):
+            ref(.business, value.businessID)
+        case .rentalUnit(let value):
+            ref(.business, value.businessID)
+        case .rentalLease(let value):
+            ref(.rentalUnit, value.unitID)
+        case .loanRateChange(let value):
+            ref(.account, value.accountID)
+        case .budget(let value):
+            ref(.category, value.categoryID)
+        case .recurringRule(let value):
+            ref(.account, value.accountID)
+            ref(.account, value.toAccountID)
+            ref(.category, value.categoryID)
+            ref(.business, value.businessID)
+        case .transaction(let value):
+            ref(.account, value.accountID)
+            ref(.account, value.toAccountID)
+            ref(.category, value.categoryID)
+            ref(.business, value.businessID)
+            ref(.rentalLease, value.rentalLeaseID)
+        case .business, .category:
+            break
+        }
+        return refs
+    }
+
     // MARK: - DTO → model (apply side)
 
     /// Find-or-create the row for `dto` and copy its fields in, re-linking
     /// every reference through `maps` — `BackupRestorer.upsertRow`, the
-    /// same rules a merge restore uses. The caller `save()`s.
+    /// same rules a merge restore uses. The caller `save()`s. `force`
+    /// bypasses the transaction `updatedAt` guard — the engine uses it to
+    /// re-link a row whose parents only arrived after the row itself; the
+    /// DTO content is the same pulled version, nothing else is written.
     @discardableResult
     static func apply(
         _ dto: SyncBackupDTO,
         into context: ModelContext,
-        maps: inout BackupRowMaps
+        maps: inout BackupRowMaps,
+        force: Bool = false
     ) -> BackupRowOutcome {
         switch dto {
         case .account(let value):
@@ -171,6 +212,13 @@ enum SyncRecordMapper {
         case .business(let value):
             return BackupRestorer.upsertRow(value, into: context, maps: &maps)
         case .transaction(let value):
+            if force, let existing = maps.transactions[value.id] {
+                BackupRestorer.apply(
+                    value, to: existing, accounts: maps.accounts,
+                    categories: maps.categories, businesses: maps.businesses,
+                    leases: maps.rentalLeases)
+                return .updated
+            }
             return BackupRestorer.upsertRow(value, into: context, maps: &maps)
         case .loanRateChange(let value):
             return BackupRestorer.upsertRow(value, into: context, maps: &maps)
