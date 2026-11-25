@@ -40,11 +40,12 @@ protocol BackgroundRefreshReminderScheduling: Sendable {
 }
 
 /// Runs the app's keep-fresh work inside a background refresh, on its own
-/// `ModelContext`: (1) wallet sync, (2) due recurring transactions,
-/// (3) reminder-queue rebuild — then a local notification per new bank
-/// row. Every step is isolated so one failure does not stop the others,
-/// and `Task.isCancelled` is honoured between steps so a task expiration
-/// winds down cleanly instead of being killed mid-write.
+/// `ModelContext`: (1) wallet sync, (2) two-way web sync,
+/// (3) due recurring transactions, (4) reminder-queue rebuild — then a
+/// local notification per new bank row. Every step is isolated so one
+/// failure does not stop the others, and `Task.isCancelled` is honoured
+/// between steps so a task expiration winds down cleanly instead of
+/// being killed mid-write.
 @MainActor
 struct BackgroundRefreshRunner {
     /// Outcome of one runner step.
@@ -58,6 +59,9 @@ struct BackgroundRefreshRunner {
     /// in tests.
     struct Summary: Equatable, Sendable {
         var sync: StepOutcome = .skipped
+        /// Two-way web sync — skipped when the coordinator is absent,
+        /// disabled or signed out. Never surfaces UI or notifications.
+        var financeSync: StepOutcome = .skipped
         var recurring: StepOutcome = .skipped
         var reminders: StepOutcome = .skipped
         /// Bank rows the sync committed this run (even on a late failure).
@@ -71,6 +75,9 @@ struct BackgroundRefreshRunner {
     }
 
     let sync: any BackgroundRefreshSyncing
+    /// The two-way web-sync step — same `BackgroundRefreshSyncing` seam
+    /// as the wallet step, nil when the app has no coordinator.
+    let financeSync: (any BackgroundRefreshSyncing)?
     let generator: any BackgroundRefreshRecurringGenerating
     let reminders: any BackgroundRefreshReminderScheduling
     let settingsStore: ReminderSettingsStore
@@ -82,6 +89,7 @@ struct BackgroundRefreshRunner {
         sync: any BackgroundRefreshSyncing,
         generator: any BackgroundRefreshRecurringGenerating,
         reminders: any BackgroundRefreshReminderScheduling,
+        financeSync: (any BackgroundRefreshSyncing)? = nil,
         settingsStore: ReminderSettingsStore,
         center: any BackgroundRefreshNotificationCentering,
         isForegrounded: @escaping () -> Bool = { false }
@@ -89,12 +97,13 @@ struct BackgroundRefreshRunner {
         self.sync = sync
         self.generator = generator
         self.reminders = reminders
+        self.financeSync = financeSync
         self.settingsStore = settingsStore
         self.center = center
         self.isForegrounded = isForegrounded
     }
 
-    /// Runs the three steps in order, isolated; then notifies about new
+    /// Runs the four steps in order, isolated; then notifies about new
     /// bank rows. A cancelled task stops before the next step — whatever
     /// already committed stays committed.
     @discardableResult
@@ -109,6 +118,12 @@ struct BackgroundRefreshRunner {
             summary.newBankTransactions = newRows.count
         }
         summary.cancelled = Task.isCancelled
+
+        if !summary.cancelled, let financeSync {
+            let result = await financeSync.sync(now: now)
+            summary.financeSync = outcome(of: result)
+            summary.cancelled = Task.isCancelled
+        }
 
         if !summary.cancelled {
             do {
@@ -227,6 +242,33 @@ private struct LiveBackgroundRefreshSync:
     }
 }
 
+/// The real two-way web-sync step — just the shared coordinator: it
+/// already knows the shadow, API client and sign-in probe, and it
+/// decides "nothing to do" itself (disabled or signed out → `skipped`).
+/// Pulled rows are the user's own data landing on another device, so
+/// nothing here ever notifies — `insertedRows` stays empty.
+private struct LiveFinanceSyncStep:
+    BackgroundRefreshSyncing, @unchecked Sendable {
+    let coordinator: FinanceSyncCoordinator
+
+    @MainActor
+    func sync(now: Date) async -> BackgroundRefreshSyncResult {
+        guard coordinator.enabled else { return .skipped }
+        guard await coordinator.checkSignedIn() else { return .skipped }
+        let ok = await coordinator.syncNow()
+        if ok {
+            return BackgroundRefreshSyncResult(status: .synced)
+        }
+        // syncNow leaves either a mapped error (failed) or none
+        // (the gate above raced a disable/sign-out → skipped).
+        if let error = coordinator.lastError {
+            return BackgroundRefreshSyncResult(
+                status: .failed, errorDescription: error)
+        }
+        return .skipped
+    }
+}
+
 /// Posts due recurring transactions on the runner's context.
 private struct LiveRecurringGenerator:
     BackgroundRefreshRecurringGenerating, @unchecked Sendable {
@@ -253,10 +295,13 @@ private struct LiveReminderRescheduler:
 extension BackgroundRefreshRunner {
     /// The app's runner: own `ModelContext` on the shared store's
     /// container, the standard stores and the real notification center.
+    /// `financeSync` is the app-level coordinator — nil disables the
+    /// web-sync step entirely.
     static func live(
         container: ModelContainer,
         defaults: UserDefaults = .standard,
-        session: WalletLinkSession = .shared
+        session: WalletLinkSession = .shared,
+        financeSync: FinanceSyncCoordinator? = nil
     ) -> BackgroundRefreshRunner {
         let context = ModelContext(container)
         let settingsStore = ReminderSettingsStore(defaults: defaults)
@@ -267,6 +312,9 @@ extension BackgroundRefreshRunner {
             reminders: LiveReminderRescheduler(
                 context: context,
                 scheduler: ReminderScheduler(settingsStore: settingsStore)),
+            financeSync: financeSync.map {
+                LiveFinanceSyncStep(coordinator: $0)
+            },
             settingsStore: settingsStore,
             center: BackgroundRefreshUserNotificationCenter(),
             isForegrounded: {

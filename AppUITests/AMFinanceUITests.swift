@@ -1400,6 +1400,95 @@ final class AMFinanceUITests: XCTestCase {
             "restored conversation did not show the earlier message")
     }
 
+    // MARK: - 10. Web sync (fake server)
+
+    /// "Đồng bộ với web" end to end against the in-app fake server:
+    /// relaunched with `-uiTestFakeSyncServer` beside the in-memory
+    /// store, the screen counts as signed in and every request is served
+    /// in memory. Enable with the upload choice, confirm the destructive
+    /// replace, verify the synced status, add a transaction through
+    /// quick-add, then "Đồng bộ ngay" reports exactly one sent change.
+    /// Automatic triggers are inert under the UI-test launch, so the
+    /// manual button is the only sync — the report stays deterministic.
+    func testFinanceSync() throws {
+        app.terminate()
+        app.launchArguments = [
+            "-uiTestInMemoryStore", "-uiTestFakeSyncServer",
+        ]
+        app.launch()
+
+        // Cài đặt → Dữ liệu → Đồng bộ với web.
+        let gear = app.buttons["Cài đặt"]
+        XCTAssertTrue(waitReady(gear, timeout: 15), "settings gear missing")
+        gear.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Cài đặt"]
+                .waitForExistence(timeout: 5),
+            "settings screen missing")
+        tapOption("Đồng bộ với web")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Đồng bộ với web"]
+                .waitForExistence(timeout: 5),
+            "finance sync screen missing")
+
+        // The fake provider counts as signed in — the row is a merged
+        // LabeledContent label ("Đăng nhập, Đã đăng nhập").
+        XCTAssertTrue(
+            app.staticTexts
+                .matching(NSPredicate(
+                    format: "label CONTAINS %@", "Đã đăng nhập"))
+                .firstMatch.waitForExistence(timeout: 5),
+            "signed-in state missing")
+
+        // Enable → probe → the upload choice → destructive confirm.
+        tapOption("Bật đồng bộ")
+        XCTAssertTrue(
+            app.staticTexts
+                .matching(NSPredicate(
+                    format: "label CONTAINS %@", "Trên iPhone:"))
+                .firstMatch.waitForExistence(timeout: 10),
+            "probe summary missing")
+        tapOption("Đưa dữ liệu iPhone lên web")
+        confirmDestructive(
+            label: "Thay thế trên web",
+            dialogTitle: "Thay thế dữ liệu?")
+
+        // Synced: state shows Đang bật and the first report landed.
+        XCTAssertTrue(
+            app.staticTexts
+                .matching(NSPredicate(
+                    format: "label CONTAINS %@", "Đang bật"))
+                .firstMatch.waitForExistence(timeout: 15),
+            "enabled state missing after bootstrap")
+        XCTAssertTrue(
+            app.staticTexts
+                .matching(NSPredicate(
+                    format: "label CONTAINS %@", "Đã gửi"))
+                .firstMatch.waitForExistence(timeout: 5),
+            "first sync report missing")
+
+        // A quick-add expense — to be pushed by the manual sync below.
+        goBack(to: "Cài đặt")
+        goBack(to: "Tổng quan")
+        quickAddExpense(amount: 45_000, category: "Ăn uống")
+
+        // Back into the sync screen → "Đồng bộ ngay" reports 1 sent.
+        XCTAssertTrue(waitReady(gear, timeout: 10), "settings gear missing")
+        gear.tap()
+        tapOption("Đồng bộ với web")
+        // The button stays disabled until the sign-in probe lands —
+        // wait for enabled, not just hittable (a disabled tap is a
+        // silent no-op).
+        tapWhenReady(
+            app.buttons["Đồng bộ ngay"], "sync-now button missing")
+        XCTAssertTrue(
+            app.staticTexts
+                .matching(NSPredicate(
+                    format: "label CONTAINS %@", "Đã gửi 1 ·"))
+                .firstMatch.waitForExistence(timeout: 15),
+            "sync report does not show 1 sent change")
+    }
+
     // MARK: - Flow helpers
 
     /// Types into the Agent input and taps send. The field may surface as

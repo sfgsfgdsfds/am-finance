@@ -25,7 +25,7 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
 - AMDev stops a single `--check` after 15 minutes and the whole UI suite
   takes longer, so gate it as four shards with `AMFINANCE_UI_TEST_FILTERS`
   (each selector is `-only-testing:AMFinanceUITests/AMFinanceUITests/<name>`):
-  (1) `testWiredFeatureScreens`; (2)
+  (1) `testWiredFeatureScreens`, `testFinanceSync`; (2)
   `testTabsReportsAndSettings`, `testTransactionsAddEditDelete`,
   `testAccountsAndDebts`; (3) `testRentalsImportAndReminders`,
   `testAIEntryPointsAndSpendingShare`, `testTransactionScopes`; (4)
@@ -48,6 +48,12 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   DEBUG-only) makes the Agent screen count as configured — a scripted
   offline client proposes one canned expense — so
   `testAgentProposalConfirm` drives the proposal card end to end.
+- Adding `-uiTestFakeSyncServer` (also honoured only beside the
+  in-memory store, DEBUG-only) points the finance sync at an in-app
+  in-memory server (push/pull/import + seq + tombstones) with a fake
+  signed-in token — `testFinanceSync` drives the enable + push flow
+  end to end. Automatic sync triggers are inert under
+  `-uiTestInMemoryStore`, so the manual "Đồng bộ ngay" is deterministic.
 - Row taps need `.onTapGesture` (List-row `Button` actions don't fire on
   iOS 26); assertions on off-screen list items must scroll first.
 
@@ -205,8 +211,26 @@ workers know what already exists. Pushed views must not create their own
   real Go API — skipped unless `AMFINANCE_SYNC_LIVE_URL` +
   `AMFINANCE_SYNC_LIVE_TOKEN` are set; bring up `AM_Finance_Web` on a
   throwaway DB with `AUTH_MODE=dev` on 127.0.0.1 and pass the vars via
-  `TEST_RUNNER_`-prefixed env (see the file's header). No UI or
-  scheduling yet.
+  `TEST_RUNNER_`-prefixed env (see the file's header).
+  App wiring: `FinanceSyncCoordinator` (@MainActor @Observable,
+  single-flight `syncNow`/`syncIfStale`, `enable(mode:)` via the
+  bootstrap, `pause()`/`resume()`/`disconnect()`, the ~3 s debounced
+  local-save trigger and Vietnamese `errorText`) is created once in
+  `AMFinanceApp` and injected via `.environment(\.financeSync)`;
+  `.financeSyncAutoRefresh()` on the root adds appear/scenePhase/60 s
+  triggers plus the save-notification debounce (all inert under
+  `-uiTestInMemoryStore`), a `.dataResetCompleted` forces the next
+  cycle FULL, and the engine/bootstrap `addLocalStoreChangeHook`
+  invalidates `LedgerBalanceStores`. `FinanceSyncSettingsView`
+  (Settings → Dữ liệu → "Đồng bộ với web", AX ids `financeSync.*`)
+  hosts status/report/quarantine, the probe-driven first-sync choice
+  with destructive confirms, and Đồng bộ ngay/Tạm dừng/Ngắt kết nối.
+  `BackgroundRefreshRunner` runs the web sync as a second
+  `BackgroundRefreshSyncing` step behind the same seam.
+  `FinanceSyncUITestSupport` is the DEBUG-only `-uiTestFakeSyncServer`
+  in-app fake (mirror of `FakeSyncServer` minus test seams) + fixed
+  token provider; `DataResetView` footers and the `BackupView` replace
+  confirm warn that enabled sync propagates the change to the web.
 - `DataReset/` — `DataResetView` (Settings → Dữ liệu → "Xoá dữ liệu"): level A wipes transactions + import memory, level B wipes every model and reseeds; BOTH levels also wipe the saved Agent conversation history (`DataResetService.conversationStore.deleteAll()`); `DataResetService`, `DataResetSummary`; success posts `.dataResetCompleted` → `AMFinanceApp` rebuilds the root.
 - `Debts/` — `DebtsView` ("Nợ & Thẻ" tab).
 - `Loans/` — `LoanDetailView(account:)`, `LoanPaymentSheet`, `LoanPrepaymentSheet`, `LoanRateChangeSheet`.

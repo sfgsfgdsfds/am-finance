@@ -1,0 +1,406 @@
+#if DEBUG
+import CryptoKit
+import FinanceCore
+import Foundation
+
+/// In-app, in-memory finance-sync server for UI tests — reachable only
+/// when the app launches with BOTH `-uiTestFakeSyncServer` and
+/// `-uiTestInMemoryStore`, and compiled only in DEBUG builds, so it can
+/// never serve a real user or a real store. It implements enough of the
+/// sync contract to drive the whole flow offline: paged pull with seq
+/// cursors and tombstones, idempotent push with per-change results,
+/// deferred foreign-key validation, and the backup REPLACE import —
+/// plus a fake signed-in token provider, so `FinanceSyncSettingsView`
+/// renders its signed-in state without a real AMX login.
+enum FinanceSyncUITestSupport {
+    /// The launch argument that turns the fake server on.
+    static let launchArgument = "-uiTestFakeSyncServer"
+    /// The flag it is honoured beside — the throwaway in-memory UI-test
+    /// store. `-uiTestFakeSyncServer` alone does nothing.
+    static let inMemoryArgument = "-uiTestInMemoryStore"
+
+    /// The pure gate — both arguments, or the fake never runs.
+    static func enabled(arguments: [String]) -> Bool {
+        arguments.contains(launchArgument)
+            && arguments.contains(inMemoryArgument)
+    }
+
+    /// Whether this process should serve sync from `FinanceSyncUITestServer`.
+    static var isEnabled: Bool {
+        enabled(arguments: ProcessInfo.processInfo.arguments)
+    }
+
+    /// The fake signed-in token source — always returns the same token.
+    struct TokenProvider: WalletLinkAccessTokenProviding {
+        func accessToken() async throws -> String { "ui-test-token" }
+        func forceRefreshedAccessToken() async throws -> String { "ui-test-token" }
+    }
+}
+
+/// URLProtocol stub routing the fake host's requests to
+/// `FinanceSyncUITestServer.shared` — the same shape as
+/// `SyncStubProtocol` in `FinanceSyncTestSupport.swift`.
+final class FinanceSyncUITestStubProtocol: URLProtocol {
+    nonisolated(unsafe) static var server: FinanceSyncUITestServer?
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        request.url?.host == FinanceSyncUITestServer.host && server != nil
+    }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let server = Self.server else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unknown))
+            return
+        }
+        do {
+            let (response, data) = try server.handle(request)
+            client?.urlProtocol(
+                self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
+private struct UITestServerKey: Hashable {
+    var entity: String
+    var id: UUID
+}
+
+private struct UITestServerRow {
+    var seq: Int64
+    var deleted: Bool
+    var data: SyncJSONValue?
+}
+
+/// The fake itself: the sync contract in memory — the same behaviour
+/// `FakeSyncServer` implements for the unit tests, minus the test-only
+/// seams (pull holds, interjected writes, counters). Push replays by
+/// idempotency key + body hash, conflicts `409` when a touched row's seq
+/// is newer than `base_seq`, validates deferred references per batch
+/// (`422 index`), and marks unknown deletes `skipped`. Pull pages by
+/// `cursor`/`limit` over the committed seq order. Import is a full
+/// REPLACE: upsert the document's rows, tombstone the rest.
+final class FinanceSyncUITestServer: @unchecked Sendable {
+    static let host = "uitest.financesync.local"
+    static let shared = FinanceSyncUITestServer()
+
+    var baseURL: URL { URL(string: "https://\(Self.host)/api")! }
+
+    var session: URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [FinanceSyncUITestStubProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private let lock = NSLock()
+    private var rows: [UITestServerKey: UITestServerRow] = [:]
+    private var nextSeq: Int64 = 0
+    /// Idempotency key → (body sha-256, stored 200 body).
+    private var committedPushes: [String: (String, Data)] = [:]
+
+    private init() {
+        FinanceSyncUITestStubProtocol.server = self
+    }
+
+    func handle(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        let url = request.url!
+        lock.lock()
+        defer { lock.unlock() }
+        if url.path.hasSuffix("/v1/sync/pull") {
+            return try handlePull(request)
+        }
+        if url.path.hasSuffix("/v1/sync/push") {
+            return try handlePush(request)
+        }
+        if url.path.hasSuffix("/v1/backup/import") {
+            return try handleImport(request)
+        }
+        return (http(url, status: 404), Data(#"{"error":"not_found"}"#.utf8))
+    }
+
+    // MARK: - Pull
+
+    private func handlePull(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        let query = URLComponents(
+            url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let cursor = Int64(query.first { $0.name == "cursor" }?.value ?? "") ?? 0
+        let limit = Int(query.first { $0.name == "limit" }?.value ?? "") ?? 500
+        let after = rows.filter { $0.value.seq > cursor }
+            .sorted { $0.value.seq < $1.value.seq }
+        let pageRows = Array(after.prefix(max(limit, 1)))
+        let records = pageRows.map { key, row in
+            SyncPullRecord(
+                entity: key.entity, id: key.id, seq: row.seq,
+                deleted: row.deleted,
+                data: row.deleted ? nil : row.data)
+        }
+        let body = try JSONEncoder().encode(SyncPullResponse(
+            records: records,
+            nextCursor: pageRows.last?.value.seq ?? cursor,
+            hasMore: after.count > pageRows.count))
+        return (http(request.url!), body)
+    }
+
+    // MARK: - Push
+
+    private func handlePush(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        let body = Self.bodyData(of: request) ?? Data()
+        let key = request.value(forHTTPHeaderField: "Idempotency-Key") ?? ""
+        let bodyHash = Self.sha256(body)
+        if let committed = committedPushes[key] {
+            if committed.0 == bodyHash {
+                return (http(request.url!), committed.1)
+            }
+            return (http(request.url!, status: 422),
+                    Data(#"{"error":"idempotency_key_reused"}"#.utf8))
+        }
+        guard let push = try? JSONDecoder().decode(
+            SyncPushRequest.self, from: body)
+        else {
+            return (http(request.url!, status: 400),
+                    Data(#"{"error":"bad_request"}"#.utf8))
+        }
+
+        // 409 — any touched row already newer than base_seq.
+        let conflicts = push.changes.compactMap { change -> SyncConflict? in
+            guard let row = rows[UITestServerKey(
+                entity: change.entity.rawValue, id: change.id)],
+                row.seq > push.baseSeq
+            else { return nil }
+            return SyncConflict(
+                entity: change.entity.rawValue, id: change.id, seq: row.seq)
+        }
+        guard conflicts.isEmpty else {
+            let arrayJSON = String(
+                decoding: try JSONEncoder().encode(conflicts), as: UTF8.self)
+            return (http(request.url!, status: 409),
+                    Data(#"{"error":"conflict","conflicts":\#(arrayJSON)}"#.utf8))
+        }
+
+        // Deferred per-batch validation on the post-batch projection.
+        var projected = rows
+        for change in push.changes {
+            projected[UITestServerKey(
+                entity: change.entity.rawValue, id: change.id)] =
+                UITestServerRow(
+                    seq: .max, deleted: change.op == .delete,
+                    data: change.data)
+        }
+        for (index, change) in push.changes.enumerated() {
+            if change.op == .upsert {
+                for (field, refKey) in Self.references(in: change.data) {
+                    guard let target = projected[refKey], !target.deleted else {
+                        return try validation(
+                            request.url!, index: index, field: field,
+                            constraint: "foreign_key",
+                            message: "\(field) references missing \(refKey.entity) \(refKey.id)")
+                    }
+                }
+            } else {
+                let deletedKey = UITestServerKey(
+                    entity: change.entity.rawValue, id: change.id)
+                for (prowKey, prow) in projected where !prow.deleted {
+                    if Self.references(in: prow.data).contains(
+                        where: { $0.1 == deletedKey }) {
+                        return try validation(
+                            request.url!, index: index, field: "",
+                            constraint: "foreign_key_dependents",
+                            message: "\(prowKey.entity) \(prowKey.id) still references it")
+                    }
+                }
+            }
+        }
+
+        // Commit.
+        var results: [SyncPushResult] = []
+        for change in push.changes {
+            let changeKey = UITestServerKey(
+                entity: change.entity.rawValue, id: change.id)
+            switch change.op {
+            case .upsert:
+                nextSeq += 1
+                rows[changeKey] = UITestServerRow(
+                    seq: nextSeq, deleted: false, data: change.data)
+                results.append(.seq(nextSeq))
+            case .delete:
+                if var row = rows[changeKey], !row.deleted {
+                    nextSeq += 1
+                    row.seq = nextSeq
+                    row.deleted = true
+                    row.data = nil
+                    rows[changeKey] = row
+                    results.append(.seq(nextSeq))
+                } else {
+                    results.append(.skipped)
+                }
+            }
+        }
+        let responseBody = try JSONEncoder().encode(
+            SyncPushResponse(highWaterSeq: nextSeq, results: results))
+        committedPushes[key] = (bodyHash, responseBody)
+        return (http(request.url!), responseBody)
+    }
+
+    // MARK: - Backup import (REPLACE)
+
+    private func handleImport(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        let body = Self.bodyData(of: request) ?? Data()
+        guard let document = try? BackupCodec.makeDecoder()
+                .decode(BackupDocument.self, from: body)
+        else {
+            return (http(request.url!, status: 400),
+                    Data(#"{"error":"bad_request","message":"malformed backup"}"#.utf8))
+        }
+
+        // Every record the document carries, as wire data.
+        var incoming: [(entity: String, id: UUID, data: SyncJSONValue)] = []
+        func collect<T>(
+            _ entity: String, _ dtos: [T],
+            id: (T) -> UUID, dto: (T) throws -> SyncBackupDTO
+        ) throws {
+            for value in dtos {
+                incoming.append((entity, id(value),
+                                 try SyncRecordMapper.jsonValue(of: dto(value))))
+            }
+        }
+        try collect("category", document.categories, id: \.id) { .category($0) }
+        try collect("business", document.businesses, id: \.id) { .business($0) }
+        try collect("account", document.accounts, id: \.id) { .account($0) }
+        try collect("rentalUnit", document.rentalUnits, id: \.id) { .rentalUnit($0) }
+        try collect("rentalLease", document.rentalLeases, id: \.id) { .rentalLease($0) }
+        try collect("loanRateChange", document.loanRateChanges, id: \.id) { .loanRateChange($0) }
+        try collect("budget", document.budgets, id: \.id) { .budget($0) }
+        try collect("recurringRule", document.recurringRules, id: \.id) { .recurringRule($0) }
+        try collect("transaction", document.transactions, id: \.id) { .transaction($0) }
+
+        // REPLACE: upsert the document's rows, tombstone every live row
+        // it does not mention — fresh seqs, so pull clients see the
+        // replacement in seq order.
+        let liveKeys = Set(incoming.map {
+            UITestServerKey(entity: $0.entity, id: $0.id) })
+        var upserted: [String: Int] = [:]
+        var refsNulled: [String: Int] = [:]
+        for (entity, id, data) in incoming {
+            let (normalized, nulled) = Self.nullDanglingReferences(
+                data, liveKeys: liveKeys)
+            nextSeq += 1
+            rows[UITestServerKey(entity: entity, id: id)] =
+                UITestServerRow(seq: nextSeq, deleted: false, data: normalized)
+            upserted[entity, default: 0] += 1
+            refsNulled[entity, default: 0] += nulled
+        }
+        var tombstoned: [String: Int] = [:]
+        let staleKeys = rows
+            .filter { !$0.value.deleted && !liveKeys.contains($0.key) }
+            .map(\.key)
+        for key in staleKeys {
+            nextSeq += 1
+            rows[key] = UITestServerRow(seq: nextSeq, deleted: true, data: nil)
+            tombstoned[key.entity, default: 0] += 1
+        }
+
+        var summary: [String: SyncImportEntitySummary] = [:]
+        for entity in Set(upserted.keys)
+            .union(tombstoned.keys).union(refsNulled.keys) {
+            summary[entity] = SyncImportEntitySummary(
+                upserted: upserted[entity] ?? 0,
+                tombstoned: tombstoned[entity] ?? 0,
+                refsNulled: refsNulled[entity] ?? 0)
+        }
+        return (http(request.url!), try JSONEncoder().encode(
+            SyncImportSummary(entities: summary, ignored: [])))
+    }
+
+    // MARK: - Internals
+
+    private func validation(
+        _ url: URL, index: Int, field: String,
+        constraint: String, message: String
+    ) throws -> (HTTPURLResponse, Data) {
+        var detail = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(SyncValidationDetail(
+                index: index, field: field,
+                constraint: constraint, message: message))
+        ) as! [String: Any]
+        detail["error"] = "validation"
+        return (http(url, status: 422),
+                try JSONSerialization.data(withJSONObject: detail))
+    }
+
+    private func http(_ url: URL, status: Int = 200) -> HTTPURLResponse {
+        HTTPURLResponse(
+            url: url, statusCode: status, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"])!
+    }
+
+    /// `*ID` reference fields inside a DTO `data` payload — the same
+    /// map `SyncRecordMapper.references` walks, on the raw JSON.
+    private static let referenceFields: [String: String] = [
+        "accountID": "account", "toAccountID": "account",
+        "categoryID": "category", "businessID": "business",
+        "rentalLeaseID": "rentalLease", "unitID": "rentalUnit",
+    ]
+
+    private static func references(in data: SyncJSONValue?)
+        -> [(field: String, key: UITestServerKey)]
+    {
+        guard case .object(let fields)? = data else { return [] }
+        var refs: [(String, UITestServerKey)] = []
+        for (field, entity) in referenceFields {
+            if case .string(let raw)? = fields[field],
+               let id = UUID(uuidString: raw) {
+                refs.append((field, UITestServerKey(entity: entity, id: id)))
+            }
+        }
+        return refs
+    }
+
+    /// The import's re-link rule: a `*ID` pointing at a row the
+    /// replacement does not carry is dropped, like the real server
+    /// writing it NULL — returns the cleaned data plus how many
+    /// references were nulled.
+    private static func nullDanglingReferences(
+        _ data: SyncJSONValue, liveKeys: Set<UITestServerKey>
+    ) -> (SyncJSONValue, Int) {
+        guard case .object(var fields) = data else { return (data, 0) }
+        var nulled = 0
+        for (field, entity) in referenceFields {
+            guard case .string(let raw)? = fields[field],
+                  let id = UUID(uuidString: raw) else { continue }
+            if !liveKeys.contains(UITestServerKey(entity: entity, id: id)) {
+                fields.removeValue(forKey: field)
+                nulled += 1
+            }
+        }
+        return (.object(fields), nulled)
+    }
+
+    private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// `URLRequest.httpBody` is often nil inside a `URLProtocol` — the
+    /// body only arrives on `httpBodyStream`.
+    private static func bodyData(of request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 4096)
+        defer { buffer.deallocate() }
+        while stream.hasBytesAvailable {
+            let read = stream.read(buffer, maxLength: 4096)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data
+    }
+}
+#endif

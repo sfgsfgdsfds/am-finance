@@ -7,6 +7,9 @@ import UniformTypeIdentifiers
 /// NavigationStack (from Settings); it must not wrap itself in one.
 struct BackupView: View {
     @Environment(\.modelContext) private var modelContext
+    /// Two-way web sync — when enabled a replace-restore also propagates
+    /// to the web on the next sync; the confirm flow says so.
+    @Environment(\.financeSync) private var financeSync
     @Query private var accounts: [Account]
     @Query private var categories: [LedgerCategory]
     @Query private var businesses: [Business]
@@ -87,7 +90,7 @@ struct BackupView: View {
                 importedDocument = nil
             }
         } message: {
-            Text("Toàn bộ dữ liệu hiện có sẽ bị xoá và thay bằng nội dung bản sao lưu. Thao tác này không thể hoàn tác.")
+            Text(replaceConfirmText)
         }
         .alert("Sao lưu & Khôi phục", isPresented: noticePresented, presenting: notice) { _ in
             Button("OK") {}
@@ -159,8 +162,27 @@ struct BackupView: View {
         } header: {
             Text("Khôi phục")
         } footer: {
-            Text("Chọn tệp JSON đã xuất trước đó. Bạn sẽ xem tóm tắt nội dung tệp trước khi quyết định gộp hay thay thế.")
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Chọn tệp JSON đã xuất trước đó. Bạn sẽ xem tóm tắt nội dung tệp trước khi quyết định gộp hay thay thế.")
+                if financeSync?.enabled == true {
+                    Label(
+                        "Đồng bộ với web đang bật — khôi phục thay thế cũng sẽ áp dụng lên dữ liệu trên web ở lần đồng bộ tới.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .foregroundStyle(.orange)
+                }
+            }
         }
+    }
+
+    /// The replace-confirm message — plus the web-sync warning line when
+    /// sync is on, since the wipe propagates to the server next sync.
+    private var replaceConfirmText: String {
+        var text = "Toàn bộ dữ liệu hiện có sẽ bị xoá và thay bằng nội dung bản sao lưu. Thao tác này không thể hoàn tác."
+        if financeSync?.enabled == true {
+            text += " Đồng bộ với web đang bật — thay đổi này cũng sẽ áp dụng lên dữ liệu trên web ở lần đồng bộ tới."
+        }
+        return text
     }
 
     // MARK: - Status helpers
