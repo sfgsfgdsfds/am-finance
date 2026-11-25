@@ -792,22 +792,54 @@ struct SyncRecordMapperTests {
         }
         try context.save()
 
+        let emptyAccount = Account(name: "Trống", kind: .cash)
+        let minimalTx = LedgerTransaction(
+            kind: .expense, amount: 1,
+            date: Date(timeIntervalSince1970: 1_800_000_050))
+        let minimalRateChange = LoanRateChange(
+            fromInstallment: 1, annualRatePercent: 11.5)
+        let minimalBudget = Budget(monthlyLimit: 1)
+        let minimalRule = RecurringRule(
+            title: "Tối thiểu", kind: .income, amount: 1,
+            frequency: .weekly,
+            startDate: Date(timeIntervalSince1970: 1_800_000_060))
+        let minimalUnit = RentalUnit(name: "P3", listPrice: 3)
+        let minimalLease = RentalLease(tenantName: "Lê C")
+
+        // Pin every timestamp the DTOs carry — the `.now` values models
+        // stamp on init would make the byte comparison depend on the
+        // wall clock.
+        let stamp = Date(timeIntervalSince1970: 1_760_000_000)
+        for row in [account, toAccount, fullAccount, emptyAccount] {
+            row.createdAt = stamp
+        }
+        for row in [unit, fullUnit, minimalUnit] { row.createdAt = stamp }
+        for row in [lease, fullLease, minimalLease] {
+            row.startDate = stamp
+            row.createdAt = stamp
+        }
+        for row in [rule, minimalRule] { row.createdAt = stamp }
+        for row in [budget, minimalBudget] { row.createdAt = stamp }
+        for row in [fullTx, minimalTx] {
+            row.createdAt = stamp
+            row.updatedAt = stamp
+        }
+
         let rows: [any PersistentModel] = [
             business, category,
-            Account(name: "Trống", kind: .cash),   // every optional nil
+            emptyAccount,                  // every optional nil
             fullAccount,
-            LedgerTransaction(kind: .expense, amount: 1),
+            minimalTx,
             fullTx,
-            LoanRateChange(fromInstallment: 1, annualRatePercent: 11.5),
+            minimalRateChange,
             rateChange,
-            Budget(monthlyLimit: 1),               // nil category
+            minimalBudget,                 // nil category
             budget,
-            RecurringRule(title: "Tối thiểu", kind: .income, amount: 1,
-                          frequency: .weekly, startDate: .now),
+            minimalRule,
             rule,
-            RentalUnit(name: "P3", listPrice: 3),  // nil business
+            minimalUnit,                   // nil business
             fullUnit,
-            RentalLease(tenantName: "Lê C"),       // nil unit + endDate
+            minimalLease,                  // nil unit + endDate
             fullLease,
         ]
         for row in rows {

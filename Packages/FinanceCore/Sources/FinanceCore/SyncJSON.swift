@@ -74,9 +74,9 @@ public enum SyncCanonicalScalar: Sendable {
     case bool(Bool)
     case int(Int64)
     case double(Double)
-    /// A timestamp — emits `YYYY-MM-DDTHH:MM:SS.sssZ`, rounded to the
-    /// nearest millisecond like the wire's ISO-8601 rendering (and the
-    /// server's stored form).
+    /// A timestamp — emits the wire's ISO-8601 rendering
+    /// (`YYYY-MM-DDTHH:MM:SS.sssZ`) normalized to canonical form, so a
+    /// `Date` hashes byte-identically to its encoded JSON string.
     case date(Date)
     /// A UUID — emits its lowercase string.
     case uuid(UUID)
@@ -229,38 +229,77 @@ enum SyncCanonical {
               isDigit(chars[17]), isDigit(chars[18])
         else { return nil }
 
-        var date: Date?
-        if let parsed = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true)
-            .parse(string) {
-            date = parsed
-        } else if let parsed = try? Date.ISO8601FormatStyle().parse(string) {
-            date = parsed
+        // What counts as a timestamp is unchanged: the whole string must
+        // parse as an ISO-8601 instant — fractional style first, then
+        // plain.
+        var parses = false
+        if (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+            .parse(string)) != nil {
+            parses = true
+        } else if (try? Date.ISO8601FormatStyle().parse(string)) != nil {
+            parses = true
         }
-        guard let date else { return nil }
+        guard parses else { return nil }
 
-        // The server truncates to milliseconds — hash the same value it
-        // will store, so a pulled record matches its pushed twin.
-        return render(epochMs: Int64(
-            (date.timeIntervalSince1970 * 1000).rounded(.towardZero)))
+        // Milliseconds come straight from the fraction TEXT — those are
+        // the digits the server stores (it truncates past three). A
+        // parsed `Date` cannot reproduce them: for many inputs
+        // `t * 1000` lands a hair under the integer (".219" parses to a
+        // double whose ms product is 218.999…), so reading the double
+        // back — truncated or rounded — shifts a millisecond the text
+        // never moved.
+        var fractionEnd = 19
+        var milliseconds = 0
+        if chars[19] == UInt8(ascii: ".") {
+            var index = 20
+            while index < chars.count, isDigit(chars[index]) {
+                index += 1
+            }
+            // A '.' followed by no digit can never reach here — the
+            // parse above rejects it — but stay strict anyway.
+            guard index > 20 else { return nil }
+            fractionEnd = index
+            for offset in 0..<3 {
+                let position = 20 + offset
+                milliseconds = milliseconds * 10
+                    + (position < index
+                       ? Int(chars[position] - UInt8(ascii: "0")) : 0)
+            }
+        }
+
+        // Whole seconds come from the fraction-stripped string — an
+        // exact integer-valued instant, so no double rounding can nudge
+        // it across a boundary. A numeric offset stays attached and
+        // lands on the right UTC second.
+        let stripped = String(
+            decoding: chars[0..<19] + chars[fractionEnd...], as: UTF8.self)
+        guard let base = try? Date.ISO8601FormatStyle().parse(stripped)
+        else { return nil }
+        return render(
+            epochMs: Int64(base.timeIntervalSince1970.rounded()) * 1000
+                + Int64(milliseconds))
     }
 
-    /// `YYYY-MM-DDTHH:MM:SS.sssZ` for a `Date` — the rendering both the
-    /// string normalizer above and `SyncCanonicalScalar.date` share, so
-    /// the direct DTO hash is byte-identical to the canonicalized JSON.
-    /// `rounding` picks the ms reduction: `.towardZero` for parsed
-    /// timestamps (the server truncates), `.toNearestOrAwayFromZero` for
-    /// live dates (the wire's ISO-8601 writer rounds).
-    static func timestamp(
-        _ date: Date, rounding: FloatingPointRoundingRule
-    ) -> String {
-        render(epochMs: Int64(
-            (date.timeIntervalSince1970 * 1000).rounded(rounding)))
-            ?? "1970-01-01T00:00:00.000Z"
+    /// `YYYY-MM-DDTHH:MM:SS.sssZ` for a `Date` — produced by the same
+    /// `ISO8601DateFormatter` the wire's date encoder writes with, then
+    /// passed through the same `normalizeTimestamp` `.string` content
+    /// runs, so the direct `SyncCanonicalScalar.date` rendering is
+    /// byte-identical to the encode → parse → canonicalize pipeline for
+    /// EVERY date. (If the formatted string ever failed to normalize it
+    /// would pass through unchanged — exactly what `.string` does.)
+    static func timestamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [
+            .withInternetDateTime, .withFractionalSeconds,
+        ]
+        let wire = formatter.string(from: date)
+        return normalizeTimestamp(wire) ?? wire
     }
 
-    /// `%04d-…-.%03dZ` of `epochMs` — including the negative-ms quirk
-    /// (`epochMs % 1000`) pre-1970 instants produce, kept so both paths
-    /// agree byte-for-byte.
+    /// `%04d-…-.%03dZ` of `epochMs`. The ms component is floored back
+    /// into `0...999` even for pre-1970 instants, so the canonical form
+    /// is always a well-formed `.sssZ` timestamp — and re-normalizing it
+    /// is a no-op.
     private static func render(epochMs: Int64) -> String? {
         let truncated = Date(timeIntervalSince1970: TimeInterval(epochMs) / 1000)
         var utc = Calendar(identifier: .gregorian)
@@ -270,7 +309,7 @@ enum SyncCanonical {
         guard let year = parts.year, let month = parts.month, let day = parts.day,
               let hour = parts.hour, let minute = parts.minute, let second = parts.second
         else { return nil }
-        let ms = Int(epochMs % 1000)
+        let ms = Int((epochMs % 1000 + 1000) % 1000)
         return String(
             format: "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
             year, month, day, hour, minute, second, ms)
@@ -317,7 +356,7 @@ extension SyncCanonical {
         case .uuid(let value):
             appendString(value.uuidString.lowercased(), to: &bytes)
         case .date(let value):
-            appendString(timestamp(value, rounding: .toNearestOrAwayFromZero), to: &bytes)
+            appendString(timestamp(value), to: &bytes)
         }
     }
 }

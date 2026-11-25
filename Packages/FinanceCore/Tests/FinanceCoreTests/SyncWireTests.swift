@@ -402,6 +402,45 @@ struct SyncContentHashTests {
                     == ast.canonicalData(), "\(stamp) mismatch")
         }
     }
+
+    @Test func fieldScalarDateMatchesTheWirePipelineForEveryMillisecond() {
+        // Property-style sweep: for EVERY millisecond value — at sub-ms
+        // offsets bracketing the .5µs rounding boundary, and pre-1970 —
+        // the direct `.date` scalar must emit the exact canonical bytes
+        // the encode → parse → canonicalize pipeline produces. Two
+        // floating-point renderings once drifted a millisecond apart on
+        // ~1-in-9 instants (local hash ≠ hash of the same record pulled
+        // back); both now derive from one function.
+        let wireDate = ISO8601DateFormatter()
+        wireDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        var instants: [Double] = []
+        let subMilliseconds = [0.0, 0.0001, 0.0004, 0.0005, 0.0006, 0.0009]
+        for second in [1_800_000_000.0, -1.0, -86_400.0, -31_557_600.0] {
+            for ms in 0..<1_000 {
+                for epsilon in subMilliseconds {
+                    instants.append(second + Double(ms) / 1_000 + epsilon)
+                }
+            }
+        }
+        instants += [
+            0.0, -0.0004, -0.0005, -0.0006,
+            1_800_000_000.9994, 1_800_000_000.9995,
+            -86_400.0004, -86_400.0005, -86_400.9995, -86_400.9999,
+            -99_999_999.0001, 99_999_999.9999,
+        ]
+        for instant in instants {
+            let date = Date(timeIntervalSince1970: instant)
+            let ast = SyncJSONValue.object([
+                "d": .string(wireDate.string(from: date)),
+            ])
+            let fields: [(String, SyncCanonicalScalar)] = [("d", .date(date))]
+            #expect(
+                SyncContentHasher.canonicalData(fields: fields)
+                    == ast.canonicalData(),
+                "t=\(instant) wire=\(wireDate.string(from: date))")
+        }
+    }
 }
 
 /// Diff of local-vs-shadow content hashes.
