@@ -64,6 +64,29 @@ public enum SyncJSONError: Error, Equatable, Sendable {
     case malformedJSON
 }
 
+/// A JSON scalar as the sync DTO encoder emits it — every field type the
+/// backup-v5 DTOs carry, tagged so the canonical writer needs no AST to
+/// know which normalizations apply. `SyncContentHasher.hash(fields:)`
+/// renders these byte-identically to `SyncJSONValue.canonicalData()` on
+/// the equivalent document — the same digest, without the
+/// encode → parse → canonicalize round trip.
+public enum SyncCanonicalScalar: Sendable {
+    case bool(Bool)
+    case int(Int64)
+    case double(Double)
+    /// A timestamp — emits `YYYY-MM-DDTHH:MM:SS.sssZ`, rounded to the
+    /// nearest millisecond like the wire's ISO-8601 rendering (and the
+    /// server's stored form).
+    case date(Date)
+    /// A UUID — emits its lowercase string.
+    case uuid(UUID)
+    /// A plain string — `SyncCanonical.content` normalization still
+    /// applies: a user string that merely LOOKS like a UUID or an
+    /// ISO-8601 timestamp is canonicalized exactly as the parse-then-
+    /// canonicalize pipeline would.
+    case string(String)
+}
+
 extension SyncJSONValue {
     /// Strict JSON per RFC 8259: no comments, no trailing data, numbers
     /// must be finite. This is the exact shape the sync wire carries.
@@ -217,7 +240,28 @@ enum SyncCanonical {
 
         // The server truncates to milliseconds — hash the same value it
         // will store, so a pulled record matches its pushed twin.
-        let epochMs = Int64((date.timeIntervalSince1970 * 1000).rounded(.towardZero))
+        return render(epochMs: Int64(
+            (date.timeIntervalSince1970 * 1000).rounded(.towardZero)))
+    }
+
+    /// `YYYY-MM-DDTHH:MM:SS.sssZ` for a `Date` — the rendering both the
+    /// string normalizer above and `SyncCanonicalScalar.date` share, so
+    /// the direct DTO hash is byte-identical to the canonicalized JSON.
+    /// `rounding` picks the ms reduction: `.towardZero` for parsed
+    /// timestamps (the server truncates), `.toNearestOrAwayFromZero` for
+    /// live dates (the wire's ISO-8601 writer rounds).
+    static func timestamp(
+        _ date: Date, rounding: FloatingPointRoundingRule
+    ) -> String {
+        render(epochMs: Int64(
+            (date.timeIntervalSince1970 * 1000).rounded(rounding)))
+            ?? "1970-01-01T00:00:00.000Z"
+    }
+
+    /// `%04d-…-.%03dZ` of `epochMs` — including the negative-ms quirk
+    /// (`epochMs % 1000`) pre-1970 instants produce, kept so both paths
+    /// agree byte-for-byte.
+    private static func render(epochMs: Int64) -> String? {
         let truncated = Date(timeIntervalSince1970: TimeInterval(epochMs) / 1000)
         var utc = Calendar(identifier: .gregorian)
         utc.timeZone = TimeZone(identifier: "UTC")!
@@ -237,8 +281,55 @@ enum SyncCanonical {
     }
 }
 
+extension SyncCanonical {
+    /// Canonical `{"k":v,…}` bytes built straight from typed DTO fields:
+    /// keys sorted, each scalar rendered exactly as `SyncJSONValue`'s
+    /// canonicalizer renders the equivalent AST node. Nil optionals are
+    /// simply absent from `fields`, like the JSON they stand for.
+    static func objectData(_ fields: [(String, SyncCanonicalScalar)]) -> Data {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(fields.count * 24)
+        bytes.append(UInt8(ascii: "{"))
+        for (index, field) in fields.sorted(by: { $0.0 < $1.0 }).enumerated() {
+            if index > 0 { bytes.append(UInt8(ascii: ",")) }
+            appendString(field.0, to: &bytes)
+            bytes.append(UInt8(ascii: ":"))
+            appendScalar(field.1, to: &bytes)
+        }
+        bytes.append(UInt8(ascii: "}"))
+        return Data(bytes)
+    }
+
+    /// One scalar in canonical form — see each case's doc on
+    /// `SyncCanonicalScalar` for which normalization applies.
+    private static func appendScalar(
+        _ scalar: SyncCanonicalScalar, to bytes: inout [UInt8]
+    ) {
+        switch scalar {
+        case .bool(let value):
+            bytes.append(contentsOf: [UInt8]((value ? "true" : "false").utf8))
+        case .int(let value):
+            bytes.append(contentsOf: [UInt8](String(value).utf8))
+        case .double(let value):
+            bytes.append(contentsOf: [UInt8](number(value).utf8))
+        case .string(let value):
+            appendString(content(value), to: &bytes)
+        case .uuid(let value):
+            appendString(value.uuidString.lowercased(), to: &bytes)
+        case .date(let value):
+            appendString(timestamp(value, rounding: .toNearestOrAwayFromZero), to: &bytes)
+        }
+    }
+}
+
 /// SHA-256 of the canonical JSON encoding — the content hash the sync
 /// engine compares against the shadow copy to detect local edits.
+///
+/// THE single hash for both sync directions: a local row's DTO fields go
+/// through `hash(fields:)`; a pulled server record is decoded to the same
+/// DTO and hashed the same way. `hash(_:)`/`hash(jsonData:)` remain for
+/// already-parsed wire values (the replayed push body) — they produce the
+/// same digest for the same record.
 public enum SyncContentHasher {
     /// Hash of a parsed JSON value.
     public static func hash(_ value: SyncJSONValue) -> String {
@@ -249,6 +340,29 @@ public enum SyncContentHasher {
     /// of a pulled record. Both forms of the same record hash equal.
     public static func hash(jsonData: Data) throws -> String {
         try hash(SyncJSONValue(jsonData: jsonData))
+    }
+
+    /// Hash of a DTO's canonical field list — byte-identical to hashing
+    /// the equivalent document's canonicalData, without building or
+    /// parsing any JSON. The hot path: this is what the diff feeds on
+    /// for every row, every cycle.
+    public static func hash(fields: [(String, SyncCanonicalScalar)]) -> String {
+        hash(canonicalData: SyncCanonical.objectData(fields))
+    }
+
+    /// Canonical bytes of `fields` — sorted keys, `.sssZ` dates, the
+    /// `wireBytes` size estimate batching needs alongside the hash.
+    public static func canonicalData(
+        fields: [(String, SyncCanonicalScalar)]
+    ) -> Data {
+        SyncCanonical.objectData(fields)
+    }
+
+    /// Hash of bytes already in canonical form — pairs with
+    /// `canonicalData(fields:)` so a row's digest and byte size come
+    /// from a single encoding pass.
+    public static func hash(canonicalData: Data) -> String {
+        hex(SHA256.hash(data: canonicalData))
     }
 
     private static func hex(_ digest: SHA256.Digest) -> String {

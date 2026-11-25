@@ -340,6 +340,68 @@ struct SyncContentHashTests {
             String(decoding: value.canonicalData(), as: UTF8.self)
             == #"{"a":0,"m":12.5,"z":[3,"café"]}"#)
     }
+
+    @Test func fieldScalarsRenderByteIdenticalCanonicalJSON() throws {
+        // The direct DTO-field encoder must produce the exact canonical
+        // bytes the parse → canonicalize pipeline produces for the same
+        // document — every scalar kind, one document.
+        let id = UUID(uuidString: "AAAAAAAA-1111-4111-8111-111111111111")!
+        // .9999s — the wire's ISO-8601 writer rounds to .000Z.
+        let date = Date(timeIntervalSince1970: 1_800_000_000.9999)
+        let wireDate = ISO8601DateFormatter()
+        wireDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let fields: [(String, SyncCanonicalScalar)] = [
+            // Deliberately unordered — sorting is the encoder's job.
+            ("zeta", .string("café \"x\"\n")),
+            ("id", .uuid(id)),
+            ("amount", .int(45_000)),
+            ("rate", .double(11.5)),
+            ("whole", .double(12.0)),
+            ("ok", .bool(true)),
+            ("when", .date(date)),
+            // A USER string that merely looks like a UUID is normalized
+            // (lowercased) on both paths — same content rule.
+            ("noteIDish", .string(id.uuidString)),
+        ]
+        let ast = SyncJSONValue.object([
+            "zeta": .string("café \"x\"\n"),
+            "id": .string(id.uuidString),
+            "amount": .int(45_000),
+            "rate": .double(11.5),
+            "whole": .double(12.0),
+            "ok": .bool(true),
+            "when": .string(wireDate.string(from: date)),
+            "noteIDish": .string(id.uuidString),
+        ])
+        let canonical = SyncContentHasher.canonicalData(fields: fields)
+        #expect(canonical == ast.canonicalData())
+        #expect(SyncContentHasher.hash(fields: fields)
+                == SyncContentHasher.hash(ast))
+        #expect(SyncContentHasher.hash(canonicalData: canonical)
+                == SyncContentHasher.hash(ast))
+    }
+
+    @Test func fieldScalarDateRoundsLikeTheWireWriter() throws {
+        // `SyncCanonicalScalar.date` mirrors ISO8601DateFormatter's
+        // round-to-ms, not the parsed-string path's truncate-to-ms.
+        let wireDate = ISO8601DateFormatter()
+        wireDate.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        for stamp in [
+            1_800_000_000.0004,   // rounds down
+            1_800_000_000.0005,   // rounds up (half away from zero)
+            1_800_000_000.9999,   // crosses the second boundary
+            1_800_000_000.1230,   // trailing zero stays ".123"
+        ] {
+            let date = Date(timeIntervalSince1970: stamp)
+            let fields: [(String, SyncCanonicalScalar)] = [("when", .date(date))]
+            let ast = SyncJSONValue.object([
+                "when": .string(wireDate.string(from: date)),
+            ])
+            #expect(SyncContentHasher.canonicalData(fields: fields)
+                    == ast.canonicalData(), "\(stamp) mismatch")
+        }
+    }
 }
 
 /// Diff of local-vs-shadow content hashes.
