@@ -98,13 +98,22 @@ enum BackupCodec {
     }
 
     static func encode(_ document: BackupDocument) throws -> Data {
+        try makeEncoder().encode(document)
+    }
+
+    /// The JSON shape every backup-v5 writer must produce — sorted keys
+    /// and `BackupDateCodec` ISO-8601-with-fractional-seconds dates.
+    /// Shared with `SyncRecordMapper`, whose DTO payloads must be
+    /// byte-compatible with a backup export (the server stores the same
+    /// encoding).
+    static func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .custom { date, encoder in
             var container = encoder.singleValueContainer()
             try container.encode(BackupDateCodec.string(from: date))
         }
-        return try encoder.encode(document)
+        return encoder
     }
 
     // MARK: - Decode
@@ -130,7 +139,9 @@ enum BackupCodec {
         }
     }
 
-    private static func makeDecoder() -> JSONDecoder {
+    /// The decoder counterpart of `makeEncoder` — internal so the sync
+    /// mapper decodes wire `data` with the same date rules.
+    static func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()

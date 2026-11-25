@@ -15,6 +15,38 @@ struct BackupRestoreResult: Equatable, Sendable {
     var inserted = 0
     var updated = 0
     var skipped = 0
+
+    /// Adds one row's outcome to the counts.
+    mutating func count(_ outcome: BackupRowOutcome) {
+        switch outcome {
+        case .inserted: inserted += 1
+        case .updated: updated += 1
+        case .skipped: skipped += 1
+        }
+    }
+}
+
+/// What happened to one row an `upsertRow` was applied to.
+enum BackupRowOutcome {
+    case inserted
+    case updated
+    case skipped
+}
+
+/// Per-entity id→row lookup tables. `restore` builds them once from the
+/// store (or empty for `.replace`); the sync engine builds them on demand
+/// for the pull-apply path. Inserted rows are registered back into the
+/// maps so later children re-link against them.
+struct BackupRowMaps {
+    var accounts: [UUID: Account] = [:]
+    var categories: [UUID: LedgerCategory] = [:]
+    var businesses: [UUID: Business] = [:]
+    var transactions: [UUID: LedgerTransaction] = [:]
+    var rateChanges: [UUID: LoanRateChange] = [:]
+    var budgets: [UUID: Budget] = [:]
+    var recurringRules: [UUID: RecurringRule] = [:]
+    var rentalUnits: [UUID: RentalUnit] = [:]
+    var rentalLeases: [UUID: RentalLease] = [:]
 }
 
 /// Applies a decoded `BackupDocument` to a `ModelContext`. Every change
@@ -34,46 +66,32 @@ enum BackupRestorer {
 
         var result = BackupRestoreResult()
         do {
-            var accounts: [UUID: Account]
-            var categories: [UUID: LedgerCategory]
-            var businesses: [UUID: Business]
-            var transactions: [UUID: LedgerTransaction]
-            var rateChanges: [UUID: LoanRateChange]
-            var budgets: [UUID: Budget]
-            var recurringRules: [UUID: RecurringRule]
-            var rentalUnits: [UUID: RentalUnit]
-            var rentalLeases: [UUID: RentalLease]
+            var maps: BackupRowMaps
 
             if mode == .replace {
                 try deleteAllRows(in: context)
-                accounts = [:]
-                categories = [:]
-                businesses = [:]
-                transactions = [:]
-                rateChanges = [:]
-                budgets = [:]
-                recurringRules = [:]
-                rentalUnits = [:]
-                rentalLeases = [:]
+                maps = BackupRowMaps()
             } else {
-                accounts = try context.fetch(FetchDescriptor<Account>())
-                    .reduce(into: [:]) { $0[$1.id] = $1 }
-                categories = try context.fetch(FetchDescriptor<LedgerCategory>())
-                    .reduce(into: [:]) { $0[$1.id] = $1 }
-                businesses = try context.fetch(FetchDescriptor<Business>())
-                    .reduce(into: [:]) { $0[$1.id] = $1 }
-                transactions = try context.fetch(FetchDescriptor<LedgerTransaction>())
-                    .reduce(into: [:]) { $0[$1.id] = $1 }
-                rateChanges = try context.fetch(FetchDescriptor<LoanRateChange>())
-                    .reduce(into: [:]) { $0[$1.id] = $1 }
-                budgets = try context.fetch(FetchDescriptor<Budget>())
-                    .reduce(into: [:]) { $0[$1.id] = $1 }
-                recurringRules = try context.fetch(FetchDescriptor<RecurringRule>())
-                    .reduce(into: [:]) { $0[$1.id] = $1 }
-                rentalUnits = try context.fetch(FetchDescriptor<RentalUnit>())
-                    .reduce(into: [:]) { $0[$1.id] = $1 }
-                rentalLeases = try context.fetch(FetchDescriptor<RentalLease>())
-                    .reduce(into: [:]) { $0[$1.id] = $1 }
+                maps = BackupRowMaps(
+                    accounts: try context.fetch(FetchDescriptor<Account>())
+                        .reduce(into: [:]) { $0[$1.id] = $1 },
+                    categories: try context.fetch(FetchDescriptor<LedgerCategory>())
+                        .reduce(into: [:]) { $0[$1.id] = $1 },
+                    businesses: try context.fetch(FetchDescriptor<Business>())
+                        .reduce(into: [:]) { $0[$1.id] = $1 },
+                    transactions: try context.fetch(FetchDescriptor<LedgerTransaction>())
+                        .reduce(into: [:]) { $0[$1.id] = $1 },
+                    rateChanges: try context.fetch(FetchDescriptor<LoanRateChange>())
+                        .reduce(into: [:]) { $0[$1.id] = $1 },
+                    budgets: try context.fetch(FetchDescriptor<Budget>())
+                        .reduce(into: [:]) { $0[$1.id] = $1 },
+                    recurringRules: try context.fetch(FetchDescriptor<RecurringRule>())
+                        .reduce(into: [:]) { $0[$1.id] = $1 },
+                    rentalUnits: try context.fetch(FetchDescriptor<RentalUnit>())
+                        .reduce(into: [:]) { $0[$1.id] = $1 },
+                    rentalLeases: try context.fetch(FetchDescriptor<RentalLease>())
+                        .reduce(into: [:]) { $0[$1.id] = $1 }
+                )
             }
 
             // Parents first so transaction references resolve against the
@@ -81,143 +99,43 @@ enum BackupRestorer {
             // come before accounts because an account's `business` link is
             // re-applied from the restored set.
             for dto in document.categories {
-                if let existing = categories[dto.id] {
-                    apply(dto, to: existing)
-                    result.updated += 1
-                } else {
-                    let category = LedgerCategory(id: dto.id, name: "", kind: .expense)
-                    apply(dto, to: category)
-                    context.insert(category)
-                    categories[dto.id] = category
-                    result.inserted += 1
-                }
+                result.count(upsertRow(dto, into: context, maps: &maps))
             }
-
             for dto in document.businesses {
-                if let existing = businesses[dto.id] {
-                    apply(dto, to: existing)
-                    result.updated += 1
-                } else {
-                    let business = Business(id: dto.id, name: "")
-                    apply(dto, to: business)
-                    context.insert(business)
-                    businesses[dto.id] = business
-                    result.inserted += 1
-                }
+                result.count(upsertRow(dto, into: context, maps: &maps))
             }
-
             for dto in document.accounts {
-                if let existing = accounts[dto.id] {
-                    apply(dto, to: existing, businesses: businesses)
-                    result.updated += 1
-                } else {
-                    let account = Account(id: dto.id, name: "", kind: .cash)
-                    apply(dto, to: account, businesses: businesses)
-                    context.insert(account)
-                    accounts[dto.id] = account
-                    result.inserted += 1
-                }
+                result.count(upsertRow(dto, into: context, maps: &maps))
             }
 
             // Rental units re-link their business; leases re-link their
             // unit — both before the transaction pass, which re-links
             // `rentalLeaseID` against the lease map.
             for dto in document.rentalUnits {
-                if let existing = rentalUnits[dto.id] {
-                    apply(dto, to: existing, businesses: businesses)
-                    result.updated += 1
-                } else {
-                    let unit = RentalUnit(id: dto.id, name: "")
-                    apply(dto, to: unit, businesses: businesses)
-                    context.insert(unit)
-                    rentalUnits[dto.id] = unit
-                    result.inserted += 1
-                }
+                result.count(upsertRow(dto, into: context, maps: &maps))
             }
-
             for dto in document.rentalLeases {
-                if let existing = rentalLeases[dto.id] {
-                    apply(dto, to: existing, units: rentalUnits)
-                    result.updated += 1
-                } else {
-                    let lease = RentalLease(id: dto.id, tenantName: "")
-                    apply(dto, to: lease, units: rentalUnits)
-                    context.insert(lease)
-                    rentalLeases[dto.id] = lease
-                    result.inserted += 1
-                }
+                result.count(upsertRow(dto, into: context, maps: &maps))
             }
 
             for dto in document.transactions {
-                if let existing = transactions[dto.id] {
-                    // The row with the newer updatedAt wins; an equal stamp
-                    // means the copies agree and nothing needs writing.
-                    if dto.updatedAt > existing.updatedAt {
-                        apply(dto, to: existing, accounts: accounts, categories: categories,
-                              businesses: businesses, leases: rentalLeases)
-                        result.updated += 1
-                    } else {
-                        result.skipped += 1
-                    }
-                } else {
-                    let transaction = LedgerTransaction(id: dto.id, kind: .expense, amount: 0)
-                    apply(dto, to: transaction, accounts: accounts, categories: categories,
-                          businesses: businesses, leases: rentalLeases)
-                    context.insert(transaction)
-                    transactions[dto.id] = transaction
-                    result.inserted += 1
-                }
+                result.count(upsertRow(dto, into: context, maps: &maps))
             }
 
             // Rate changes re-link against the restored loan accounts, so
             // they come after the accounts pass — like transactions do.
             for dto in document.loanRateChanges {
-                if let existing = rateChanges[dto.id] {
-                    apply(dto, to: existing, accounts: accounts)
-                    result.updated += 1
-                } else {
-                    let change = LoanRateChange(
-                        id: dto.id, fromInstallment: 0, annualRatePercent: 0
-                    )
-                    apply(dto, to: change, accounts: accounts)
-                    context.insert(change)
-                    rateChanges[dto.id] = change
-                    result.inserted += 1
-                }
+                result.count(upsertRow(dto, into: context, maps: &maps))
             }
 
             // Budgets re-link their watched category; recurring rules
             // re-link accounts, category and business — like transactions,
             // they come after the parent passes.
             for dto in document.budgets {
-                if let existing = budgets[dto.id] {
-                    apply(dto, to: existing, categories: categories)
-                    result.updated += 1
-                } else {
-                    let budget = Budget(id: dto.id, monthlyLimit: 0)
-                    apply(dto, to: budget, categories: categories)
-                    context.insert(budget)
-                    budgets[dto.id] = budget
-                    result.inserted += 1
-                }
+                result.count(upsertRow(dto, into: context, maps: &maps))
             }
-
             for dto in document.recurringRules {
-                if let existing = recurringRules[dto.id] {
-                    apply(dto, to: existing, accounts: accounts,
-                          categories: categories, businesses: businesses)
-                    result.updated += 1
-                } else {
-                    let rule = RecurringRule(
-                        id: dto.id, title: "", kind: .expense, amount: 0,
-                        frequency: .monthly, startDate: .now
-                    )
-                    apply(dto, to: rule, accounts: accounts,
-                          categories: categories, businesses: businesses)
-                    context.insert(rule)
-                    recurringRules[dto.id] = rule
-                    result.inserted += 1
-                }
+                result.count(upsertRow(dto, into: context, maps: &maps))
             }
 
             try context.save()
@@ -228,12 +146,186 @@ enum BackupRestorer {
         }
     }
 
+    // MARK: - Per-row upserts (shared with the sync pull-apply path)
+
+    /// Find-or-create one row by DTO id, copy every field and re-link its
+    /// references through `maps`, then register the row back into `maps`
+    /// so later children resolve against it. Exactly what `restore` does
+    /// per row — the same rules (transactions keep the newer `updatedAt`).
+    /// The context's `save()` is left to the caller.
+    @discardableResult
+    static func upsertRow(
+        _ dto: BackupCategory,
+        into context: ModelContext,
+        maps: inout BackupRowMaps
+    ) -> BackupRowOutcome {
+        if let existing = maps.categories[dto.id] {
+            apply(dto, to: existing)
+            return .updated
+        }
+        let category = LedgerCategory(id: dto.id, name: "", kind: .expense)
+        apply(dto, to: category)
+        context.insert(category)
+        maps.categories[dto.id] = category
+        return .inserted
+    }
+
+    @discardableResult
+    static func upsertRow(
+        _ dto: BackupBusiness,
+        into context: ModelContext,
+        maps: inout BackupRowMaps
+    ) -> BackupRowOutcome {
+        if let existing = maps.businesses[dto.id] {
+            apply(dto, to: existing)
+            return .updated
+        }
+        let business = Business(id: dto.id, name: "")
+        apply(dto, to: business)
+        context.insert(business)
+        maps.businesses[dto.id] = business
+        return .inserted
+    }
+
+    @discardableResult
+    static func upsertRow(
+        _ dto: BackupAccount,
+        into context: ModelContext,
+        maps: inout BackupRowMaps
+    ) -> BackupRowOutcome {
+        if let existing = maps.accounts[dto.id] {
+            apply(dto, to: existing, businesses: maps.businesses)
+            return .updated
+        }
+        let account = Account(id: dto.id, name: "", kind: .cash)
+        apply(dto, to: account, businesses: maps.businesses)
+        context.insert(account)
+        maps.accounts[dto.id] = account
+        return .inserted
+    }
+
+    @discardableResult
+    static func upsertRow(
+        _ dto: BackupRentalUnit,
+        into context: ModelContext,
+        maps: inout BackupRowMaps
+    ) -> BackupRowOutcome {
+        if let existing = maps.rentalUnits[dto.id] {
+            apply(dto, to: existing, businesses: maps.businesses)
+            return .updated
+        }
+        let unit = RentalUnit(id: dto.id, name: "")
+        apply(dto, to: unit, businesses: maps.businesses)
+        context.insert(unit)
+        maps.rentalUnits[dto.id] = unit
+        return .inserted
+    }
+
+    @discardableResult
+    static func upsertRow(
+        _ dto: BackupRentalLease,
+        into context: ModelContext,
+        maps: inout BackupRowMaps
+    ) -> BackupRowOutcome {
+        if let existing = maps.rentalLeases[dto.id] {
+            apply(dto, to: existing, units: maps.rentalUnits)
+            return .updated
+        }
+        let lease = RentalLease(id: dto.id, tenantName: "")
+        apply(dto, to: lease, units: maps.rentalUnits)
+        context.insert(lease)
+        maps.rentalLeases[dto.id] = lease
+        return .inserted
+    }
+
+    /// The row with the newer `updatedAt` wins; an equal stamp means the
+    /// copies agree and nothing needs writing — `.skipped`.
+    @discardableResult
+    static func upsertRow(
+        _ dto: BackupTransaction,
+        into context: ModelContext,
+        maps: inout BackupRowMaps
+    ) -> BackupRowOutcome {
+        if let existing = maps.transactions[dto.id] {
+            guard dto.updatedAt > existing.updatedAt else { return .skipped }
+            apply(dto, to: existing, accounts: maps.accounts,
+                  categories: maps.categories,
+                  businesses: maps.businesses, leases: maps.rentalLeases)
+            return .updated
+        }
+        let transaction = LedgerTransaction(id: dto.id, kind: .expense, amount: 0)
+        apply(dto, to: transaction, accounts: maps.accounts,
+              categories: maps.categories,
+              businesses: maps.businesses, leases: maps.rentalLeases)
+        context.insert(transaction)
+        maps.transactions[dto.id] = transaction
+        return .inserted
+    }
+
+    @discardableResult
+    static func upsertRow(
+        _ dto: BackupLoanRateChange,
+        into context: ModelContext,
+        maps: inout BackupRowMaps
+    ) -> BackupRowOutcome {
+        if let existing = maps.rateChanges[dto.id] {
+            apply(dto, to: existing, accounts: maps.accounts)
+            return .updated
+        }
+        let change = LoanRateChange(
+            id: dto.id, fromInstallment: 0, annualRatePercent: 0
+        )
+        apply(dto, to: change, accounts: maps.accounts)
+        context.insert(change)
+        maps.rateChanges[dto.id] = change
+        return .inserted
+    }
+
+    @discardableResult
+    static func upsertRow(
+        _ dto: BackupBudget,
+        into context: ModelContext,
+        maps: inout BackupRowMaps
+    ) -> BackupRowOutcome {
+        if let existing = maps.budgets[dto.id] {
+            apply(dto, to: existing, categories: maps.categories)
+            return .updated
+        }
+        let budget = Budget(id: dto.id, monthlyLimit: 0)
+        apply(dto, to: budget, categories: maps.categories)
+        context.insert(budget)
+        maps.budgets[dto.id] = budget
+        return .inserted
+    }
+
+    @discardableResult
+    static func upsertRow(
+        _ dto: BackupRecurringRule,
+        into context: ModelContext,
+        maps: inout BackupRowMaps
+    ) -> BackupRowOutcome {
+        if let existing = maps.recurringRules[dto.id] {
+            apply(dto, to: existing, accounts: maps.accounts,
+                  categories: maps.categories, businesses: maps.businesses)
+            return .updated
+        }
+        let rule = RecurringRule(
+            id: dto.id, title: "", kind: .expense, amount: 0,
+            frequency: .monthly, startDate: .now
+        )
+        apply(dto, to: rule, accounts: maps.accounts,
+              categories: maps.categories, businesses: maps.businesses)
+        context.insert(rule)
+        maps.recurringRules[dto.id] = rule
+        return .inserted
+    }
+
     /// Deletes every row of every model in `AppSchema` — children before
     /// parents so relationship nullification never fights the deletes.
     /// Nothing is saved here: the caller's `save()` commits the deletions
     /// together with whatever it does next (`.replace` restore inserts,
     /// the data reset's reseed). Shared by `.replace` restores and the
-    /// "Xoá tất cả" reset.
+    /// "Xoá dữ liệu" reset.
     static func deleteAllRows(in context: ModelContext) throws {
         for row in try context.fetch(FetchDescriptor<LedgerTransaction>()) { context.delete(row) }
         for row in try context.fetch(FetchDescriptor<LoanRateChange>()) { context.delete(row) }
@@ -252,7 +344,8 @@ enum BackupRestorer {
     /// this build does not know still round-trips verbatim. `businessID`
     /// (a receivable account's business) is re-linked to a live object; an
     /// id that exists neither in the backup nor in the store becomes nil.
-    private static func apply(
+    /// Internal (not private) so the sync applier can reuse it per row.
+    static func apply(
         _ dto: BackupAccount,
         to account: Account,
         businesses: [UUID: Business]
@@ -280,7 +373,7 @@ enum BackupRestorer {
         account.business = dto.businessID.flatMap { businesses[$0] }
     }
 
-    private static func apply(_ dto: BackupCategory, to category: LedgerCategory) {
+    static func apply(_ dto: BackupCategory, to category: LedgerCategory) {
         category.name = dto.name
         category.kindRaw = dto.kindRaw
         category.icon = dto.icon
@@ -289,7 +382,7 @@ enum BackupRestorer {
         category.isArchived = dto.isArchived
     }
 
-    private static func apply(_ dto: BackupBusiness, to business: Business) {
+    static func apply(_ dto: BackupBusiness, to business: Business) {
         business.name = dto.name
         business.icon = dto.icon
         business.colorHex = dto.colorHex
@@ -300,7 +393,7 @@ enum BackupRestorer {
 
     /// The account reference is re-linked to a live loan account; an id
     /// that exists neither in the backup nor in the store becomes nil.
-    private static func apply(
+    static func apply(
         _ dto: BackupLoanRateChange,
         to change: LoanRateChange,
         accounts: [UUID: Account]
@@ -312,7 +405,7 @@ enum BackupRestorer {
 
     /// A unit's business is re-linked to a live object; an id that exists
     /// neither in the backup nor in the store becomes nil.
-    private static func apply(
+    static func apply(
         _ dto: BackupRentalUnit,
         to unit: RentalUnit,
         businesses: [UUID: Business]
@@ -328,7 +421,7 @@ enum BackupRestorer {
 
     /// A lease's room is re-linked to a live object; an id that exists
     /// neither in the backup nor in the store becomes nil.
-    private static func apply(
+    static func apply(
         _ dto: BackupRentalLease,
         to lease: RentalLease,
         units: [UUID: RentalUnit]
@@ -348,7 +441,7 @@ enum BackupRestorer {
 
     /// IDs in the DTO are re-linked to live objects; an id that exists
     /// neither in the backup nor in the store becomes nil.
-    private static func apply(
+    static func apply(
         _ dto: BackupTransaction,
         to transaction: LedgerTransaction,
         accounts: [UUID: Account],
@@ -376,7 +469,7 @@ enum BackupRestorer {
     /// The watched category is re-linked to a live object; an id that
     /// exists neither in the backup nor in the store becomes nil — the
     /// budget then reads as the overall monthly one.
-    private static func apply(
+    static func apply(
         _ dto: BackupBudget,
         to budget: Budget,
         categories: [UUID: LedgerCategory]
@@ -390,7 +483,7 @@ enum BackupRestorer {
 
     /// `kindRaw`/`frequencyRaw` are assigned directly so a value this build
     /// does not know still round-trips verbatim.
-    private static func apply(
+    static func apply(
         _ dto: BackupRecurringRule,
         to rule: RecurringRule,
         accounts: [UUID: Account],
