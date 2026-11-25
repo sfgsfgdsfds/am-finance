@@ -1,3 +1,4 @@
+import Foundation
 import SwiftData
 
 /// Every SwiftData model in the app, listed in one place.
@@ -28,4 +29,21 @@ enum AppModelContainer {
         )
         return try ModelContainer(for: schema, configurations: [configuration])
     }
+
+    /// The legacy on-disk store the app used before the online-only
+    /// launch — `Application Support/default.store` (SwiftData's default
+    /// location for a nameless configuration). Only the one-time legacy
+    /// migration opens it; `directory` is injectable so tests use a temp
+    /// folder.
+    static func makeLegacyOnDisk(directory: URL) throws -> ModelContainer {
+        let schema = Schema(AppSchema.allModels)
+        let configuration = ModelConfiguration(
+            schema: schema,
+            url: directory.appendingPathComponent(legacyStoreFileName),
+            cloudKitDatabase: .none
+        )
+        return try ModelContainer(for: schema, configurations: [configuration])
+    }
+
+    static let legacyStoreFileName = "default.store"
 }

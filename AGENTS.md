@@ -153,7 +153,12 @@ workers know what already exists. Pushed views must not create their own
 - `CreditCards/` — `CreditCardDetailView(account:)`, `CreditCardPaymentSheet`.
 - `CSVImport/` — `CSVImportView` (Settings → Dữ liệu → "Nhập sao kê CSV"; pick file + account, map columns, confirm) + `CSVImportParser`/`Detector`/`Mapper`/`Importer`/`Deduper`.
 - `Dashboard/` — `DashboardView` ("Tổng quan" tab) + its card structs.
-- `FinanceSync/` — two-way server sync: `FinanceSyncEngine`
+- `FinanceSync/` — two-way server sync (online-only launch: every REAL
+  launch runs it over an in-memory app store AND an in-memory shadow —
+  `FinanceSyncCoordinator.makeStack(inMemoryShadow: true)`, no
+  `FinanceSync.store` file is opened; `FinanceSyncBootstrap.loadOnline`
+  is the launch load and `FinanceSyncAPIClient.exportSnapshot()`/`head()`
+  its server calls — see `OnlineStore/`): `FinanceSyncEngine`
   (`actor` owning a background `ModelContext` — `syncOnce(fullScan:)` pulls from the
   shadow cursor with parent-before-child deferred resolution, then
   diffs local content hashes vs the shadow and pushes `SyncBatcher`
@@ -230,6 +235,11 @@ workers know what already exists. Pushed views must not create their own
   (Settings → Dữ liệu → "Đồng bộ với web", AX ids `financeSync.*`)
   hosts status/report/quarantine, the probe-driven first-sync choice
   with destructive confirms, and Đồng bộ ngay/Tạm dừng/Ngắt kết nối.
+  Only USER saves trigger the auto-sync (`FinanceSyncSaveFilter`:
+  engine-origin thread mark + synced-entity names + container), and
+  `FinanceSyncMainContextRefresher` re-fetches overwritten rows the main
+  context holds after each applied page (its observation gap is a known
+  issue in `FinanceSyncPullApplyTests`, for stage 2).
   `BackgroundRefreshRunner` runs the web sync as a second
   `BackgroundRefreshSyncing` step behind the same seam.
   `FinanceSyncUITestSupport` is the DEBUG-only `-uiTestFakeSyncServer`
@@ -239,6 +249,36 @@ workers know what already exists. Pushed views must not create their own
 - `DataReset/` — `DataResetView` (Settings → Dữ liệu → "Xoá dữ liệu"): level A wipes transactions + import memory, level B wipes every model and reseeds; BOTH levels also wipe the saved Agent conversation history (`DataResetService.conversationStore.deleteAll()`); `DataResetService`, `DataResetSummary`; success posts `.dataResetCompleted` → `AMFinanceApp` rebuilds the root.
 - `Debts/` — `DebtsView` ("Nợ & Thẻ" tab).
 - `Loans/` — `LoanDetailView(account:)`, `LoanPaymentSheet`, `LoanPrepaymentSheet`, `LoanRateChangeSheet`.
+- `OnlineStore/` — the online-only launch (stage 1; the web server IS the
+  backend, nothing is persisted locally). `OnlineStore` (@MainActor
+  @Observable; phases `starting → signedOut → migratingLegacy → loading →
+  ready | failed(text)`, `signIn()`/`retry()`) is created in `AMFinanceApp`
+  for every real launch (and for `-uiTestInMemoryStore -uiTestFakeSyncServer
+  -uiTestOnline`, DEBUG) over an in-memory app container with NO
+  `SeedData` and an in-memory shadow; `OnlineGate` (`OnlineGateView`) shows
+  `RootTabView` — and so recurring/reminder/wallet-sync activation — ONLY
+  in `ready`, else sign-in (client-id field when WalletLink is not
+  configured) / loading / error + "Thử lại". Load = `GET /v1/backup/export`
+  (`FinanceSyncSnapshot`: document + `syncSeq`, body wins over
+  `X-Sync-Seq`) → `FinanceSyncBootstrap.loadOnline`: `.replace` restore
+  inside `FinanceSyncSaveFilter.asEngine`, shadow = local hashes at cursor
+  `syncSeq`, enable, one engine cycle (pushes 0, pulls only newer seqs); a
+  brand-new server (`syncSeq == 0`, no rows) is seeded with `SeedData` in
+  memory and the cycle pushes it. Plain `-uiTestInMemoryStore` launches
+  stay seeded/offline/no gate. `LegacyStoreMigrator` (after sign-in,
+  before load, only if `Application Support/default.store` exists —
+  verified default URL): backup-v5 export to `LegacyStore-<ts>/
+  legacy-backup.json` FIRST; sync configured (enabled/paused/any shadow
+  entry or cursor) → `syncOnce(fullScan:)` twice, the second must push 0
+  (still-quarantined records only live in the backup → one-time notice);
+  never synced → `head == 0` imports the export, else server wins + notice;
+  then `default.store*`/`FinanceSync.store*` are MOVED (never deleted) into
+  the folder. `LegacyMigration.json` records folder/decisions so a retry
+  after any failure resumes; any failure moves nothing → `failed`.
+  `BackgroundRefreshRunner(isDataReady:)` skips wallet sync, web sync,
+  recurring AND reminders until the store is `ready`. Tests:
+  `AppTests/OnlineStoreTests.swift` (temp-directory Application Support,
+  `FakeSyncServer` export/head/`setFailure` seams).
 - `Receivables/` — `ReceivablesView(business:?)`, `ReceivableDetailView(account:)`, `ReceivableActionSheet` (advance/repayment/fee/write-off).
 - `Recurring/` — `RecurringListView`, `RecurringEditView`; `App/Models/RecurringGenerator` posts due occurrences on activation.
 - `Reminders/` — `ReminderSettingsView`; `ReminderScheduler.reschedule(context:)` runs on activation.

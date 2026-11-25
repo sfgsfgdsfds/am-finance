@@ -48,6 +48,28 @@ enum FinanceSyncError: LocalizedError, Equatable {
     }
 }
 
+/// `GET /v1/backup/export` decoded: the live ledger plus the change
+/// stream position it was read at.
+struct FinanceSyncSnapshot: Sendable {
+    var document: BackupDocument
+    var syncSeq: Int64
+}
+
+/// Just the top-level `syncSeq` of an export body (the iPhone's
+/// `BackupDocument` decoder ignores the key).
+private struct FinanceSyncSeqEnvelope: Decodable {
+    var syncSeq: Int64?
+}
+
+/// `GET /v1/sync/head` body.
+private struct SyncHeadResponse: Decodable {
+    var highWaterSeq: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case highWaterSeq = "high_water_seq"
+    }
+}
+
 /// Typed client for the finance sync API on `<baseURL>/v1`. Mirrors
 /// `WalletAPIClient`: Bearer header from the shared WalletLink session,
 /// one refresh-and-retry on 401, errors mapped to `FinanceSyncError`.
@@ -126,11 +148,39 @@ struct FinanceSyncAPIClient: Sendable {
         return try decode(SyncImportSummary.self, from: data)
     }
 
+    /// GET /v1/sync/head — the server's high-water seq (`0` for an
+    /// account that was never written).
+    func head() async throws -> Int64 {
+        let data = try await perform(method: "GET", path: "v1/sync/head")
+        return try decode(SyncHeadResponse.self, from: data).highWaterSeq
+    }
+
+    /// GET /v1/backup/export — every live row of the user as one
+    /// backup-v5 document read in a single snapshot, plus the change
+    /// stream position of that snapshot: pulling from `cursor == syncSeq`
+    /// afterwards misses nothing and repeats nothing. The body's
+    /// top-level `syncSeq` wins; the `X-Sync-Seq` header is the fallback.
+    func exportSnapshot() async throws -> FinanceSyncSnapshot {
+        let (data, http) = try await performRaw(
+            method: "GET", path: "v1/backup/export")
+        let document: BackupDocument
+        do {
+            document = try BackupCodec.decode(data)
+        } catch {
+            throw FinanceSyncError.decoding
+        }
+        let bodySeq = (try? JSONDecoder().decode(
+            FinanceSyncSeqEnvelope.self, from: data))?.syncSeq
+        let headerSeq = http.value(forHTTPHeaderField: "X-Sync-Seq")
+            .flatMap { Int64($0.trimmingCharacters(in: .whitespaces)) }
+        guard let seq = bodySeq ?? headerSeq, seq >= 0 else {
+            throw FinanceSyncError.decoding
+        }
+        return FinanceSyncSnapshot(document: document, syncSeq: seq)
+    }
+
     // MARK: - Internals
 
-    /// Performs the request with the Bearer header; on a 401 refreshes
-    /// the token once and retries exactly once, then maps the status to
-    /// a typed error.
     private func perform(
         method: String,
         path: String,
@@ -138,6 +188,21 @@ struct FinanceSyncAPIClient: Sendable {
         body: Data? = nil,
         idempotencyKey: String? = nil
     ) async throws -> Data {
+        try await performRaw(
+            method: method, path: path, query: query,
+            body: body, idempotencyKey: idempotencyKey).0
+    }
+
+    /// Performs the request with the Bearer header; on a 401 refreshes
+    /// the token once and retries exactly once, then maps the status to
+    /// a typed error.
+    private func performRaw(
+        method: String,
+        path: String,
+        query: [URLQueryItem] = [],
+        body: Data? = nil,
+        idempotencyKey: String? = nil
+    ) async throws -> (Data, HTTPURLResponse) {
         var token = try await accessToken()
         for attempt in 0...1 {
             var components = URLComponents(
@@ -165,7 +230,7 @@ struct FinanceSyncAPIClient: Sendable {
             guard (200..<300).contains(http.statusCode) else {
                 throw mapError(http: http, data: data)
             }
-            return data
+            return (data, http)
         }
         preconditionFailure("unreachable")
     }

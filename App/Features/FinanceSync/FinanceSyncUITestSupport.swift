@@ -35,6 +35,66 @@ enum FinanceSyncUITestSupport {
         func accessToken() async throws -> String { "ui-test-token" }
         func forceRefreshedAccessToken() async throws -> String { "ui-test-token" }
     }
+
+    /// The DEBUG `-uiTestOnline` flag: run the online launch pipeline
+    /// (no seed, load through `GET /v1/backup/export`) against the
+    /// in-app fake. Honoured only beside the two flags above.
+    static let onlineArgument = "-uiTestOnline"
+
+    static func onlineEnabled(arguments: [String]) -> Bool {
+        enabled(arguments: arguments) && arguments.contains(onlineArgument)
+    }
+}
+
+/// Builds a `GET /v1/backup/export` body from live wire rows — shared by
+/// this in-app fake and the unit-test `FakeSyncServer`. The top-level
+/// `syncSeq` rides next to the backup-v5 keys like the real server's.
+enum FinanceSyncFakeExport {
+    private struct Envelope: Encodable {
+        var document: BackupDocument
+        var syncSeq: Int64?
+
+        struct Key: CodingKey {
+            var stringValue: String
+            var intValue: Int? { nil }
+            init(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { nil }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            try document.encode(to: encoder)
+            if let syncSeq {
+                var container = encoder.container(keyedBy: Key.self)
+                try container.encode(syncSeq, forKey: Key(stringValue: "syncSeq"))
+            }
+        }
+    }
+
+    static func body(
+        liveRows: [(entity: String, data: SyncJSONValue)],
+        syncSeq: Int64?
+    ) throws -> Data {
+        var document = BackupDocument(
+            formatVersion: BackupCodec.formatVersion,
+            exportedAt: .now, appVersion: BackupCodec.appVersion,
+            accounts: [], categories: [], businesses: [], transactions: [])
+        for row in liveRows {
+            guard let entity = SyncEntity(rawValue: row.entity) else { continue }
+            switch try SyncRecordMapper.decode(entity: entity, from: row.data) {
+            case .account(let dto): document.accounts.append(dto)
+            case .category(let dto): document.categories.append(dto)
+            case .business(let dto): document.businesses.append(dto)
+            case .transaction(let dto): document.transactions.append(dto)
+            case .loanRateChange(let dto): document.loanRateChanges.append(dto)
+            case .budget(let dto): document.budgets.append(dto)
+            case .recurringRule(let dto): document.recurringRules.append(dto)
+            case .rentalUnit(let dto): document.rentalUnits.append(dto)
+            case .rentalLease(let dto): document.rentalLeases.append(dto)
+            }
+        }
+        return try BackupCodec.makeEncoder().encode(
+            Envelope(document: document, syncSeq: syncSeq))
+    }
 }
 
 /// URLProtocol stub routing the fake host's requests to
@@ -121,7 +181,33 @@ final class FinanceSyncUITestServer: @unchecked Sendable {
         if url.path.hasSuffix("/v1/backup/import") {
             return try handleImport(request)
         }
+        if url.path.hasSuffix("/v1/backup/export") {
+            return try handleExport(request)
+        }
+        if url.path.hasSuffix("/v1/sync/head") {
+            return (http(url), try JSONEncoder().encode(
+                ["high_water_seq": nextSeq]))
+        }
         return (http(url, status: 404), Data(#"{"error":"not_found"}"#.utf8))
+    }
+
+    // MARK: - Export
+
+    private func handleExport(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        let live = rows.filter { !$0.value.deleted }
+            .sorted { $0.value.seq < $1.value.seq }
+            .compactMap { key, row in
+                row.data.map { (entity: key.entity, data: $0) }
+            }
+        let body = try FinanceSyncFakeExport.body(
+            liveRows: live, syncSeq: nextSeq)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: [
+                "Content-Type": "application/json",
+                "X-Sync-Seq": String(nextSeq),
+            ])!
+        return (response, body)
     }
 
     // MARK: - Pull

@@ -250,6 +250,57 @@ actor FinanceSyncBootstrap {
         return report
     }
 
+    // MARK: - Online load
+
+    /// The online-only launch load: `snapshot` is `GET /v1/backup/export`
+    /// — the whole server ledger plus the `syncSeq` it was read at. The
+    /// document replaces the (in-memory) local store inside
+    /// `FinanceSyncSaveFilter.asEngine` so the restore never schedules a
+    /// push; the shadow becomes the local content hashes of every
+    /// restored row at cursor `syncSeq`, sync is enabled, and ONE engine
+    /// cycle runs — it pushes nothing by construction and pulls only
+    /// records newer than the snapshot.
+    ///
+    /// A brand-new server (`syncSeq == 0`, no rows) gets `SeedData`
+    /// instead: seeded in memory (also engine-tagged) with an empty
+    /// shadow at cursor 0, so the same cycle pushes the seed up.
+    /// Re-runnable: every step replaces the previous attempt's state.
+    @discardableResult
+    func loadOnline(
+        snapshot: FinanceSyncSnapshot
+    ) async throws -> FinanceSyncBootstrapReport {
+        try begin()
+        defer { busy = false }
+        var report = FinanceSyncBootstrapReport()
+        let document = snapshot.document
+        let rowCount = document.accounts.count + document.categories.count
+            + document.businesses.count + document.transactions.count
+            + document.loanRateChanges.count + document.budgets.count
+            + document.recurringRules.count + document.rentalUnits.count
+            + document.rentalLeases.count
+        let brandNew = snapshot.syncSeq == 0 && rowCount == 0
+
+        let restored = try FinanceSyncSaveFilter.asEngine {
+            let result = try BackupRestorer.restore(
+                document, mode: .replace, into: context)
+            if brandNew { try SeedData.seedIfNeeded(context: context) }
+            return result
+        }
+        report.restoreInserted = restored.inserted
+        report.restoreUpdated = restored.updated
+        report.restoreSkipped = restored.skipped
+        report.recordsDownloaded = rowCount
+        notifyLocalStoreChanged()
+
+        try await shadow.wipeAll()
+        if !brandNew { _ = try await seedShadowFromLocalHashes() }
+        try await shadow.setPullCursor(snapshot.syncSeq)
+
+        report.sync = try await reconcile()
+        try await shadow.setEnabled(true)
+        return report
+    }
+
     // MARK: - Internals
 
     private func begin() throws {

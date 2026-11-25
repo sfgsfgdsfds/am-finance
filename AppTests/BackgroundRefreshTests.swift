@@ -235,6 +235,32 @@ struct BackgroundRefreshTests {
             ["amfinance.banksync.tx.tx-1", "amfinance.banksync.tx.tx-2"])
     }
 
+    /// The online store has not loaded (a BG launch, signed out, still
+    /// loading, failed): the in-memory ledger is empty, so EVERY data
+    /// step — wallet sync, web sync, recurring posting, reminder rebuild
+    /// — is skipped and nothing is notified.
+    @Test func runSkipsEveryDataStepWhenOnlineStoreNotReady() async {
+        let sync = FakeSync()
+        sync.result = BackgroundRefreshSyncResult(
+            status: .synced, insertedRows: [row("tx-1", amount: -1)])
+        let financeSync = FakeSync()
+        let generator = FakeGenerator()
+        let reminders = FakeReminders()
+        let center = FakeCenter()
+        let store = ReminderSettingsStore(defaults: makeDefaults())
+        let runner = BackgroundRefreshRunner(
+            sync: sync, generator: generator, reminders: reminders,
+            financeSync: financeSync, settingsStore: store, center: center,
+            isDataReady: { false })
+
+        let summary = await runner.run(now: baseDate)
+
+        #expect(summary == BackgroundRefreshRunner.Summary())
+        #expect(sync.calls == 0 && financeSync.calls == 0)
+        #expect(generator.calls == 0 && reminders.calls == 0)
+        #expect(center.delivered.isEmpty)
+    }
+
     /// A failing sync must not stop the generator and the scheduler —
     /// steps are isolated.
     @Test func failingSyncStillRunsOtherSteps() async {

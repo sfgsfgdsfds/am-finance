@@ -160,7 +160,11 @@ enum FinanceSyncSchema {
 
     /// `inMemory` is the test/preview variant; the app builds the actor
     /// over the file store so the shadow survives relaunches.
-    static func makeContainer(inMemory: Bool = false) throws -> ModelContainer {
+    /// `directory` overrides Application Support — the legacy migration
+    /// and its tests open the file store somewhere explicit.
+    static func makeContainer(
+        inMemory: Bool = false, directory: URL? = nil
+    ) throws -> ModelContainer {
         let schema = Schema(models)
         let configuration: ModelConfiguration
         if inMemory {
@@ -169,8 +173,8 @@ enum FinanceSyncSchema {
                 isStoredInMemoryOnly: true,
                 cloudKitDatabase: .none)
         } else {
-            let url = FileManager.default
-                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            let url = (directory ?? FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0])
                 .appendingPathComponent(storeFileName)
             configuration = ModelConfiguration(
                 schema: schema,
