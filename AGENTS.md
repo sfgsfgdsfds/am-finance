@@ -147,6 +147,17 @@ workers know what already exists. Pushed views must not create their own
 - `CreditCards/` — `CreditCardDetailView(account:)`, `CreditCardPaymentSheet`.
 - `CSVImport/` — `CSVImportView` (Settings → Dữ liệu → "Nhập sao kê CSV"; pick file + account, map columns, confirm) + `CSVImportParser`/`Detector`/`Mapper`/`Importer`/`Deduper`.
 - `Dashboard/` — `DashboardView` ("Tổng quan" tab) + its card structs.
+- `FinanceSync/` — two-way server sync building blocks (no engine/UI yet):
+  `FinanceSyncConfig` (base URL + UserDefaults override),
+  `FinanceSyncAPIClient` (push/pull/importBackup/highWater against
+  `/v1/sync/*`, one-time 401 token-refresh retry, typed
+  conflict/validation/idempotency errors), `SyncShadowStore`
+  (`@ModelActor` over a separate `FinanceSync.store` holding
+  `SyncShadowEntry` + the `SyncShadowState` singleton — pull cursor,
+  pending-push idempotency key/body — NOT in `AppSchema.allModels`),
+  `SyncRecordMapper` (model ↔ backup-v5 DTO per row, content hashing).
+  Wire types/canonical hashing/diff/batching live in
+  `FinanceCore/SyncJSON.swift` + `SyncWire.swift`.
 - `DataReset/` — `DataResetView` (Settings → Dữ liệu → "Xoá dữ liệu"): level A wipes transactions + import memory, level B wipes every model and reseeds; BOTH levels also wipe the saved Agent conversation history (`DataResetService.conversationStore.deleteAll()`); `DataResetService`, `DataResetSummary`; success posts `.dataResetCompleted` → `AMFinanceApp` rebuilds the root.
 - `Debts/` — `DebtsView` ("Nợ & Thẻ" tab).
 - `Loans/` — `LoanDetailView(account:)`, `LoanPaymentSheet`, `LoanPrepaymentSheet`, `LoanRateChangeSheet`.
