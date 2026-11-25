@@ -143,6 +143,33 @@ final class FakeSyncServer: @unchecked Sendable {
     private(set) var importBodies: [Data] = []
     /// Throwing seam: the next import request fails with this error once.
     var failNextImport: Error?
+    /// Path suffix (e.g. `/v1/sync/pull`) → status: every matching
+    /// request answers that status with an error body — a server outage.
+    /// Lock-protected through `setFailure`.
+    private var failingPaths: [String: Int] = [:]
+    /// `GET /v1/backup/export` requests answered.
+    private(set) var exportCount = 0
+    /// `GET /v1/sync/head` requests answered.
+    private(set) var headCount = 0
+    /// The `cursor` of every pull request, in order.
+    private(set) var pullCursors: [Int64] = []
+    /// Export seams: omit the body's `syncSeq` (header fallback) or
+    /// report a different seq than the stream's head.
+    var exportOmitsBodySeq = false
+    var exportHeaderSeqOverride: Int64?
+
+    func setFailure(pathSuffix: String, status: Int?) {
+        lock.lock()
+        failingPaths[pathSuffix] = status
+        lock.unlock()
+    }
+
+    /// Server's current high-water seq.
+    var highWaterSeq: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return nextSeq
+    }
 
     /// Hold seam for rendezvous tests: while armed, each pull request's
     /// delivery is parked (the URLProtocol load stays open) until
@@ -250,6 +277,10 @@ final class FakeSyncServer: @unchecked Sendable {
         let url = request.url!
         lock.lock()
         defer { lock.unlock() }
+        for (suffix, status) in failingPaths where url.path.hasSuffix(suffix) {
+            return (http(url, status: status),
+                    Data(#"{"error":"internal"}"#.utf8))
+        }
         if url.path.hasSuffix("/v1/sync/pull") {
             return try handlePull(request)
         }
@@ -259,16 +290,43 @@ final class FakeSyncServer: @unchecked Sendable {
         if url.path.hasSuffix("/v1/backup/import") {
             return try handleImport(request)
         }
+        if url.path.hasSuffix("/v1/backup/export") {
+            return try handleExport(request)
+        }
+        if url.path.hasSuffix("/v1/sync/head") {
+            headCount += 1
+            return (http(url), try JSONEncoder().encode(
+                ["high_water_seq": nextSeq]))
+        }
         return (http(url, status: 404), Data(#"{"error":"not_found"}"#.utf8))
     }
 
     // MARK: Internals
+
+    private func handleExport(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        exportCount += 1
+        let live = rows.filter { !$0.value.deleted }
+            .sorted { $0.value.seq < $1.value.seq }
+            .compactMap { key, row in
+                row.data.map { (entity: key.entity, data: $0) }
+            }
+        let body = try FinanceSyncFakeExport.body(
+            liveRows: live, syncSeq: exportOmitsBodySeq ? nil : nextSeq)
+        let response = HTTPURLResponse(
+            url: request.url!, statusCode: 200, httpVersion: nil,
+            headerFields: [
+                "Content-Type": "application/json",
+                "X-Sync-Seq": String(exportHeaderSeqOverride ?? nextSeq),
+            ])!
+        return (response, body)
+    }
 
     private func handlePull(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
         pullCount += 1
         let query = URLComponents(
             url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let cursor = Int64(query.first { $0.name == "cursor" }?.value ?? "") ?? 0
+        pullCursors.append(cursor)
         let limit = Int(query.first { $0.name == "limit" }?.value ?? "") ?? 500
         let after = rows.filter { $0.value.seq > cursor }
             .sorted { $0.value.seq < $1.value.seq }

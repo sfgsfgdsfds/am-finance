@@ -385,20 +385,48 @@ final class FinanceSyncCoordinator {
     }
 }
 
+/// Everything `FinanceSyncCoordinator.live` wires together — the online
+/// launch pipeline drives the same engine/bootstrap/shadow the
+/// coordinator owns.
+@MainActor
+struct FinanceSyncStack {
+    let api: FinanceSyncAPIClient
+    let shadow: SyncShadowStore
+    let engine: FinanceSyncEngine
+    let bootstrap: FinanceSyncBootstrap
+    let coordinator: FinanceSyncCoordinator
+    let isSignedIn: @Sendable () async -> Bool
+}
+
 extension FinanceSyncCoordinator {
-    /// The app's coordinator: the shared WalletLink session for auth,
-    /// the configured base URL, the file shadow store (an in-memory one
-    /// under `-uiTestInMemoryStore` so UI tests never touch real state),
-    /// and the ledger invalidation hook. Under the DEBUG-only
-    /// `-uiTestFakeSyncServer` flag the API points at the in-app fake
-    /// and sign-in is faked too.
+    /// The app's coordinator — see `makeStack`.
     static func live(
         container: ModelContainer,
         session: WalletLinkSession = .shared,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        inMemoryShadow: Bool? = nil
     ) throws -> FinanceSyncCoordinator {
+        try makeStack(
+            container: container, session: session, defaults: defaults,
+            inMemoryShadow: inMemoryShadow).coordinator
+    }
+
+    /// The app's coordinator stack: the shared WalletLink session for
+    /// auth, the configured base URL, the shadow store (in-memory under
+    /// `-uiTestInMemoryStore`, or whenever `inMemoryShadow` is true — the
+    /// online-only launch — so no `FinanceSync.store` file is ever
+    /// opened), and the ledger invalidation hook. Under the DEBUG-only
+    /// `-uiTestFakeSyncServer` flag the API points at the in-app fake
+    /// and sign-in is faked too.
+    static func makeStack(
+        container: ModelContainer,
+        session: WalletLinkSession = .shared,
+        defaults: UserDefaults = .standard,
+        inMemoryShadow: Bool? = nil
+    ) throws -> FinanceSyncStack {
         let arguments = ProcessInfo.processInfo.arguments
-        let inMemoryStore = arguments.contains("-uiTestInMemoryStore")
+        let inMemoryStore = inMemoryShadow
+            ?? arguments.contains("-uiTestInMemoryStore")
         let shadow = SyncShadowStore(
             modelContainer: try FinanceSyncSchema.makeContainer(
                 inMemory: inMemoryStore))
@@ -459,7 +487,10 @@ extension FinanceSyncCoordinator {
             await FinanceSyncMainContextRefresher.install(
                 on: engine, container: container)
         }
-        return coordinator
+        return FinanceSyncStack(
+            api: api, shadow: shadow, engine: engine,
+            bootstrap: bootstrap, coordinator: coordinator,
+            isSignedIn: signedIn)
     }
 }
 

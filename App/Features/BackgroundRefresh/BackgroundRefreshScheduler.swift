@@ -33,7 +33,8 @@ enum BackgroundRefreshScheduler {
     @MainActor
     static func registerHandler(
         container: ModelContainer,
-        financeSync: FinanceSyncCoordinator? = nil
+        financeSync: FinanceSyncCoordinator? = nil,
+        onlineStore: OnlineStore? = nil
     ) {
         guard !didRegister, !isDisabled else { return }
         didRegister = true
@@ -44,7 +45,9 @@ enum BackgroundRefreshScheduler {
                 task.setTaskCompleted(success: false)
                 return
             }
-            handle(task: refresh, container: container, financeSync: financeSync)
+            handle(
+                task: refresh, container: container,
+                financeSync: financeSync, onlineStore: onlineStore)
         }
     }
 
@@ -67,12 +70,14 @@ enum BackgroundRefreshScheduler {
     /// import.
     private static func handle(
         task: BGAppRefreshTask, container: ModelContainer,
-        financeSync: FinanceSyncCoordinator?
+        financeSync: FinanceSyncCoordinator?,
+        onlineStore: OnlineStore?
     ) {
         let box = BackgroundTaskBox(task)
         let work = Task { @MainActor in
             let runner = BackgroundRefreshRunner.live(
-                container: container, financeSync: financeSync)
+                container: container, financeSync: financeSync,
+                onlineStore: onlineStore)
             let summary = await runner.run()
             scheduleNext()
             box.task.setTaskCompleted(success: !summary.cancelled)

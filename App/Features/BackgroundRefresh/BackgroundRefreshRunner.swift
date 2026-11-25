@@ -84,6 +84,12 @@ struct BackgroundRefreshRunner {
     let center: any BackgroundRefreshNotificationCentering
     /// True while the app is in the foreground — no notifications then.
     let isForegrounded: () -> Bool
+    /// False while the online store has not loaded the server data (a
+    /// background launch never reaches `ready`): the store is empty, so
+    /// wallet sync would re-import, the recurring generator would post
+    /// duplicate rows and the reminder rebuild would wipe the queue —
+    /// every data step is skipped and only the re-arm remains.
+    let isDataReady: () -> Bool
 
     init(
         sync: any BackgroundRefreshSyncing,
@@ -92,7 +98,8 @@ struct BackgroundRefreshRunner {
         financeSync: (any BackgroundRefreshSyncing)? = nil,
         settingsStore: ReminderSettingsStore,
         center: any BackgroundRefreshNotificationCentering,
-        isForegrounded: @escaping () -> Bool = { false }
+        isForegrounded: @escaping () -> Bool = { false },
+        isDataReady: @escaping () -> Bool = { true }
     ) {
         self.sync = sync
         self.generator = generator
@@ -101,14 +108,16 @@ struct BackgroundRefreshRunner {
         self.settingsStore = settingsStore
         self.center = center
         self.isForegrounded = isForegrounded
+        self.isDataReady = isDataReady
     }
 
     /// Runs the four steps in order, isolated; then notifies about new
     /// bank rows. A cancelled task stops before the next step — whatever
-    /// already committed stays committed.
+    /// already committed stays committed. Not ready → all steps skipped.
     @discardableResult
     func run(now: Date = .now) async -> Summary {
         var summary = Summary()
+        guard isDataReady() else { return summary }
         var newRows: [WalletSyncInsertedTransaction] = []
 
         if !Task.isCancelled {
@@ -301,7 +310,8 @@ extension BackgroundRefreshRunner {
         container: ModelContainer,
         defaults: UserDefaults = .standard,
         session: WalletLinkSession = .shared,
-        financeSync: FinanceSyncCoordinator? = nil
+        financeSync: FinanceSyncCoordinator? = nil,
+        onlineStore: OnlineStore? = nil
     ) -> BackgroundRefreshRunner {
         let context = ModelContext(container)
         let settingsStore = ReminderSettingsStore(defaults: defaults)
@@ -319,7 +329,8 @@ extension BackgroundRefreshRunner {
             center: BackgroundRefreshUserNotificationCenter(),
             isForegrounded: {
                 UIApplication.shared.applicationState != .background
-            }
+            },
+            isDataReady: { onlineStore?.isReady ?? true }
         )
     }
 }
