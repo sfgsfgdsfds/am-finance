@@ -191,10 +191,11 @@ workers know what already exists. Pushed views must not create their own
   the first-sync chooser: `probe()` (server empty? local counts? shadow
   empty?), `uploadReplace()` ("Đưa dữ liệu iPhone lên server" — export
   backup-v5 → `importBackup` REPLACE → wipe shadow → shadow = local
-  content hashes at cursor 0 → `syncOnce` reconcile → enable),
-  `downloadReplace()` ("Tải dữ liệu từ server về iPhone" — pull all
-  pages → build a backup-v5 doc → `BackupRestorer.restore(.replace)` →
-  shadow = local hashes, cursor = stream head → `syncOnce` → enable).
+  content hashes at cursor 0 → `syncOnce(fullScan: true)` reconcile →
+  enable), `downloadReplace()` ("Tải dữ liệu từ server về iPhone" —
+  pull all pages → build a backup-v5 doc →
+  `BackupRestorer.restore(.replace)` → shadow = local hashes, cursor =
+  stream head → `syncOnce(fullScan: true)` → enable).
   Sync enables only as the last step so a failed run is safely
   resumable. Test scaffolding lives in
   `AppTests/FinanceSyncTestSupport.swift` — `FakeSyncServer`

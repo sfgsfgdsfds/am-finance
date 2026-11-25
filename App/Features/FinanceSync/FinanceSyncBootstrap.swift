@@ -82,10 +82,10 @@ enum FinanceSyncBootstrapError: LocalizedError, Equatable {
 ///   `POST /v1/backup/import`s it: inside one server transaction every
 ///   record is upserted and every live server row the document does not
 ///   carry is tombstoned. Then the shadow is seeded with the local
-///   content hashes at cursor 0 and `engine.syncOnce()` reconciles:
-///   the pull walks the import's own records (equal rows are no-op
-///   `refreshSeq`s, so nothing re-uploads) and any server-normalised
-///   difference converges to the server's form.
+///   content hashes at cursor 0 and `engine.syncOnce(fullScan: true)`
+///   reconciles: the pull walks the import's own records (equal rows are
+///   no-op `refreshSeq`s, so nothing re-uploads) and any
+///   server-normalised difference converges to the server's form.
 /// - **downloadReplace** ("Tải dữ liệu từ server về iPhone") — the
 ///   server's copy wins. Pulls every page from cursor 0, assembles the
 ///   live records into a backup-v5 document (tombstones skipped,
@@ -94,8 +94,8 @@ enum FinanceSyncBootstrapError: LocalizedError, Equatable {
 ///   performs, posting `.financeSyncLocalStoreChanged` like the engine
 ///   does after pulled writes. Then the shadow is seeded with the
 ///   restored local hashes, the cursor jumps to the pulled stream head
-///   so the reconcile `syncOnce` does not replay history — it pushes
-///   nothing by construction.
+///   so the reconcile `syncOnce(fullScan: true)` does not replay
+///   history — it pushes nothing by construction.
 ///
 /// Both modes enable sync only as their LAST step: a run that fails or
 /// is interrupted leaves `isEnabled` off, so no scheduled sync can run
@@ -255,11 +255,14 @@ actor FinanceSyncBootstrap {
         busy = true
     }
 
-    /// The terminal `syncOnce` — maps a busy engine to the bootstrap's
-    /// own refusal so the failure reads as "retry", never half-enabled.
+    /// The terminal `syncOnce` — always a FULL scan: both modes just
+    /// rewrote the local store and/or the shadow, so the reconcile must
+    /// not trust the QUICK scan's `updatedAt` threshold. A busy engine
+    /// maps to the bootstrap's own refusal so the failure reads as
+    /// "retry", never half-enabled.
     private func reconcile() async throws -> FinanceSyncReport {
         do {
-            return try await engine.syncOnce()
+            return try await engine.syncOnce(fullScan: true)
         } catch FinanceSyncEngineError.alreadyRunning {
             throw FinanceSyncBootstrapError.syncInProgress
         }
