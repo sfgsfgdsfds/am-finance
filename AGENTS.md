@@ -170,8 +170,26 @@ workers know what already exists. Pushed views must not create their own
   `AppSchema.allModels`), `SyncRecordMapper` (model ↔ backup-v5 DTO
   per row, content hashing, `references(of:)` for deferred relinking).
   Wire types/canonical hashing/diff/batching live in
-  `FinanceCore/SyncJSON.swift` + `SyncWire.swift`. No UI, scheduling or
-  first-sync mode yet.
+  `FinanceCore/SyncJSON.swift` + `SyncWire.swift`.
+  `FinanceSyncBootstrap` (actor, uses only the engine's public API) is
+  the first-sync chooser: `probe()` (server empty? local counts? shadow
+  empty?), `uploadReplace()` ("Đưa dữ liệu iPhone lên server" — export
+  backup-v5 → `importBackup` REPLACE → wipe shadow → shadow = local
+  content hashes at cursor 0 → `syncOnce` reconcile → enable),
+  `downloadReplace()` ("Tải dữ liệu từ server về iPhone" — pull all
+  pages → build a backup-v5 doc → `BackupRestorer.restore(.replace)` →
+  shadow = local hashes, cursor = stream head → `syncOnce` → enable).
+  Sync enables only as the last step so a failed run is safely
+  resumable. Test scaffolding lives in
+  `AppTests/FinanceSyncTestSupport.swift` — `FakeSyncServer`
+  (unique-host URLProtocol stub, pull-hold seam, import REPLACE),
+  `makeSyncDevice`, `seedFullLedger` (all 9 entities + edge cases).
+  `AppTests/FinanceSyncLiveTests` is the live contract test against the
+  real Go API — skipped unless `AMFINANCE_SYNC_LIVE_URL` +
+  `AMFINANCE_SYNC_LIVE_TOKEN` are set; bring up `AM_Finance_Web` on a
+  throwaway DB with `AUTH_MODE=dev` on 127.0.0.1 and pass the vars via
+  `TEST_RUNNER_`-prefixed env (see the file's header). No UI or
+  scheduling yet.
 - `DataReset/` — `DataResetView` (Settings → Dữ liệu → "Xoá dữ liệu"): level A wipes transactions + import memory, level B wipes every model and reseeds; BOTH levels also wipe the saved Agent conversation history (`DataResetService.conversationStore.deleteAll()`); `DataResetService`, `DataResetSummary`; success posts `.dataResetCompleted` → `AMFinanceApp` rebuilds the root.
 - `Debts/` — `DebtsView` ("Nợ & Thẻ" tab).
 - `Loans/` — `LoanDetailView(account:)`, `LoanPaymentSheet`, `LoanPrepaymentSheet`, `LoanRateChangeSheet`.

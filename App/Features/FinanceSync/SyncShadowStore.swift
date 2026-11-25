@@ -179,6 +179,12 @@ actor SyncShadowStore {
 
     // MARK: - Entries
 
+    /// Number of shadow entries without materialising them — the
+    /// first-sync bootstrap's "never synced" probe.
+    func entryCount() throws -> Int {
+        try modelContext.fetchCount(FetchDescriptor<SyncShadowEntry>())
+    }
+
     /// Every entry, for the diff's shadow side and for tests.
     func allEntries() throws -> [SyncShadowEntrySnapshot] {
         try modelContext.fetch(FetchDescriptor<SyncShadowEntry>()).map {
@@ -265,6 +271,22 @@ actor SyncShadowStore {
             if let existing = try entry(entity: key.entity, recordID: key.id) {
                 modelContext.delete(existing)
             }
+        }
+        try modelContext.save()
+    }
+
+    /// Replaces the whole entry table in one save — the first-sync
+    /// bootstrap seeds the shadow with the local content hashes after an
+    /// upload/download replace, where a per-row find-then-update would
+    /// cost one fetch per record for no benefit.
+    func replaceEntries(_ entries: [SyncShadowEntrySnapshot]) throws {
+        for entry in try modelContext.fetch(FetchDescriptor<SyncShadowEntry>()) {
+            modelContext.delete(entry)
+        }
+        for snapshot in entries {
+            modelContext.insert(SyncShadowEntry(
+                entity: snapshot.entity, recordID: snapshot.recordID,
+                contentHash: snapshot.contentHash, serverSeq: snapshot.serverSeq))
         }
         try modelContext.save()
     }
