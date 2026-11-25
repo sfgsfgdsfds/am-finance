@@ -14,6 +14,9 @@ import SwiftData
 /// Pushed inside an existing NavigationStack — no stack of its own.
 struct DataResetView: View {
     @Environment(\.modelContext) private var context
+    /// Two-way web sync — when enabled the reset also propagates to the
+    /// web on the next sync; the footers say so.
+    @Environment(\.financeSync) private var financeSync
 
     /// Last successful JSON backup — the same `@AppStorage` key
     /// `BackupView` writes on export.
@@ -77,7 +80,9 @@ struct DataResetView: View {
             }
             Button("Huỷ", role: .cancel) {}
         } message: { level in
-            Text(level.dialogMessage(summary: summary(for: level)))
+            Text(level.dialogMessage(
+                summary: summary(for: level),
+                syncEnabled: financeSync?.enabled == true))
         }
         .alert(
             "Nhập XOA để xác nhận",
@@ -157,7 +162,10 @@ struct DataResetView: View {
         } header: {
             Text("Mức 1 — chỉ giao dịch")
         } footer: {
-            Text("Sẽ xoá \(summaryTransactions.total) giao dịch. Giữ lại tài khoản (số dư về số dư đầu kỳ), danh mục, mảng kinh doanh, ngân sách, quy tắc lặp lại, phòng & hợp đồng, đợt đổi lãi suất và mọi cài đặt. Bộ nhớ nhập ngân hàng (con trỏ đồng bộ, mục đã xoá, lần nhập CSV gần nhất) cũng bị xoá để có thể nhập lại. Lịch sử hội thoại Agent cũng bị xoá.")
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Sẽ xoá \(summaryTransactions.total) giao dịch. Giữ lại tài khoản (số dư về số dư đầu kỳ), danh mục, mảng kinh doanh, ngân sách, quy tắc lặp lại, phòng & hợp đồng, đợt đổi lãi suất và mọi cài đặt. Bộ nhớ nhập ngân hàng (con trỏ đồng bộ, mục đã xoá, lần nhập CSV gần nhất) cũng bị xoá để có thể nhập lại. Lịch sử hội thoại Agent cũng bị xoá.")
+                syncWarning
+            }
         }
     }
 
@@ -174,7 +182,23 @@ struct DataResetView: View {
         } header: {
             Text("Mức 2 — xoá hết")
         } footer: {
-            Text("Sẽ xoá \(summaryEverything.total) mục (\(summaryEverything.breakdownText)), rồi tạo lại dữ liệu mẫu: danh mục mặc định, các mảng kinh doanh và tài khoản \"Tiền mặt\". Cũng xoá: liên kết & bộ nhớ đồng bộ ngân hàng, quy tắc tự phân loại, cột nhớ & lần nhập CSV, tuỳ chọn tính lãi từng khoản vay, lịch sử hội thoại Agent, tài khoản dùng gần nhất, ngày sao lưu gần nhất và các thông báo nhắc đang chờ. Giữ lại: đăng nhập wallet.amx.vn & Client ID, cài đặt nhắc nhở, cài đặt khoá ứng dụng.")
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Sẽ xoá \(summaryEverything.total) mục (\(summaryEverything.breakdownText)), rồi tạo lại dữ liệu mẫu: danh mục mặc định, các mảng kinh doanh và tài khoản \"Tiền mặt\". Cũng xoá: liên kết & bộ nhớ đồng bộ ngân hàng, quy tắc tự phân loại, cột nhớ & lần nhập CSV, tuỳ chọn tính lãi từng khoản vay, lịch sử hội thoại Agent, tài khoản dùng gần nhất, ngày sao lưu gần nhất và các thông báo nhắc đang chờ. Giữ lại: đăng nhập wallet.amx.vn & Client ID, cài đặt nhắc nhở, cài đặt khoá ứng dụng.")
+                syncWarning
+            }
+        }
+    }
+
+    /// The one-line warning shown on either level's footer while web
+    /// sync is on — the delete propagates to the web on the next sync.
+    @ViewBuilder
+    private var syncWarning: some View {
+        if financeSync?.enabled == true {
+            Label(
+                "Đồng bộ với web đang bật — thay đổi này cũng sẽ áp dụng lên dữ liệu trên web ở lần đồng bộ tới.",
+                systemImage: "exclamationmark.triangle.fill"
+            )
+            .foregroundStyle(.orange)
         }
     }
 
@@ -241,12 +265,17 @@ private extension DataResetLevel {
         }
     }
 
-    func dialogMessage(summary: DataResetSummary) -> String {
+    func dialogMessage(
+        summary: DataResetSummary, syncEnabled: Bool = false
+    ) -> String {
+        let sync = syncEnabled
+            ? " Đồng bộ với web đang bật — thay đổi này cũng sẽ áp dụng lên dữ liệu trên web ở lần đồng bộ tới."
+            : ""
         switch self {
         case .transactions:
-            return "Toàn bộ \(summary.total) giao dịch sẽ bị xoá vĩnh viễn. Lịch sử hội thoại Agent cũng bị xoá. Tài khoản và mọi cài đặt được giữ lại."
+            return "Toàn bộ \(summary.total) giao dịch sẽ bị xoá vĩnh viễn. Lịch sử hội thoại Agent cũng bị xoá. Tài khoản và mọi cài đặt được giữ lại." + sync
         case .everything:
-            return "Toàn bộ dữ liệu sẽ bị xoá vĩnh viễn: \(summary.breakdownText), lịch sử hội thoại Agent. Đăng nhập wallet.amx.vn, cài đặt nhắc nhở và khoá ứng dụng được giữ lại."
+            return "Toàn bộ dữ liệu sẽ bị xoá vĩnh viễn: \(summary.breakdownText), lịch sử hội thoại Agent. Đăng nhập wallet.amx.vn, cài đặt nhắc nhở và khoá ứng dụng được giữ lại." + sync
         }
     }
 

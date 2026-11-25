@@ -143,6 +143,15 @@ struct SettingsView: View {
 
             Section("Dữ liệu") {
                 NavigationLink {
+                    LazyDestination { FinanceSyncSettingsView() }
+                } label: {
+                    Label(
+                        "Đồng bộ với web",
+                        systemImage: "icloud.and.arrow.up.and.arrow.down"
+                    )
+                }
+                .accessibilityIdentifier("financeSync.settingsRow")
+                NavigationLink {
                     LazyDestination { BackupView() }
                 } label: {
                     Label("Sao lưu & khôi phục", systemImage: "icloud.fill")

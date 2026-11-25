@@ -7,6 +7,11 @@ struct AMFinanceApp: App {
     /// The one shared coordinator behind `walletSyncAutoRefresh` and the
     /// dashboard banner — nil during UI tests, so no wallet sync ever runs.
     private let syncCoordinator: WalletSyncCoordinator?
+    /// The shared two-way web sync coordinator — created on every launch
+    /// (it stays inert until enabled). Under `-uiTestInMemoryStore` its
+    /// shadow is in-memory; `-uiTestFakeSyncServer` swaps the API client
+    /// for the DEBUG in-app fake.
+    private let financeSyncCoordinator: FinanceSyncCoordinator?
     /// Rebuilt when "Xoá dữ liệu" finishes: a fresh view identity drops
     /// every screen's references to deleted SwiftData objects and returns
     /// every navigation stack to its root.
@@ -32,15 +37,21 @@ struct AMFinanceApp: App {
             self.syncCoordinator = inMemory ? nil : MainActor.assumeIsolated {
                 WalletSyncCoordinator.live(context: container.mainContext)
             }
+            self.financeSyncCoordinator = MainActor.assumeIsolated {
+                try? FinanceSyncCoordinator.live(container: container)
+            }
             // BGTaskScheduler demands registration before the launch
             // sequence finishes — App.init is the earliest hook there is.
             // The scheduler itself is a no-op under -uiTestInMemoryStore.
             MainActor.assumeIsolated {
-                BackgroundRefreshScheduler.registerHandler(container: container)
+                BackgroundRefreshScheduler.registerHandler(
+                    container: container,
+                    financeSync: self.financeSyncCoordinator)
             }
         } catch {
             self.container = nil
             self.syncCoordinator = nil
+            self.financeSyncCoordinator = nil
         }
     }
 
@@ -49,8 +60,12 @@ struct AMFinanceApp: App {
             if let container {
                 RootTabView(syncCoordinator: syncCoordinator)
                     .modelContainer(container)
+                    .environment(\.financeSync, financeSyncCoordinator)
                     .appScenePhaseHooks(container: container)
                     .id(dataResetToken)
+                    // After `.id` so a data-reset rebuild does not tear
+                    // the modifier's observers down with the content.
+                    .financeSyncAutoRefresh(financeSyncCoordinator)
                     .onReceive(NotificationCenter.default.publisher(
                         for: .dataResetCompleted
                     )) { _ in
