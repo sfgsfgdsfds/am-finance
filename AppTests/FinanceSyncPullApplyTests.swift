@@ -315,6 +315,9 @@ struct FinanceSyncPullApplyTests {
         // current, and its observers were told.
         #expect(shown.amount == 77_000)
         #expect(shown.note == "sửa trên web")
+        let immediately = observed.value
+        try await Task.sleep(for: .milliseconds(300))
+        print("DIAG observed immediately=\(immediately) afterSleep=\(observed.value)")
         #expect(observed.value)
         let fetched = try #require(try mainContext.fetch(
             FetchDescriptor<LedgerTransaction>(
@@ -328,15 +331,18 @@ struct FinanceSyncPullApplyTests {
             on: pair.b.engine, container: pair.b.container)
         let mainContext = pair.b.container.mainContext
         let ids = pair.ids
+        let accountID = ids.cashAccount
+        let budgetID = ids.categoryBudget
+        let leaseID = ids.rentalLease
         let account = try #require(try mainContext.fetch(
             FetchDescriptor<Account>(
-                predicate: #Predicate { $0.id == ids.cashAccount })).first)
+                predicate: #Predicate { $0.id == accountID })).first)
         let budget = try #require(try mainContext.fetch(
             FetchDescriptor<Budget>(
-                predicate: #Predicate { $0.id == ids.categoryBudget })).first)
+                predicate: #Predicate { $0.id == budgetID })).first)
         let lease = try #require(try mainContext.fetch(
             FetchDescriptor<RentalLease>(
-                predicate: #Predicate { $0.id == ids.rentalLease })).first)
+                predicate: #Predicate { $0.id == leaseID })).first)
         try editOnServer(
             pair.server, entity: .account, id: ids.cashAccount,
             set: ["name": .string("Ví web")])
