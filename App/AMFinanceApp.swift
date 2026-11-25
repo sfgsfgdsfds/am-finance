@@ -43,6 +43,14 @@ struct AMFinanceApp: App {
             if !online {
                 try SeedData.seedIfNeeded(context: ModelContext(container))
             }
+            // The online stack can throw (bad base URL) — build it before
+            // any stored property is assigned.
+            let stack: FinanceSyncStack? = online
+                ? try MainActor.assumeIsolated {
+                    try FinanceSyncCoordinator.makeStack(
+                        container: container, inMemoryShadow: true)
+                }
+                : nil
             self.container = container
             self.syncCoordinator = uiTest ? nil : MainActor.assumeIsolated {
                 WalletSyncCoordinator.live(context: container.mainContext)
@@ -53,12 +61,10 @@ struct AMFinanceApp: App {
             // run. Only `-uiTestFakeSyncServer` builds one (it points the
             // API at the in-app fake — see FinanceSyncUITestSupport).
             let fakeSyncServer = arguments.contains("-uiTestFakeSyncServer")
-            if online {
-                let stack = try MainActor.assumeIsolated {
-                    try FinanceSyncCoordinator.makeStack(
-                        container: container, inMemoryShadow: true)
+            if let stack {
+                self.financeSyncCoordinator = MainActor.assumeIsolated {
+                    stack.coordinator
                 }
-                self.financeSyncCoordinator = stack.coordinator
                 self.onlineStore = MainActor.assumeIsolated {
                     OnlineStore.live(
                         stack: stack, container: container,

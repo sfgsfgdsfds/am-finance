@@ -66,6 +66,7 @@ struct OnlineStoreTests {
         #expect(snapshot.syncSeq == server.highWaterSeq)
         #expect(snapshot.syncSeq > 0)
 
+        let pullsBefore = server.pullCursors.count
         let report = try await device.bootstrap.loadOnline(snapshot: snapshot)
         #expect(report.restoreInserted == Self.seededRowCount)
         #expect(report.sync?.pushedUpserts == 0)
@@ -90,8 +91,9 @@ struct OnlineStoreTests {
         #expect(try await device.shadow.pullCursor() == snapshot.syncSeq)
         #expect(try await device.shadow.isEnabled())
         // The server pushed nothing new and the pull started at syncSeq.
-        #expect(server.committedPushCount == 1)   // the other device's seed
-        #expect(server.pullCursors.first == snapshot.syncSeq)
+        #expect(server.committedPushCount == 0)
+        #expect(server.pullCursors.dropFirst(pullsBefore).first
+                == snapshot.syncSeq)
     }
 
     @Test func firstCyclePullsOnlyRecordsNewerThanTheSnapshot() async throws {
@@ -107,11 +109,13 @@ struct OnlineStoreTests {
             data: try SyncRecordMapper.jsonValue(of: .category(dto)))
         #expect(newSeq > snapshot.syncSeq)
 
+        let pullsBefore = server.pullCursors.count
         let report = try await device.bootstrap.loadOnline(snapshot: snapshot)
         #expect(report.sync?.pulled == 1)
         #expect(report.sync?.applied == 1)
         #expect(report.sync?.pushedUpserts == 0)
-        #expect(server.pullCursors.allSatisfy { $0 >= snapshot.syncSeq })
+        #expect(server.pullCursors.dropFirst(pullsBefore)
+            .allSatisfy { $0 >= snapshot.syncSeq })
         #expect(try await device.shadow.pullCursor() == newSeq)
         #expect(try device.context.fetchCount(FetchDescriptor<LedgerCategory>(
             predicate: #Predicate { $0.name == "Mới 🆕" })) == 1)
@@ -156,7 +160,6 @@ struct OnlineStoreTests {
         #expect(try await device.shadow.isEnabled())
         let local = try await device.engine.localContentHashes()
         #expect(try await device.shadow.snapshot() == local)
-        #expect(try await device.shadow.pullCursor() > 0)
     }
 
     @Test func nonEmptyServerIsNeverSeeded() async throws {

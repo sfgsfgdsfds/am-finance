@@ -141,13 +141,19 @@ extension OnlineStore {
         session: WalletLinkSession = .shared,
         fakeServer: Bool = false
     ) -> OnlineStore {
-        OnlineStore(
+        let signIn: @MainActor () async throws -> Void
+        if fakeServer {
+            signIn = {}
+        } else {
+            signIn = { try await session.signIn() }
+        }
+        return OnlineStore(
             container: container,
             api: stack.api,
             bootstrap: stack.bootstrap,
             migrator: fakeServer ? nil : LegacyStoreMigrator(api: stack.api),
             isSignedIn: stack.isSignedIn,
-            signIn: fakeServer ? {} : { try await session.signIn() },
+            signIn: signIn,
             afterLoad: { await stack.coordinator.refreshState() })
     }
 
