@@ -75,6 +75,8 @@ final class FinanceSyncCoordinator {
     /// not dropped by a still-unloaded `enabled`.
     private var stateLoaded = false
     private var resetObserver: (any NSObjectProtocol)?
+    private var saveObservers: [any NSObjectProtocol] = []
+    private var saveCenter: NotificationCenter = .default
 
     /// Debounce between a local save and the auto-sync it triggers —
     /// coalesces bursts of edits; tests shrink it.
@@ -181,6 +183,36 @@ final class FinanceSyncCoordinator {
             return
         }
         armDebounce()
+    }
+
+    /// Starts listening for REAL user edits of the app store — saves the
+    /// sync engine did not originate and that touch a synced entity — and
+    /// feeds each into `noteLocalSave()`. See `FinanceSyncSaveFilter` for
+    /// why the engine's own app-store saves and the shadow store's saves
+    /// must not count (they made every cycle schedule the next one).
+    /// Idempotent. The observers are synchronous (`queue: nil`) so the
+    /// engine-origin mark is still readable when the filter runs.
+    func startObservingLocalSaves(center: NotificationCenter = .default) {
+        guard saveObservers.isEmpty else { return }
+        let container = engine.modelContainer
+        let handler: @Sendable (Notification) -> Void = { [weak self] notification in
+            guard FinanceSyncSaveFilter.isUserSave(
+                notification, container: container) else { return }
+            Task { @MainActor in self?.noteLocalSave() }
+        }
+        for name in [ModelContext.didSave, Notification.Name.NSManagedObjectContextDidSave] {
+            saveObservers.append(center.addObserver(
+                forName: name, object: nil, queue: nil, using: handler))
+        }
+        saveCenter = center
+    }
+
+    /// Detaches the observers `startObservingLocalSaves` added.
+    func stopObservingLocalSaves() {
+        for observer in saveObservers {
+            saveCenter.removeObserver(observer)
+        }
+        saveObservers.removeAll()
     }
 
     // MARK: - First sync and lifecycle
@@ -424,6 +456,8 @@ extension FinanceSyncCoordinator {
         Task {
             await engine.addLocalStoreChangeHook(ledgerHook)
             await bootstrap.addLocalStoreChangeHook(ledgerHook)
+            await FinanceSyncMainContextRefresher.install(
+                on: engine, container: container)
         }
         return coordinator
     }
@@ -473,7 +507,8 @@ extension EnvironmentValues {
 /// same pair `LedgerBalanceStore` listens to — `ModelContext.didSave`
 /// plus the Core Data save notification SwiftData still emits on
 /// iOS 17 — so the trigger is best-effort on iOS 17 like everything
-/// else.
+/// else. Only real user edits count: `startObservingLocalSaves` drops
+/// the engine's own saves and the shadow store's (`FinanceSyncSaveFilter`).
 ///
 /// Inertness is structural, not just guarded: under
 /// `-uiTestInMemoryStore` the modifier attaches NOTHING — no timer
@@ -513,15 +548,8 @@ private struct FinanceSyncAutoRefreshModifier: ViewModifier {
                     else { return }
                     Task { await coordinator.syncIfStale() }
                 }
-                .onReceive(NotificationCenter.default.publisher(
-                    for: ModelContext.didSave
-                )) { _ in
-                    coordinator?.noteLocalSave()
-                }
-                .onReceive(NotificationCenter.default.publisher(
-                    for: .NSManagedObjectContextDidSave
-                )) { _ in
-                    coordinator?.noteLocalSave()
+                .onAppear {
+                    coordinator?.startObservingLocalSaves()
                 }
         } else {
             content

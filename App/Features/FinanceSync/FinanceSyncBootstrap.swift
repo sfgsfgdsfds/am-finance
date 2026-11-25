@@ -229,8 +229,10 @@ actor FinanceSyncBootstrap {
         // like a file picked in BackupView — `.replace` deletes all
         // local rows first, then inserts the document's.
         let document = try document(from: records, into: &report)
-        let restored = try BackupRestorer.restore(
-            document, mode: .replace, into: context)
+        let restored = try FinanceSyncSaveFilter.asEngine {
+            try BackupRestorer.restore(
+                document, mode: .replace, into: context)
+        }
         report.restoreInserted = restored.inserted
         report.restoreUpdated = restored.updated
         report.restoreSkipped = restored.skipped
