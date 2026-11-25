@@ -438,7 +438,12 @@ enum SyncRecordMapper {
         case .business(let value):
             return BackupRestorer.upsertRow(value, into: context, maps: &maps)
         case .transaction(let value):
-            if force, let existing = maps.transactions[value.id] {
+            // Server seq order is the authority: the engine only calls
+            // `apply` for rows without an unpushed local change, so an
+            // existing transaction is ALWAYS overwritten — never gated by
+            // `BackupRestorer`'s merge-restore `updatedAt` rule (a web edit
+            // may carry the same or an older stamp).
+            if let existing = maps.transactions[value.id] {
                 BackupRestorer.apply(
                     value, to: existing, accounts: maps.accounts,
                     categories: maps.categories, businesses: maps.businesses,

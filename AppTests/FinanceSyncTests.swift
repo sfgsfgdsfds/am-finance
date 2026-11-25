@@ -675,8 +675,10 @@ struct SyncRecordMapperTests {
         #expect(transaction.business?.id == businessID)
         #expect(transaction.note == "cà phê")
 
-        // Re-applying the same (or older-stamped) transaction skips —
-        // the merge rule the restorer already uses.
+        // Re-applying an older-stamped transaction STILL overwrites —
+        // sync apply is server-authoritative, not the restorer's
+        // newer-`updatedAt` merge rule (the engine only applies rows
+        // without an unpushed local change).
         let stale = BackupTransaction(
             id: transactionID, kindRaw: "expense", amount: 1,
             date: .now, note: "stale",
@@ -688,7 +690,10 @@ struct SyncRecordMapperTests {
             rentalLeaseID: nil, rentalPeriod: nil)
         #expect(SyncRecordMapper.apply(
                     .transaction(stale), into: context, maps: &maps)
-                == .skipped)
+                == .updated)
+        #expect(transaction.note == "stale")
+        #expect(transaction.amount == 1)
+        #expect(transaction.updatedAt == Date(timeIntervalSince1970: 1))
     }
 
     @Test func contentHashFeedsTheDiff() throws {

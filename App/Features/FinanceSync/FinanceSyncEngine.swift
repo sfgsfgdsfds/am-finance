@@ -12,6 +12,16 @@ extension Notification.Name {
         Notification.Name("financeSyncLocalStoreChanged")
 }
 
+/// One existing local row a pulled upsert just overwrote — what the main
+/// context needs to refresh a stale registered instance (the engine saves
+/// on its own background context, which SwiftData does NOT merge into
+/// objects the main context already holds).
+struct SyncChangedRow: Sendable, Equatable {
+    var entity: SyncEntity
+    var id: UUID
+    var identifier: PersistentIdentifier
+}
+
 /// How a cycle's diff phase covered the local store.
 enum FinanceSyncScanMode: String, Equatable, Sendable {
     /// Every row's content hash is recomputed — the only scan that can
@@ -165,6 +175,13 @@ actor FinanceSyncEngine {
     /// `LedgerBalanceStore.invalidate()` here; `.financeSyncLocalStoreChanged`
     /// is also posted for observers that cannot take a closure.
     private var changeHooks: [@Sendable () -> Void] = []
+    /// Awaited after each commit with the existing rows the commit
+    /// overwrote — the main-context refresh seam (see `SyncChangedRow`).
+    private var changedRowObservers:
+        [@Sendable ([SyncChangedRow]) async -> Void] = []
+    /// Rows overwritten by the page being applied — flushed to
+    /// `changedRowObservers` once the page is saved.
+    private var pageChangedRows: [SyncChangedRow] = []
 
     init(
         modelContainer: ModelContainer,
@@ -185,6 +202,15 @@ actor FinanceSyncEngine {
     /// pulled server changes — the `LedgerBalanceStore` invalidation hook.
     func addLocalStoreChangeHook(_ hook: @escaping @Sendable () -> Void) {
         changeHooks.append(hook)
+    }
+
+    /// Registers an observer awaited (on this actor, before `syncOnce`
+    /// moves on) after each commit that overwrote existing local rows —
+    /// the coordinator refreshes the main context's stale instances here.
+    func addChangedRowObserver(
+        _ observer: @escaping @Sendable ([SyncChangedRow]) async -> Void
+    ) {
+        changedRowObservers.append(observer)
     }
 
     /// One sync cycle — see the type docstring for the four steps.
@@ -305,6 +331,7 @@ actor FinanceSyncEngine {
                 }
             var shadowUpserts: [SyncShadowEntrySnapshot] = []
             var shadowRemovals: [SyncRecordKey] = []
+            pageChangedRows = []
             do {
                 for (index, record) in sorted.enumerated() {
                     guard let entity = record.syncEntity else { continue }
@@ -340,11 +367,19 @@ actor FinanceSyncEngine {
                     shadowView: &shadowView, upserts: &shadowUpserts)
             } catch {
                 context.rollback()
+                pageChangedRows = []
                 throw error
             }
             if context.hasChanges {
-                try context.save()
+                try FinanceSyncSaveFilter.asEngine { try context.save() }
                 notifyLocalStoreChanged()
+                let changed = pageChangedRows
+                pageChangedRows = []
+                if !changed.isEmpty {
+                    for observer in changedRowObservers {
+                        await observer(changed)
+                    }
+                }
             }
             try await shadow.updateEntries(
                 upserts: shadowUpserts, removals: shadowRemovals)
@@ -392,6 +427,11 @@ actor FinanceSyncEngine {
             pendingRefs[key] = (dto: dto, hash: pulledHash, seq: seq)
         }
         if outcome != .skipped { report.applied += 1 }
+        if outcome == .updated, let row = existing {
+            pageChangedRows.append(SyncChangedRow(
+                entity: key.entity, id: key.id,
+                identifier: row.persistentModelID))
+        }
         var storedHash = pulledHash
         if outcome == .skipped {
             // The merge rule refused the pulled copy — the row kept its
