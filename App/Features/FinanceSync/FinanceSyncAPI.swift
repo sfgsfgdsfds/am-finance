@@ -79,6 +79,17 @@ struct FinanceSyncAPIClient: Sendable {
     ) async throws -> SyncPushResponse {
         let body = try JSONEncoder().encode(
             SyncPushRequest(baseSeq: baseSeq, changes: changes))
+        return try await pushEncoded(body: body, idempotencyKey: idempotencyKey)
+    }
+
+    /// POST /v1/sync/push with an already-encoded request body. The
+    /// engine persists these exact bytes before sending so a retry after
+    /// a dropped response replays byte-identically under the same
+    /// idempotency key — which is the only form the server de-dupes.
+    func pushEncoded(
+        body: Data,
+        idempotencyKey: String
+    ) async throws -> SyncPushResponse {
         let data = try await perform(
             method: "POST", path: "v1/sync/push",
             body: body, idempotencyKey: idempotencyKey)

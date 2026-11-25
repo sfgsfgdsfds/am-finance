@@ -62,6 +62,49 @@ final class SyncShadowState {
     init() {}
 }
 
+/// A record the server refused with a `422` `index ≥ 0` — the change is
+/// parked here and the diff leaves it out of later pushes until its local
+/// content hash moves off `contentHash`. `constraint`/`message` keep the
+/// server's reason so a UI can explain why the row is not syncing.
+@Model
+final class SyncQuarantineEntry {
+    var entityName: String = ""
+    var recordID: UUID = UUID()
+    /// `SyncContentHasher` hex of the rejected local version; an upsert is
+    /// retried only once its hash no longer equals this.
+    var contentHash: String = ""
+    var constraint: String = ""
+    var message: String = ""
+    var quarantinedAt: Date = Date.now
+
+    init(
+        entity: String, recordID: UUID, contentHash: String,
+        constraint: String, message: String
+    ) {
+        self.entityName = entity
+        self.recordID = recordID
+        self.contentHash = contentHash
+        self.constraint = constraint
+        self.message = message
+        self.quarantinedAt = .now
+    }
+}
+
+/// A quarantine entry as a plain value.
+struct SyncQuarantineSnapshot: Equatable, Sendable {
+    var entity: String
+    var recordID: UUID
+    var contentHash: String
+    var constraint: String
+    var message: String
+    var quarantinedAt: Date
+
+    var recordKey: SyncRecordKey? {
+        guard let entity = SyncEntity(rawValue: entity) else { return nil }
+        return SyncRecordKey(entity: entity, id: recordID)
+    }
+}
+
 /// A shadow entry as a plain value — what crosses the actor boundary.
 struct SyncShadowEntrySnapshot: Equatable, Sendable {
     var entity: String
@@ -101,6 +144,7 @@ enum FinanceSyncSchema {
     static let models: [any PersistentModel.Type] = [
         SyncShadowEntry.self,
         SyncShadowState.self,
+        SyncQuarantineEntry.self,
     ]
 
     static let storeFileName = "FinanceSync.store"
@@ -200,6 +244,94 @@ actor SyncShadowStore {
         try modelContext.save()
     }
 
+    /// Batched shadow write — one `save()` for a whole pull page or push
+    /// acknowledgement instead of a save per record.
+    func updateEntries(
+        upserts: [SyncShadowEntrySnapshot],
+        removals: [SyncRecordKey]
+    ) throws {
+        for snapshot in upserts {
+            guard let entity = SyncEntity(rawValue: snapshot.entity) else { continue }
+            if let existing = try entry(entity: entity, recordID: snapshot.recordID) {
+                existing.contentHash = snapshot.contentHash
+                existing.serverSeq = snapshot.serverSeq
+            } else {
+                modelContext.insert(SyncShadowEntry(
+                    entity: snapshot.entity, recordID: snapshot.recordID,
+                    contentHash: snapshot.contentHash, serverSeq: snapshot.serverSeq))
+            }
+        }
+        for key in removals {
+            if let existing = try entry(entity: key.entity, recordID: key.id) {
+                modelContext.delete(existing)
+            }
+        }
+        try modelContext.save()
+    }
+
+    // MARK: - Quarantine
+
+    /// Parks one rejected change: entity/id, the refused content hash and
+    /// the server's `constraint`/`message`.
+    func quarantine(
+        entity: SyncEntity, recordID: UUID,
+        contentHash: String, constraint: String, message: String
+    ) throws {
+        if let existing = try quarantineEntry(entity: entity, recordID: recordID) {
+            existing.contentHash = contentHash
+            existing.constraint = constraint
+            existing.message = message
+            existing.quarantinedAt = .now
+        } else {
+            modelContext.insert(SyncQuarantineEntry(
+                entity: entity.rawValue, recordID: recordID,
+                contentHash: contentHash, constraint: constraint,
+                message: message))
+        }
+        try modelContext.save()
+    }
+
+    /// `key -> rejected-hash` for every quarantined record — the diff
+    /// skips an upsert while its local hash still equals this.
+    func quarantinedHashes() throws -> [SyncRecordKey: String] {
+        var result: [SyncRecordKey: String] = [:]
+        for entry in try modelContext.fetch(FetchDescriptor<SyncQuarantineEntry>()) {
+            if let entity = SyncEntity(rawValue: entry.entityName) {
+                result[SyncRecordKey(entity: entity, id: entry.recordID)] = entry.contentHash
+            }
+        }
+        return result
+    }
+
+    /// Every quarantine entry, for tests and a future settings surface.
+    func quarantines() throws -> [SyncQuarantineSnapshot] {
+        try modelContext.fetch(FetchDescriptor<SyncQuarantineEntry>()).map {
+            SyncQuarantineSnapshot(
+                entity: $0.entityName, recordID: $0.recordID,
+                contentHash: $0.contentHash, constraint: $0.constraint,
+                message: $0.message, quarantinedAt: $0.quarantinedAt)
+        }
+    }
+
+    /// Releases one record — after a successful push or when it should
+    /// retry.
+    func clearQuarantine(entity: SyncEntity, recordID: UUID) throws {
+        if let existing = try quarantineEntry(entity: entity, recordID: recordID) {
+            modelContext.delete(existing)
+            try modelContext.save()
+        }
+    }
+
+    /// Releases several records in one save — the push ack path.
+    func clearQuarantines(_ keys: [SyncRecordKey]) throws {
+        for key in keys {
+            if let existing = try quarantineEntry(entity: key.entity, recordID: key.id) {
+                modelContext.delete(existing)
+            }
+        }
+        try modelContext.save()
+    }
+
     // MARK: - State
 
     /// The whole state row as a value.
@@ -276,6 +408,9 @@ actor SyncShadowStore {
     /// resets all data.
     func wipeAll() throws {
         try removeAllEntries()
+        for entry in try modelContext.fetch(FetchDescriptor<SyncQuarantineEntry>()) {
+            modelContext.delete(entry)
+        }
         let row = try stateRow()
         row.pullCursor = 0
         row.isEnabled = false
@@ -292,6 +427,18 @@ actor SyncShadowStore {
     private func entry(entity: SyncEntity, recordID: UUID) throws -> SyncShadowEntry? {
         let raw = entity.rawValue
         var descriptor = FetchDescriptor<SyncShadowEntry>(
+            predicate: #Predicate {
+                $0.entityName == raw && $0.recordID == recordID
+            })
+        descriptor.fetchLimit = 1
+        return try modelContext.fetch(descriptor).first
+    }
+
+    private func quarantineEntry(
+        entity: SyncEntity, recordID: UUID
+    ) throws -> SyncQuarantineEntry? {
+        let raw = entity.rawValue
+        var descriptor = FetchDescriptor<SyncQuarantineEntry>(
             predicate: #Predicate {
                 $0.entityName == raw && $0.recordID == recordID
             })

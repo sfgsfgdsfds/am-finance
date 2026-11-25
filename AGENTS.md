@@ -147,17 +147,31 @@ workers know what already exists. Pushed views must not create their own
 - `CreditCards/` — `CreditCardDetailView(account:)`, `CreditCardPaymentSheet`.
 - `CSVImport/` — `CSVImportView` (Settings → Dữ liệu → "Nhập sao kê CSV"; pick file + account, map columns, confirm) + `CSVImportParser`/`Detector`/`Mapper`/`Importer`/`Deduper`.
 - `Dashboard/` — `DashboardView` ("Tổng quan" tab) + its card structs.
-- `FinanceSync/` — two-way server sync building blocks (no engine/UI yet):
+- `FinanceSync/` — two-way server sync: `FinanceSyncEngine`
+  (`actor` owning a background `ModelContext` — `syncOnce()` pulls from the
+  shadow cursor with parent-before-child deferred resolution, then
+  diffs local content hashes vs the shadow and pushes `SyncBatcher`
+  batches; conflict policy is FIXED — an unpushed local change wins
+  over the pulled version and pushes that cycle; `422` index ≥ 0
+  quarantines the one record until its hash changes; `409` reruns
+  pull+diff ≤ 3 rounds; pushes persist key+body before sending so a
+  crash replays byte-identically; the pull cursor never jumps on push —
+  own writes return as no-ops. Local writes fire the
+  `addLocalStoreChangeHook` closure and
+  `.financeSyncLocalStoreChanged` — step 4 hooks
+  `LedgerBalanceStore.invalidate()` there) → `FinanceSyncReport`;
   `FinanceSyncConfig` (base URL + UserDefaults override),
-  `FinanceSyncAPIClient` (push/pull/importBackup/highWater against
-  `/v1/sync/*`, one-time 401 token-refresh retry, typed
+  `FinanceSyncAPIClient` (push/pushEncoded/pull/importBackup/highWater
+  against `/v1/sync/*`, one-time 401 token-refresh retry, typed
   conflict/validation/idempotency errors), `SyncShadowStore`
   (`@ModelActor` over a separate `FinanceSync.store` holding
-  `SyncShadowEntry` + the `SyncShadowState` singleton — pull cursor,
-  pending-push idempotency key/body — NOT in `AppSchema.allModels`),
-  `SyncRecordMapper` (model ↔ backup-v5 DTO per row, content hashing).
+  `SyncShadowEntry` + `SyncQuarantineEntry` + the `SyncShadowState`
+  singleton — pull cursor, pending-push idempotency key/body — NOT in
+  `AppSchema.allModels`), `SyncRecordMapper` (model ↔ backup-v5 DTO
+  per row, content hashing, `references(of:)` for deferred relinking).
   Wire types/canonical hashing/diff/batching live in
-  `FinanceCore/SyncJSON.swift` + `SyncWire.swift`.
+  `FinanceCore/SyncJSON.swift` + `SyncWire.swift`. No UI, scheduling or
+  first-sync mode yet.
 - `DataReset/` — `DataResetView` (Settings → Dữ liệu → "Xoá dữ liệu"): level A wipes transactions + import memory, level B wipes every model and reseeds; BOTH levels also wipe the saved Agent conversation history (`DataResetService.conversationStore.deleteAll()`); `DataResetService`, `DataResetSummary`; success posts `.dataResetCompleted` → `AMFinanceApp` rebuilds the root.
 - `Debts/` — `DebtsView` ("Nợ & Thẻ" tab).
 - `Loans/` — `LoanDetailView(account:)`, `LoanPaymentSheet`, `LoanPrepaymentSheet`, `LoanRateChangeSheet`.

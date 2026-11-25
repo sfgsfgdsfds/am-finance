@@ -534,7 +534,8 @@ struct SyncShadowStoreTests {
         // separate container, never backed up.
         #expect(!AppSchema.allModels.contains { $0 == SyncShadowEntry.self })
         #expect(!AppSchema.allModels.contains { $0 == SyncShadowState.self })
-        #expect(FinanceSyncSchema.models.count == 2)
+        #expect(!AppSchema.allModels.contains { $0 == SyncQuarantineEntry.self })
+        #expect(FinanceSyncSchema.models.count == 3)
     }
 }
 
