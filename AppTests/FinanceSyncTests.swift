@@ -712,4 +712,190 @@ struct SyncRecordMapperTests {
         let serverData = try JSONEncoder().encode(SyncJSONValue.object(fields))
         #expect(try SyncContentHasher.hash(jsonData: serverData) == hash)
     }
+
+    @Test func fieldHashMatchesTheEncodePipelineForEveryEntity() throws {
+        // For every entity — optionals nil AND populated — the direct
+        // field hash and the direct wire AST must produce exactly the
+        // canonical bytes the old encode → parse → canonicalize pipeline
+        // produced. This proves `syncFields` covers the same key set the
+        // Codable encoder writes — a missing or extra field would break
+        // the byte equality.
+        let context = try makeContext()
+        let business = Business(name: "Quán", icon: "cup", colorHex: "FF8800")
+        let account = Account(name: "Tiền mặt", kind: .cash, openingBalance: 1)
+        let toAccount = Account(name: "Thẻ", kind: .creditCard)
+        let category = LedgerCategory(name: "Ăn uống", kind: .expense)
+        let unit = RentalUnit(name: "P1", listPrice: 1, business: nil)
+        let lease = RentalLease(tenantName: "Nguyễn A", monthlyRent: 1)
+        for row: any PersistentModel in
+            [business, account, toAccount, category, unit, lease] {
+            context.insert(row)
+        }
+
+        let fullAccount = Account(name: "Vay", kind: .loan)
+        fullAccount.creditLimit = 50_000_000
+        fullAccount.statementDay = 15
+        fullAccount.graceDays = 45
+        fullAccount.loanPrincipal = 200_000_000
+        fullAccount.loanAnnualRatePercent = 12.0   // integral double → "12"
+        fullAccount.loanTermMonths = 24
+        fullAccount.loanStartDate = Date(timeIntervalSince1970: 1_800_000_000.1234)
+        fullAccount.loanPaymentDay = 5
+        fullAccount.loanMethodRaw = "annuity"
+        fullAccount.externalSource = "vpbank"
+        fullAccount.externalAccountID = "acc-99"
+        fullAccount.business = business
+        context.insert(fullAccount)
+
+        let fullTx = LedgerTransaction(
+            kind: .transfer, amount: 7_500,
+            date: Date(timeIntervalSince1970: 1_800_000_100.9876),
+            note: "đầy đủ")
+        fullTx.account = account
+        fullTx.toAccount = toAccount
+        fullTx.category = category
+        fullTx.business = business
+        fullTx.externalSource = "csv"
+        fullTx.externalID = "row-7"
+        fullTx.rentalLease = lease
+        fullTx.rentalPeriod = Date(timeIntervalSince1970: 1_790_000_000)
+        fullTx.needsReview = true
+        context.insert(fullTx)
+
+        let rateChange = LoanRateChange(
+            fromInstallment: 4, annualRatePercent: 9.5)
+        rateChange.account = fullAccount
+        let rule = RecurringRule(
+            title: "Thuê", kind: .expense, amount: 8_000_000,
+            frequency: .monthly, interval: 2,
+            startDate: Date(timeIntervalSince1970: 1_800_000_200),
+            autoCreate: true)
+        rule.account = account
+        rule.toAccount = toAccount
+        rule.category = category
+        rule.business = business
+        rule.endDate = Date(timeIntervalSince1970: 1_810_000_000)
+        rule.maximumOccurrences = 12
+        rule.lastGeneratedDate = Date(timeIntervalSince1970: 1_805_000_000)
+        let budget = Budget(monthlyLimit: 2_000_000, isActive: true, note: "x")
+        budget.category = category
+        let fullUnit = RentalUnit(name: "P2", listPrice: 2, business: nil)
+        fullUnit.business = business
+        let fullLease = RentalLease(
+            tenantName: "Trần B", tenantPhone: "090", monthlyRent: 3,
+            deposit: 6, paymentDay: 5, isActive: false)
+        fullLease.unit = unit
+        fullLease.endDate = Date(timeIntervalSince1970: 1_820_000_000)
+        for row: any PersistentModel in
+            [rateChange, rule, budget, fullUnit, fullLease] {
+            context.insert(row)
+        }
+        try context.save()
+
+        let emptyAccount = Account(name: "Trống", kind: .cash)
+        let minimalTx = LedgerTransaction(
+            kind: .expense, amount: 1,
+            date: Date(timeIntervalSince1970: 1_800_000_050))
+        let minimalRateChange = LoanRateChange(
+            fromInstallment: 1, annualRatePercent: 11.5)
+        let minimalBudget = Budget(monthlyLimit: 1)
+        let minimalRule = RecurringRule(
+            title: "Tối thiểu", kind: .income, amount: 1,
+            frequency: .weekly,
+            startDate: Date(timeIntervalSince1970: 1_800_000_060))
+        let minimalUnit = RentalUnit(name: "P3", listPrice: 3)
+        let minimalLease = RentalLease(tenantName: "Lê C")
+
+        // Pin every timestamp the DTOs carry — the `.now` values models
+        // stamp on init would make the byte comparison depend on the
+        // wall clock.
+        let stamp = Date(timeIntervalSince1970: 1_760_000_000)
+        for row in [account, toAccount, fullAccount, emptyAccount] {
+            row.createdAt = stamp
+        }
+        for row in [unit, fullUnit, minimalUnit] { row.createdAt = stamp }
+        for row in [lease, fullLease, minimalLease] {
+            row.startDate = stamp
+            row.createdAt = stamp
+        }
+        for row in [rule, minimalRule] { row.createdAt = stamp }
+        for row in [budget, minimalBudget] { row.createdAt = stamp }
+        for row in [fullTx, minimalTx] {
+            row.createdAt = stamp
+            row.updatedAt = stamp
+        }
+
+        let rows: [any PersistentModel] = [
+            business, category,
+            emptyAccount,                  // every optional nil
+            fullAccount,
+            minimalTx,
+            fullTx,
+            minimalRateChange,
+            rateChange,
+            minimalBudget,                 // nil category
+            budget,
+            minimalRule,
+            rule,
+            minimalUnit,                   // nil business
+            fullUnit,
+            minimalLease,                  // nil unit + endDate
+            fullLease,
+        ]
+        for row in rows {
+            let dto = try #require(SyncRecordMapper.dto(of: row))
+            let legacyCanonical = try SyncJSONValue(
+                jsonData: SyncRecordMapper.encode(dto)).canonicalData()
+            #expect(
+                SyncContentHasher.canonicalData(
+                    fields: SyncRecordMapper.canonicalFields(of: dto))
+                    == legacyCanonical,
+                "\(dto.entity) field hash diverges from the encode pipeline")
+            #expect(
+                try SyncRecordMapper.jsonValue(of: dto).canonicalData()
+                    == legacyCanonical,
+                "\(dto.entity) wire AST diverges from the encode pipeline")
+            #expect(
+                try SyncRecordMapper.contentHash(of: row)
+                    == SyncContentHasher.hash(jsonData:
+                        SyncRecordMapper.encode(dto)),
+                "\(dto.entity) row hash diverges")
+        }
+    }
+
+    @Test func pulledServerShapedJSONHashesLikeTheLocalRow() throws {
+        // The server renders a record with uppercase ids, `.sssZ` dates,
+        // nil keys absent and keys in arbitrary order. Decoded to the
+        // same DTO, its direct hash must equal the local row's — one
+        // hash function for both directions.
+        let context = try makeContext()
+        let account = Account(name: "Tiền mặt", kind: .cash)
+        let tx = LedgerTransaction(
+            kind: .expense, amount: 45_000,
+            date: Date(timeIntervalSince1970: 1_800_000_000.1234),
+            note: "cà phê")
+        tx.account = account
+        tx.createdAt = Date(timeIntervalSince1970: 1_800_000_000.0001)
+        tx.updatedAt = Date(timeIntervalSince1970: 1_800_000_100.4321)
+        context.insert(account)
+        context.insert(tx)
+        try context.save()
+
+        let localHashValue = try SyncRecordMapper.contentHash(of: tx)
+        let localHash = try #require(localHashValue)
+        let iso = { BackupDateCodec.string(from: $0) }
+        // Scrambled key order; uppercase uuid strings; `.sssZ` stamps;
+        // nil refs simply absent — exactly the server's shape.
+        let serverJSON = """
+        {"updatedAt":"\(iso(tx.updatedAt))","note":"cà phê",\
+        "needsReview":false,"kindRaw":"expense","amount":45000,\
+        "accountID":"\(account.id.uuidString)",\
+        "id":"\(tx.id.uuidString)",\
+        "date":"\(iso(tx.date))","createdAt":"\(iso(tx.createdAt))"}
+        """
+        let dto = try SyncRecordMapper.decode(
+            entity: .transaction,
+            from: try SyncJSONValue(jsonString: serverJSON))
+        #expect(SyncRecordMapper.contentHash(of: dto) == localHash)
+    }
 }
