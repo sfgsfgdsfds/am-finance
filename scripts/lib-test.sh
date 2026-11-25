@@ -22,7 +22,7 @@
 : "${AM_TEST_SCHEME:?set AM_TEST_SCHEME before sourcing lib-test.sh}"
 
 # Transient runner/simulator failures worth one reboot-and-retry.
-AM_TRANSIENT_RE='before establishing connection|failed to boot|unable to boot|simulator failed to launch|failed to launch|could not be launched|timed out|lost connection|connection.*(interrupt|refused|reset|closed)|unable to connect|never finished bootstrapping|early unexpected exit|service delegate|failed to install|mach[ -]error|dtx|disconnect'
+AM_TRANSIENT_RE='before establishing connection|failed to boot|unable to boot|simulator failed to launch|failed to launch|could not be launched|does not have a process ID|timed out|lost connection|connection.*(interrupt|refused|reset|closed)|unable to connect|never finished bootstrapping|early unexpected exit|service delegate|failed to install|mach[ -]error|dtx|disconnect'
 
 # Regenerate the project, then re-run the calling script under the
 # machine-wide lock. $1: absolute path of the script to re-exec. Only returns

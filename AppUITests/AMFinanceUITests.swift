@@ -1144,6 +1144,9 @@ final class AMFinanceUITests: XCTestCase {
     /// Giao dịch → "Tất cả".
     func testAgentProposalConfirm() throws {
         app.terminate()
+        // Wait for the process to die before relaunching — see
+        // testFinanceSync for why.
+        _ = app.wait(for: .notRunning, timeout: 10)
         app.launchArguments = ["-uiTestInMemoryStore", "-uiTestAgentScript"]
         app.launch()
 
@@ -1230,6 +1233,9 @@ final class AMFinanceUITests: XCTestCase {
     /// the screen no longer wipes the session.
     func testAgentSharedConversation() throws {
         app.terminate()
+        // Wait for the process to die before relaunching — see
+        // testFinanceSync for why.
+        _ = app.wait(for: .notRunning, timeout: 10)
         app.launchArguments = ["-uiTestInMemoryStore", "-uiTestAgentScript"]
         app.launch()
 
@@ -1325,6 +1331,9 @@ final class AMFinanceUITests: XCTestCase {
     /// exactly like a live conversation.
     func testAgentHistory() throws {
         app.terminate()
+        // Wait for the process to die before relaunching — see
+        // testFinanceSync for why.
+        _ = app.wait(for: .notRunning, timeout: 10)
         app.launchArguments = ["-uiTestInMemoryStore", "-uiTestAgentScript"]
         app.launch()
 
@@ -1412,6 +1421,12 @@ final class AMFinanceUITests: XCTestCase {
     /// manual button is the only sync — the report stays deterministic.
     func testFinanceSync() throws {
         app.terminate()
+        // `terminate()` returns while the process may still be dying —
+        // relaunching into that window can hand the new launch a stale
+        // proxy ("does not have a process ID"), so wait for the death
+        // first. The timeout only caps the wait; a stuck teardown falls
+        // through to the same launch() that ran before.
+        _ = app.wait(for: .notRunning, timeout: 10)
         app.launchArguments = [
             "-uiTestInMemoryStore", "-uiTestFakeSyncServer",
         ]
@@ -1494,11 +1509,21 @@ final class AMFinanceUITests: XCTestCase {
     /// Types into the Agent input and taps send. The field may surface as
     /// a text view (`axis: .vertical`), so it is matched by identifier
     /// whatever element type it carries; the send button is disabled
-    /// until text lands, so the tap waits for enabled too.
+    /// until text lands, so the tap waits for enabled too. Typing waits
+    /// for keyboard focus first — `typeText` fails outright ("Neither
+    /// element nor any descendant has keyboard focus") when it fires
+    /// before the tap's first-responder change lands, which happens on
+    /// loaded simulators.
     private func sendAgentMessage(_ text: String) {
         let input = app.descendants(matching: .any)["agent.input"]
         XCTAssertTrue(waitReady(input, timeout: 8), "agent input missing")
         input.tap()
+        let focused = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "hasKeyboardFocus == true"),
+            object: input)
+        if XCTWaiter.wait(for: [focused], timeout: 8) != .completed {
+            input.tap()
+        }
         app.typeText(text)
         tapWhenReady(app.buttons["agent.send"], "agent send missing")
     }

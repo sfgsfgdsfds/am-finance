@@ -37,9 +37,18 @@ struct AMFinanceApp: App {
             self.syncCoordinator = inMemory ? nil : MainActor.assumeIsolated {
                 WalletSyncCoordinator.live(context: container.mainContext)
             }
-            self.financeSyncCoordinator = MainActor.assumeIsolated {
-                try? FinanceSyncCoordinator.live(container: container)
-            }
+            // Plain UI-test launches get no coordinator at all — the
+            // same treatment `syncCoordinator` gets — so no shadow store,
+            // refresh task, timer or save observer exists while tests
+            // run. Only `-uiTestFakeSyncServer` builds one (it points the
+            // API at the in-app fake — see FinanceSyncUITestSupport).
+            let fakeSyncServer = ProcessInfo.processInfo.arguments
+                .contains("-uiTestFakeSyncServer")
+            self.financeSyncCoordinator = inMemory && !fakeSyncServer
+                ? nil
+                : MainActor.assumeIsolated {
+                    try? FinanceSyncCoordinator.live(container: container)
+                }
             // BGTaskScheduler demands registration before the launch
             // sequence finishes — App.init is the earliest hook there is.
             // The scheduler itself is a no-op under -uiTestInMemoryStore.
