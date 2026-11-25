@@ -148,7 +148,7 @@ workers know what already exists. Pushed views must not create their own
 - `CSVImport/` — `CSVImportView` (Settings → Dữ liệu → "Nhập sao kê CSV"; pick file + account, map columns, confirm) + `CSVImportParser`/`Detector`/`Mapper`/`Importer`/`Deduper`.
 - `Dashboard/` — `DashboardView` ("Tổng quan" tab) + its card structs.
 - `FinanceSync/` — two-way server sync: `FinanceSyncEngine`
-  (`actor` owning a background `ModelContext` — `syncOnce()` pulls from the
+  (`actor` owning a background `ModelContext` — `syncOnce(fullScan:)` pulls from the
   shadow cursor with parent-before-child deferred resolution, then
   diffs local content hashes vs the shadow and pushes `SyncBatcher`
   batches; conflict policy is FIXED — an unpushed local change wins
@@ -156,7 +156,20 @@ workers know what already exists. Pushed views must not create their own
   quarantines the one record until its hash changes; `409` reruns
   pull+diff ≤ 3 rounds; pushes persist key+body before sending so a
   crash replays byte-identically; the pull cursor never jumps on push —
-  own writes return as no-ops. Local writes fire the
+  own writes return as no-ops. The diff has two scan modes
+  (`FinanceSyncScanMode`, `report.scanMode`): QUICK is the routine
+  cycle — transactions are re-hashed only when `updatedAt` passes the
+  persisted `lastScanStart` minus a 5 s margin, inserts/deletes still
+  surface through the id-set diff vs the shadow, the eight small
+  entities always hash fully; FULL re-hashes everything — first cycle
+  after launch, `syncOnce(fullScan: true)`, or when `lastFullScanAt`
+  ages past 6 h — and is the backstop for `updatedAt`-invisible edits
+  and silent relationship nullifications. Content hashing is the
+  direct field encoder (`SyncRecordMapper.canonicalFields` →
+  `SyncContentHasher.hash(fields:)`) — byte-identical to the old
+  encode → parse → canonicalize pipeline; pulled records decode to the
+  same DTO and hash the same way. `report.hashedTransactions` counts
+  the rows actually hashed this cycle. Local writes fire the
   `addLocalStoreChangeHook` closure and
   `.financeSyncLocalStoreChanged` — step 4 hooks
   `LedgerBalanceStore.invalidate()` there) → `FinanceSyncReport`;
@@ -166,9 +179,12 @@ workers know what already exists. Pushed views must not create their own
   conflict/validation/idempotency errors), `SyncShadowStore`
   (`@ModelActor` over a separate `FinanceSync.store` holding
   `SyncShadowEntry` + `SyncQuarantineEntry` + the `SyncShadowState`
-  singleton — pull cursor, pending-push idempotency key/body — NOT in
+  singleton — pull cursor, pending-push idempotency key/body, the
+  scan markers `lastScanStart`/`lastFullScanAt` — NOT in
   `AppSchema.allModels`), `SyncRecordMapper` (model ↔ backup-v5 DTO
-  per row, content hashing, `references(of:)` for deferred relinking).
+  per row — `syncFields` is the one field enumeration feeding both the
+  content hash and the wire `SyncJSONValue`, `references(of:)` for
+  deferred relinking).
   Wire types/canonical hashing/diff/batching live in
   `FinanceCore/SyncJSON.swift` + `SyncWire.swift`.
   `FinanceSyncBootstrap` (actor, uses only the engine's public API) is

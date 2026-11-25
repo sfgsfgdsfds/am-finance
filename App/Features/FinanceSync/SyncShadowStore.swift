@@ -59,6 +59,13 @@ final class SyncShadowState {
     var pendingPushBodyHash: String? = nil
     var pendingPushBody: Data? = nil
 
+    /// When the last diff-phase scan started — the next QUICK scan only
+    /// re-hashes transactions stamped after this minus a safety margin.
+    var lastScanStart: Date? = nil
+    /// When the last FULL scan ran — a full re-hash is forced once this
+    /// is older than the engine's full-scan interval.
+    var lastFullScanAt: Date? = nil
+
     init() {}
 }
 
@@ -127,6 +134,8 @@ struct SyncShadowStateSnapshot: Equatable, Sendable {
     var pendingPushKey: String? = nil
     var pendingPushBodyHash: String? = nil
     var pendingPushBody: Data? = nil
+    var lastScanStart: Date? = nil
+    var lastFullScanAt: Date? = nil
 }
 
 /// Everything the engine needs to replay an interrupted push: the
@@ -251,14 +260,24 @@ actor SyncShadowStore {
     }
 
     /// Batched shadow write — one `save()` for a whole pull page or push
-    /// acknowledgement instead of a save per record.
+    /// acknowledgement instead of a save per record. The touched entries
+    /// are found with a single `IN` fetch — a fetch per record was the
+    /// page's dominant cost.
     func updateEntries(
         upserts: [SyncShadowEntrySnapshot],
         removals: [SyncRecordKey]
     ) throws {
+        let ids = upserts.map(\.recordID) + removals.map(\.id)
+        var found: [String: SyncShadowEntry] = [:]
+        if !ids.isEmpty {
+            for entry in try modelContext.fetch(FetchDescriptor<SyncShadowEntry>(
+                predicate: #Predicate { ids.contains($0.recordID) })) {
+                found["\(entry.entityName)/\(entry.recordID)"] = entry
+            }
+        }
         for snapshot in upserts {
-            guard let entity = SyncEntity(rawValue: snapshot.entity) else { continue }
-            if let existing = try entry(entity: entity, recordID: snapshot.recordID) {
+            guard SyncEntity(rawValue: snapshot.entity) != nil else { continue }
+            if let existing = found["\(snapshot.entity)/\(snapshot.recordID)"] {
                 existing.contentHash = snapshot.contentHash
                 existing.serverSeq = snapshot.serverSeq
             } else {
@@ -268,7 +287,7 @@ actor SyncShadowStore {
             }
         }
         for key in removals {
-            if let existing = try entry(entity: key.entity, recordID: key.id) {
+            if let existing = found["\(key.entity.rawValue)/\(key.id)"] {
                 modelContext.delete(existing)
             }
         }
@@ -344,11 +363,17 @@ actor SyncShadowStore {
         }
     }
 
-    /// Releases several records in one save — the push ack path.
+    /// Releases several records in one save — the push ack path. Same
+    /// single-`IN`-fetch pattern as `updateEntries`.
     func clearQuarantines(_ keys: [SyncRecordKey]) throws {
-        for key in keys {
-            if let existing = try quarantineEntry(entity: key.entity, recordID: key.id) {
-                modelContext.delete(existing)
+        let ids = keys.map(\.id)
+        if !ids.isEmpty {
+            let wanted = Set(keys.map { "\($0.entity.rawValue)/\($0.id)" })
+            for entry in try modelContext.fetch(FetchDescriptor<SyncQuarantineEntry>(
+                predicate: #Predicate { ids.contains($0.recordID) })) {
+                if wanted.contains("\(entry.entityName)/\(entry.recordID)") {
+                    modelContext.delete(entry)
+                }
             }
         }
         try modelContext.save()
@@ -366,7 +391,9 @@ actor SyncShadowStore {
             lastError: row.lastError,
             pendingPushKey: row.pendingPushKey,
             pendingPushBodyHash: row.pendingPushBodyHash,
-            pendingPushBody: row.pendingPushBody)
+            pendingPushBody: row.pendingPushBody,
+            lastScanStart: row.lastScanStart,
+            lastFullScanAt: row.lastFullScanAt)
     }
 
     func pullCursor() throws -> Int64 {
@@ -393,6 +420,17 @@ actor SyncShadowStore {
         let row = try stateRow()
         row.lastSyncAt = finishedAt
         row.lastError = error
+        try modelContext.save()
+    }
+
+    /// Records the diff-phase scan markers on a successful cycle:
+    /// `lastScanStart` moves the next QUICK scan's `updatedAt` threshold
+    /// forward; a FULL scan also refreshes `lastFullScanAt` (nil leaves
+    /// it — QUICK cycles must not push the 6-hour horizon out).
+    func updateScanMarkers(lastScanStart: Date, lastFullScanAt: Date?) throws {
+        let row = try stateRow()
+        row.lastScanStart = lastScanStart
+        if let lastFullScanAt { row.lastFullScanAt = lastFullScanAt }
         try modelContext.save()
     }
 
@@ -441,6 +479,8 @@ actor SyncShadowStore {
         row.pendingPushKey = nil
         row.pendingPushBody = nil
         row.pendingPushBodyHash = nil
+        row.lastScanStart = nil
+        row.lastFullScanAt = nil
         try modelContext.save()
     }
 

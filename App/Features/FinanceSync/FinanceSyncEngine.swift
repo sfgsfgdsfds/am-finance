@@ -12,6 +12,20 @@ extension Notification.Name {
         Notification.Name("financeSyncLocalStoreChanged")
 }
 
+/// How a cycle's diff phase covered the local store.
+enum FinanceSyncScanMode: String, Equatable, Sendable {
+    /// Every row's content hash is recomputed — the only scan that can
+    /// catch edits that never stamped `updatedAt` and relationship
+    /// nullifications SwiftData applies silently.
+    case full
+    /// The routine scan: transactions (the bulk entity) are only
+    /// re-hashed when `updatedAt` moved past the previous scan's start
+    /// (minus a safety margin) — inserts/deletes are caught by the
+    /// id-set diff against the shadow either way; the eight small
+    /// entities always hash fully.
+    case quick
+}
+
 /// Counters from one `FinanceSyncEngine.syncOnce` cycle.
 struct FinanceSyncReport: Equatable, Sendable {
     /// Pulled records seen — including no-op echoes of our own pushes,
@@ -34,6 +48,13 @@ struct FinanceSyncReport: Equatable, Sendable {
     var quarantined = 0
     /// `409` rounds retried beyond the first attempt.
     var retries409 = 0
+    /// The scan the diff phase ran — `.full` on the first cycle after
+    /// launch, on `syncOnce(fullScan:)` and when the last full scan aged
+    /// out; `.quick` otherwise.
+    var scanMode: FinanceSyncScanMode = .quick
+    /// Transactions whose content hash was recomputed this cycle — the
+    /// incremental scan's cost meter: ~0 on a clean QUICK cycle.
+    var hashedTransactions = 0
     var duration: TimeInterval = 0
 }
 
@@ -80,7 +101,14 @@ enum FinanceSyncEngineError: LocalizedError, Equatable {
 ///    so a crash/network drop never duplicates a batch; a stale body is
 ///    discarded and the diff re-covers its rows.
 /// 3. DIFF local content hashes vs the shadow (`SyncDiff`), skipping
-///    quarantined upserts whose local hash has not changed.
+///    quarantined upserts whose local hash has not changed. Two scan
+///    modes — see `FinanceSyncScanMode`: QUICK is the routine mode and
+///    only re-hashes transactions whose `updatedAt` passes the previous
+///    scan's threshold (inserts/deletes still surface through the
+///    id-set diff against the shadow); FULL re-hashes everything and is
+///    the backstop for edits that bypass `updatedAt` and silent
+///    relationship nullifications — it runs on the first cycle after
+///    launch, on demand, and at most every `fullScanInterval` later.
 /// 4. PUSH `SyncBatcher` batches with `base_seq` = the post-pull cursor.
 ///    Each batch persists key+body before sending; a `422 index ≥ 0`
 ///    quarantines that one record and resends the trimmed batch under a
@@ -108,6 +136,14 @@ actor FinanceSyncEngine {
 
     /// `409` pull+retry rounds per `syncOnce` before the cycle fails.
     static let maxConflictRounds = 3
+    /// A FULL re-hash runs at least this often — the backstop catching
+    /// `updatedAt`-invisible local edits. Between fulls, QUICK cycles
+    /// cost a scan of ids + stamps, not a hash per row.
+    static let fullScanInterval: TimeInterval = 6 * 3_600
+    /// QUICK scan headroom below `lastScanStart`: transactions stamped
+    /// inside the margin are re-hashed anyway — saves racing the scan
+    /// boundary and sub-second `updatedAt` fuzz can never slip through.
+    static let quickScanSafetyMargin: TimeInterval = 5
 
     /// Pulled children whose references were not resolvable when applied —
     /// re-applied as soon as every parent exists (later in the page, a
@@ -121,6 +157,10 @@ actor FinanceSyncEngine {
     /// resolution index the mapper links references through.
     private var maps = BackupRowMaps()
     private var inFlight = false
+    /// Whether this engine instance already ran a FULL scan — the first
+    /// `syncOnce` after launch always re-hashes everything regardless of
+    /// how fresh the persisted `lastFullScanAt` is.
+    private var ranFullScan = false
     /// Fired after every commit of pulled server changes — step 4 hooks
     /// `LedgerBalanceStore.invalidate()` here; `.financeSyncLocalStoreChanged`
     /// is also posted for observers that cannot take a closure.
@@ -148,8 +188,10 @@ actor FinanceSyncEngine {
     }
 
     /// One sync cycle — see the type docstring for the four steps.
+    /// `fullScan: true` forces a FULL local hash pass for the diff; the
+    /// default is QUICK when the persisted markers allow it.
     @discardableResult
-    func syncOnce() async throws -> FinanceSyncReport {
+    func syncOnce(fullScan: Bool = false) async throws -> FinanceSyncReport {
         guard !inFlight else { throw FinanceSyncEngineError.alreadyRunning }
         inFlight = true
         defer { inFlight = false }
@@ -157,10 +199,13 @@ actor FinanceSyncEngine {
         var report = FinanceSyncReport()
         do {
             var round = 0
+            var lastScan: (start: Date, mode: FinanceSyncScanMode)?
             while true {
                 try await pullPhase(report: &report)
                 try await replayPendingPush(report: &report)
-                let pending = try await pendingChanges()
+                let pending = try await pendingChanges(
+                    forceFullScan: fullScan, report: &report)
+                lastScan = pending.scan
                 do {
                     try await pushChanges(
                         pending.changes, wireBytes: pending.wireBytes,
@@ -175,6 +220,14 @@ actor FinanceSyncEngine {
                 }
             }
             report.duration = Self.seconds(since: started)
+            if let lastScan {
+                // Persisted only on success — a failed cycle leaves the
+                // threshold back so the next scan re-covers the window.
+                try await shadow.updateScanMarkers(
+                    lastScanStart: lastScan.start,
+                    lastFullScanAt: lastScan.mode == .full ? lastScan.start : nil)
+                if lastScan.mode == .full { ranFullScan = true }
+            }
             try await shadow.recordSyncResult(finishedAt: .now, error: nil)
             return report
         } catch {
@@ -185,10 +238,13 @@ actor FinanceSyncEngine {
         }
     }
 
-    /// Local content hashes for every synced row — the diff's `local`
-    /// input; tests use it to compare two engines' stores.
+    /// Local content hashes for every synced row — a FULL scan's `local`
+    /// output; tests use it to compare two engines' stores.
     func localContentHashes() async throws -> [SyncRecordKey: String] {
-        try await localRows().mapValues(\.contentHash)
+        try rebuildMaps()
+        var report = FinanceSyncReport()
+        return try await collectLocalRows(
+            quickThreshold: nil, shadowSnapshot: [:], report: &report).hashes
     }
 
     // MARK: - Pull
@@ -204,13 +260,14 @@ actor FinanceSyncEngine {
     }
 
     /// Pulled upsert pre-work, computed off-actor per page: the record's
-    /// canonical hash and its decoded DTO. Both are pure CPU — ~2ms/row
-    /// serial in a debug build — so a 500-record page pays for them in
-    /// parallel instead of inside the apply loop. A decode error rides
-    /// along and is rethrown at that record's seq position, keeping the
-    /// whole-page rollback ordering intact.
+    /// decoded DTO and the canonical hash OF THAT DTO — the same hash a
+    /// local row produces, so pulled content compares directly. Both are
+    /// pure CPU so a 500-record page pays for them in parallel instead
+    /// of inside the apply loop. A decode error rides along and is
+    /// rethrown at that record's seq position, keeping the whole-page
+    /// rollback ordering intact.
     private typealias PreparedUpsert
-        = (hash: String, dto: Result<SyncBackupDTO, Error>)
+        = Result<(dto: SyncBackupDTO, hash: String), Error>
 
     /// Pulls from the stored cursor until `has_more == false`, applying
     /// each page, then shadow entries, then `next_cursor`.
@@ -232,12 +289,13 @@ actor FinanceSyncEngine {
                               let data = record.data
                         else { continue }
                         group.addTask {
-                            (index, (
-                                SyncContentHasher.hash(data),
-                                Result {
-                                    try SyncRecordMapper.decode(
-                                        entity: entity, from: data)
-                                }))
+                            (index, Result {
+                                let dto = try SyncRecordMapper.decode(
+                                    entity: entity, from: data)
+                                return (
+                                    dto: dto,
+                                    hash: SyncRecordMapper.contentHash(of: dto))
+                            })
                         }
                     }
                     var out: [Int: PreparedUpsert] = [:]
@@ -263,9 +321,10 @@ actor FinanceSyncEngine {
                             throw FinanceSyncEngineError
                                 .pulledRecordMissingData(entity, record.id)
                         }
+                        let preparedUpsert = try upsert.get()
                         switch try applyUpsert(
-                            key: key, dto: upsert.dto.get(),
-                            pulledHash: upsert.hash, seq: record.seq,
+                            key: key, dto: preparedUpsert.dto,
+                            pulledHash: preparedUpsert.hash, seq: record.seq,
                             shadowHash: shadowView[key], report: &report) {
                         case .stored(let hash), .refreshSeq(let hash):
                             shadowView[key] = hash
@@ -334,10 +393,15 @@ actor FinanceSyncEngine {
         }
         if outcome != .skipped { report.applied += 1 }
         var storedHash = pulledHash
-        if outcome != .inserted || !unresolved.isEmpty {
-            // Merge rules kept local fields (`.updated`/`.skipped`) or
-            // references still dangle — a fresh insert is stored exactly
-            // as pulled, so only these paths re-hash the stored row.
+        if outcome == .skipped {
+            // The merge rule refused the pulled copy — the row kept its
+            // own content, so the hash computed above still stands.
+            storedHash = localHash ?? pulledHash
+        } else if !unresolved.isEmpty {
+            // References still dangle — the stored row has nil fields
+            // where the pulled DTO has ids; only this path re-hashes.
+            // (`.inserted`/`.updated` with every ref resolved stores the
+            // pulled content verbatim → pulledHash already matches.)
             if let row = mapsRow(key),
                let hash = try SyncRecordMapper.contentHash(of: row) {
                 storedHash = hash
@@ -403,82 +467,161 @@ actor FinanceSyncEngine {
     // MARK: - Diff
 
     private struct LocalRow {
-        var dto: SyncBackupDTO
-        /// `dto` as wire `data` — encoded+parsed once, reused by the
-        /// `SyncChange` and the canonical hash below.
+        /// The DTO as wire `data` — built once, reused by the `SyncChange`.
         var json: SyncJSONValue
         var contentHash: String
         /// Canonical byte size — the batcher's per-change size estimate.
         var wireBytes: Int
     }
 
-    /// Fetches every synced row into `(dto, wire JSON, content hash)` —
-    /// the export side of the diff. Row reads stay on this actor; the
-    /// pure-CPU encode → canonicalize → hash fan out across cores —
-    /// a serial pass costs ~2ms/row, which is unacceptable over
-    /// thousands of rows in a debug build.
-    private func localRows() async throws -> [SyncRecordKey: LocalRow] {
-        var raw: [(SyncRecordKey, SyncBackupDTO)] = []
-        func collect<T: PersistentModel>(_ type: T.Type) throws {
-            for row in try context.fetch(FetchDescriptor<T>()) {
+    /// The scan a `pendingChanges` run performs this round.
+    private struct ScanPlan {
+        var mode: FinanceSyncScanMode
+        /// QUICK: transactions stamped at or before this (already the
+        /// `quickScanSafetyMargin` below the last scan) keep their shadow
+        /// hash untouched. FULL: nil — everything re-hashes.
+        var transactionThreshold: Date?
+        var startedAt: Date
+    }
+
+    /// Resolves this cycle's scan mode: forced, or the first cycle this
+    /// engine runs, or whenever the persisted FULL scan aged out (or was
+    /// never recorded). Fresh markers → QUICK with the margin-adjusted
+    /// threshold.
+    private func scanPlan(
+        forced: Bool, at now: Date
+    ) async throws -> ScanPlan {
+        if forced || !ranFullScan {
+            return ScanPlan(mode: .full, transactionThreshold: nil, startedAt: now)
+        }
+        let state = try await shadow.state()
+        guard let lastFull = state.lastFullScanAt,
+              now.timeIntervalSince(lastFull) < Self.fullScanInterval,
+              let lastScan = state.lastScanStart
+        else {
+            return ScanPlan(mode: .full, transactionThreshold: nil, startedAt: now)
+        }
+        return ScanPlan(
+            mode: .quick,
+            transactionThreshold: lastScan.addingTimeInterval(
+                -Self.quickScanSafetyMargin),
+            startedAt: now)
+    }
+
+    /// Reads every synced row from the pull phase's `maps` into
+    /// `(hashes, rows)` — the diff's `local` input plus the per-row wire
+    /// payload for whatever turns out changed.
+    ///
+    /// `quickThreshold` is the QUICK path: a transaction stamped at or
+    /// before it keeps its shadow hash (it cannot have changed in a way
+    /// `updatedAt` reports — anything else is the FULL scan's job); rows
+    /// missing from the shadow are always hashed (an insert). Inserts
+    /// and deletes are caught by the id sets either way: a local key
+    /// absent from the shadow hashes + upserts; a shadow key absent
+    /// locally diffs as a delete. The eight small entities always hash
+    /// fully — their tables are trivially small.
+    ///
+    /// Hashing itself fans out across cores in 250-row chunks: DTO +
+    /// field extraction stays on this actor (SwiftData reads), the
+    /// canonical encode + SHA-256 + wire AST are pure CPU off-actor.
+    private func collectLocalRows(
+        quickThreshold: Date?,
+        shadowSnapshot: [SyncRecordKey: String],
+        report: inout FinanceSyncReport
+    ) async throws
+        -> (hashes: [SyncRecordKey: String], rows: [SyncRecordKey: LocalRow])
+    {
+        var hashes: [SyncRecordKey: String] = [:]
+        var pending: [(SyncRecordKey, SyncBackupDTO)] = []
+
+        // The bulk entity — incremental under QUICK.
+        for (id, row) in maps.transactions {
+            let key = SyncRecordKey(entity: .transaction, id: id)
+            if let threshold = quickThreshold,
+               row.updatedAt <= threshold,
+               let shadowHash = shadowSnapshot[key] {
+                hashes[key] = shadowHash
+                continue
+            }
+            guard let dto = SyncRecordMapper.dto(of: row) else { continue }
+            pending.append((key, dto))
+            report.hashedTransactions += 1
+        }
+
+        // The eight small entities — always a full pass.
+        func queue<T: PersistentModel>(_ rows: some Sequence<T>) {
+            for row in rows {
                 guard let dto = SyncRecordMapper.dto(of: row) else { continue }
-                raw.append(
-                    (SyncRecordKey(entity: dto.entity, id: dto.id), dto))
+                pending.append((
+                    SyncRecordKey(entity: dto.entity, id: dto.id), dto))
             }
         }
-        try collect(Account.self)
-        try collect(LedgerCategory.self)
-        try collect(Business.self)
-        try collect(LedgerTransaction.self)
-        try collect(LoanRateChange.self)
-        try collect(Budget.self)
-        try collect(RecurringRule.self)
-        try collect(RentalUnit.self)
-        try collect(RentalLease.self)
-        return try await withThrowingTaskGroup(
+        queue(maps.accounts.values)
+        queue(maps.categories.values)
+        queue(maps.businesses.values)
+        queue(maps.rateChanges.values)
+        queue(maps.budgets.values)
+        queue(maps.recurringRules.values)
+        queue(maps.rentalUnits.values)
+        queue(maps.rentalLeases.values)
+
+        let rows = try await withThrowingTaskGroup(
             of: [(SyncRecordKey, LocalRow)].self
         ) { group in
             let chunkSize = 250
-            for start in stride(from: 0, to: raw.count, by: chunkSize) {
-                let slice = Array(raw[start..<min(start + chunkSize, raw.count)])
+            for start in stride(from: 0, to: pending.count, by: chunkSize) {
+                let slice = Array(
+                    pending[start..<min(start + chunkSize, pending.count)])
                 group.addTask {
                     try slice.map { key, dto in
                         let json = try SyncRecordMapper.jsonValue(of: dto)
-                        let canonical = json.canonicalData()
+                        let canonical = SyncContentHasher.canonicalData(
+                            fields: SyncRecordMapper.canonicalFields(of: dto))
                         return (key, LocalRow(
-                            dto: dto, json: json,
-                            contentHash: Self.sha256Hex(canonical),
+                            json: json,
+                            contentHash: SyncContentHasher.hash(
+                                canonicalData: canonical),
                             wireBytes: canonical.count))
                     }
                 }
             }
             var rows: [SyncRecordKey: LocalRow] = [:]
-            rows.reserveCapacity(raw.count)
+            rows.reserveCapacity(pending.count)
             for try await chunk in group {
                 for (key, row) in chunk { rows[key] = row }
             }
             return rows
         }
+        for (key, row) in rows { hashes[key] = row.contentHash }
+        return (hashes, rows)
     }
 
     /// The wire change list: `SyncDiff` against the shadow, minus
     /// quarantined upserts whose local hash has not moved, upserts
     /// parent-first then deletes child-first. Each upsert carries its
     /// local hash so the ack can write the shadow without re-encoding;
-    /// `wireBytes` feeds the batcher's size estimate.
-    private func pendingChanges() async throws
+    /// `wireBytes` feeds the batcher's size estimate. `scan` reports the
+    /// mode + start the caller persists on success.
+    private func pendingChanges(
+        forceFullScan: Bool, report: inout FinanceSyncReport
+    ) async throws
         -> (changes: [(change: SyncChange, contentHash: String)],
-            wireBytes: [SyncRecordKey: Int])
+            wireBytes: [SyncRecordKey: Int],
+            scan: (start: Date, mode: FinanceSyncScanMode))
     {
-        let local = try await localRows()
+        let plan = try await scanPlan(
+            forced: forceFullScan, at: .now)
+        report.scanMode = plan.mode
         let shadowSnapshot = try await shadow.snapshot()
         let quarantined = try await shadow.quarantinedHashes()
-        let diff = SyncDiff.compute(
-            local: local.mapValues(\.contentHash), shadow: shadowSnapshot)
+        let local = try await collectLocalRows(
+            quickThreshold: plan.transactionThreshold,
+            shadowSnapshot: shadowSnapshot, report: &report)
+        let diff = SyncDiff.compute(local: local.hashes, shadow: shadowSnapshot)
         var changes: [(SyncChange, String)] = []
         var wireBytes: [SyncRecordKey: Int] = [:]
         for key in diff.upserts {
-            guard let row = local[key] else { continue }
+            guard let row = local.rows[key] else { continue }
             if quarantined[key] == row.contentHash { continue }
             changes.append((
                 SyncChange(
@@ -491,7 +634,7 @@ actor FinanceSyncEngine {
             changes.append((
                 SyncChange(entity: key.entity, id: key.id, op: .delete), ""))
         }
-        return (changes, wireBytes)
+        return (changes, wireBytes, (plan.startedAt, plan.mode))
     }
 
     // MARK: - Push

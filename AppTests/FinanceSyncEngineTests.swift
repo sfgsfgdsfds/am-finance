@@ -440,6 +440,129 @@ struct FinanceSyncEngineTests {
         #expect(counter.value > 0)
     }
 
+    // MARK: - Scan modes (quick/full)
+
+    /// The first cycle of every engine is FULL; once markers persist the
+    /// routine cycle is QUICK and only re-hashes what `updatedAt` flags.
+    @Test func quickScanPicksUpEditedNewAndDeletedTransactions() async throws {
+        let server = FakeSyncServer()
+        let device = try makeDevice(server: server)
+        let (_, txID, _) = try seedLedger(in: device.context)
+        // Age the seeded row so it always sits outside the safety
+        // margin — only the rows under test should ever be hashed.
+        try transaction(device.context, id: txID).updatedAt =
+            Date(timeIntervalSince1970: 1_700_000_000)
+        try device.context.save()
+
+        let first = try await device.engine.syncOnce()
+        #expect(first.scanMode == .full)
+        #expect(first.pushedUpserts == 3)
+        // Cycle 2 absorbs the own-write echoes and moves the cursor.
+        _ = try await device.engine.syncOnce()
+
+        // A row pushed then deleted before its echo returns — its shadow
+        // entry must make the QUICK id-set diff push the tombstone.
+        let doomed = LedgerTransaction(kind: .expense, amount: 1, note: "x")
+        device.context.insert(doomed)
+        try device.context.save()
+        let insertCycle = try await device.engine.syncOnce()
+        #expect(insertCycle.scanMode == .quick)
+        #expect(insertCycle.hashedTransactions == 1)
+        #expect(insertCycle.pushedUpserts == 1)
+
+        // Now a stamped edit, a brand-new row and the delete — one cycle.
+        let edited = try transaction(device.context, id: txID)
+        edited.note = "đã sửa"
+        edited.updatedAt = .now
+        let fresh = LedgerTransaction(kind: .income, amount: 99_000, note: "mới")
+        device.context.insert(fresh)
+        device.context.delete(doomed)
+        try device.context.save()
+
+        let report = try await device.engine.syncOnce()
+        #expect(report.scanMode == .quick)
+        // The pulled echo of the doomed upsert meets a local delete —
+        // local wins and the tombstone pushes back out.
+        #expect(report.pulled == 1)
+        #expect(report.conflictsKeptLocal == 1)
+        // Only the stamped row + the never-shadowed insert were hashed.
+        #expect(report.hashedTransactions == 2)
+        #expect(report.pushedUpserts == 2)
+        #expect(report.pushedDeletes == 1)
+        #expect(serverField(
+            server, entity: "transaction", id: txID, field: "note")
+            == .string("đã sửa"))
+        #expect(server.row(entity: "transaction", id: fresh.id)?.deleted == false)
+        #expect(server.row(entity: "transaction", id: doomed.id)?.deleted == true)
+    }
+
+    @Test func quickScanWithNoChangesHashesNoTransactions() async throws {
+        let server = FakeSyncServer()
+        let device = try makeDevice(server: server)
+        let (_, txID, _) = try seedLedger(in: device.context)
+        // Age the stamp so it sits outside the safety margin — QUICK
+        // must then skip the row without hashing it.
+        try transaction(device.context, id: txID).updatedAt =
+            Date(timeIntervalSince1970: 1_700_000_000)
+        try device.context.save()
+
+        _ = try await device.engine.syncOnce()   // FULL — pushes the aged stamp
+        let report = try await device.engine.syncOnce()
+        #expect(report.scanMode == .quick)
+        #expect(report.hashedTransactions == 0)
+        #expect(report.pushedUpserts == 0)
+        #expect(report.pushedDeletes == 0)
+    }
+
+    /// An edit that does NOT move `updatedAt` is invisible to QUICK —
+    /// the documented trade-off — but the FULL backstop must catch it.
+    @Test func fullScanCatchesEditThatDidNotBumpUpdatedAt() async throws {
+        let server = FakeSyncServer()
+        let device = try makeDevice(server: server)
+        let (_, txID, _) = try seedLedger(in: device.context)
+        _ = try await device.engine.syncOnce()
+        _ = try await device.engine.syncOnce()
+
+        // Stealth edit: new content, artificially old stamp.
+        let tx = try transaction(device.context, id: txID)
+        tx.note = "lén lút"
+        tx.updatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        try device.context.save()
+
+        let quick = try await device.engine.syncOnce()
+        #expect(quick.scanMode == .quick)
+        #expect(quick.hashedTransactions == 0)
+        #expect(quick.pushedUpserts == 0)
+        #expect(serverField(
+            server, entity: "transaction", id: txID, field: "note")
+            == .string("cà phê"))
+
+        let full = try await device.engine.syncOnce(fullScan: true)
+        #expect(full.scanMode == .full)
+        #expect(full.hashedTransactions == 1)
+        #expect(full.pushedUpserts == 1)
+        #expect(serverField(
+            server, entity: "transaction", id: txID, field: "note")
+            == .string("lén lút"))
+    }
+
+    /// A persisted `lastFullScanAt` older than the 6-hour interval makes
+    /// the next routine cycle FULL again.
+    @Test func staleLastFullScanForcesFullScan() async throws {
+        let server = FakeSyncServer()
+        let device = try makeDevice(server: server)
+        _ = try seedLedger(in: device.context)
+        _ = try await device.engine.syncOnce()
+        let quick = try await device.engine.syncOnce()
+        #expect(quick.scanMode == .quick)
+
+        try await device.shadow.updateScanMarkers(
+            lastScanStart: .now,
+            lastFullScanAt: Date(timeIntervalSince1970: 1))
+        let report = try await device.engine.syncOnce()
+        #expect(report.scanMode == .full)
+    }
+
     // MARK: - Perf smoke
 
     @Test func perfSmokeFiveThousandTransactionsPushAndPull() async throws {
@@ -452,26 +575,113 @@ struct FinanceSyncEngineTests {
                 kind: .expense, amount: Int64(index + 1) * 1_000,
                 note: "giao dịch \(index)")
             tx.account = account
+            // Stamped long ago — the routine QUICK cycles below skip all
+            // 5k without hashing, like a real store between syncs.
+            tx.updatedAt = Date(timeIntervalSince1970: 1_700_000_000)
             a.context.insert(tx)
         }
         try a.context.save()
 
-        let pushStart = ContinuousClock.now
-        let pushReport = try await a.engine.syncOnce()
-        let pushElapsed = ContinuousClock.now - pushStart
+        var pushReport = FinanceSyncReport()
+        let pushMs = await PerfClock.msAsync("sync5k.push") {
+            pushReport = try await a.engine.syncOnce()
+        }
+        #expect(pushReport.scanMode == .full)
         #expect(pushReport.pushedUpserts == 5_001)
 
         let b = try makeDevice(server: server)
-        let pullStart = ContinuousClock.now
-        let pullReport = try await b.engine.syncOnce()
-        let pullElapsed = ContinuousClock.now - pullStart
+        var pullReport = FinanceSyncReport()
+        let pullMs = await PerfClock.msAsync("sync5k.pull") {
+            pullReport = try await b.engine.syncOnce()
+        }
         #expect(pullReport.applied == 5_001)
         #expect(try await a.engine.localContentHashes()
                 == b.engine.localContentHashes())
         // Generous bound: seconds, not minutes — a correctness gate, not
         // a benchmark. Debug-build SwiftData + contract JSON runs ~10x
         // slower than release; even so this must stay well under a
-        // couple of minutes on a loaded CI machine.
-        #expect(pushElapsed + pullElapsed < .seconds(120))
+        // minute on a loaded machine (was ~77s before the hashing and
+        // batched-fetch work landed).
+        #expect(pushMs + pullMs < 60_000)
+
+        // The steady-state numbers the task wants measured: a QUICK
+        // cycle with nothing to do (absorbs the own-write echo first)
+        // and a forced FULL re-hash.
+        _ = try await a.engine.syncOnce()   // echo-absorb
+        var quick = FinanceSyncReport()
+        await PerfClock.msAsync("sync5k.quickNoChange") {
+            quick = try await a.engine.syncOnce()
+        }
+        #expect(quick.scanMode == .quick)
+        #expect(quick.hashedTransactions == 0)
+        var full = FinanceSyncReport()
+        await PerfClock.msAsync("sync5k.fullScan") {
+            full = try await a.engine.syncOnce(fullScan: true)
+        }
+        #expect(full.scanMode == .full)
+        #expect(full.hashedTransactions == 5_000)
+    }
+
+    // MARK: - 30k benchmark (gated)
+
+    /// The 30k-transaction sync benchmark — same opt-in mechanism as
+    /// `PerformanceBenchmark` (`amfinance-perf-big` marker in the test
+    /// host's tmp, see its doc comment). Reports `PERF | sync30k.*`
+    /// lines for: the first FULL push, the own-write echo pull, a
+    /// routine QUICK cycle with nothing to do (the number a once-a-
+    /// minute sync must keep small), a forced FULL scan, and the pull
+    /// side applying all 30k records on a second device.
+    @Test(
+        .enabled(
+            if: PerformanceBenchmarkGate.isEnabled,
+            "30k sync benchmark: marker file in the test host's tmp"))
+    func benchmarkThirtyThousandTransactions() async throws {
+        let server = FakeSyncServer()
+        let a = try makeDevice(server: server)
+        let account = Account(name: "Tiền mặt", kind: .cash)
+        a.context.insert(account)
+        for index in 0..<30_000 {
+            let tx = LedgerTransaction(
+                kind: .expense, amount: Int64(index + 1) * 1_000,
+                note: "giao dịch \(index)")
+            tx.account = account
+            // Stamped long ago — after the first FULL scan every QUICK
+            // cycle skips all 30k without hashing.
+            tx.updatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+            a.context.insert(tx)
+        }
+        try a.context.save()
+
+        await PerfClock.msAsync("sync30k.push") {
+            let report = try await a.engine.syncOnce()
+            #expect(report.scanMode == .full)
+            #expect(report.hashedTransactions == 30_000)
+            #expect(report.pushedUpserts == 30_001)
+        }
+        await PerfClock.msAsync("sync30k.pullEcho") {
+            _ = try await a.engine.syncOnce()
+        }
+        var quick = FinanceSyncReport()
+        await PerfClock.msAsync("sync30k.quickNoChange") {
+            quick = try await a.engine.syncOnce()
+        }
+        #expect(quick.scanMode == .quick)
+        #expect(quick.hashedTransactions == 0)
+        #expect(quick.pushedUpserts == 0)
+
+        var full = FinanceSyncReport()
+        await PerfClock.msAsync("sync30k.fullScan") {
+            full = try await a.engine.syncOnce(fullScan: true)
+        }
+        #expect(full.scanMode == .full)
+        #expect(full.hashedTransactions == 30_000)
+
+        let b = try makeDevice(server: server)
+        await PerfClock.msAsync("sync30k.pullApply") {
+            let report = try await b.engine.syncOnce()
+            #expect(report.applied == 30_001)
+        }
+        #expect(try await a.engine.localContentHashes()
+                == b.engine.localContentHashes())
     }
 }

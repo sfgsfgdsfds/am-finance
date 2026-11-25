@@ -47,6 +47,215 @@ enum SyncBackupDTO: Equatable, Sendable {
     var recordKey: SyncRecordKey { SyncRecordKey(entity: entity, id: id) }
 }
 
+/// One DTO field tagged by scalar kind — the single enumeration feeding
+/// BOTH the canonical content hash (`SyncCanonicalScalar`) and the wire
+/// `SyncJSONValue`, so the two encodings can never drift apart. Nil
+/// optionals are simply absent from a DTO's field list, exactly like the
+/// keys their JSON omits.
+enum SyncDTOField: Sendable {
+    case string(String)
+    case int(Int64)
+    case double(Double)
+    case bool(Bool)
+    case date(Date)
+    case uuid(UUID)
+
+    /// The canonical-hash rendering — lowercase UUIDs, `.sssZ` dates.
+    var canonical: SyncCanonicalScalar {
+        switch self {
+        case .string(let value): return .string(value)
+        case .int(let value): return .int(value)
+        case .double(let value): return .double(value)
+        case .bool(let value): return .bool(value)
+        case .date(let value): return .date(value)
+        case .uuid(let value): return .uuid(value)
+        }
+    }
+
+    /// The wire rendering — the byte shape `BackupCodec.makeEncoder`
+    /// writes: uppercase UUID strings, `BackupDateCodec` timestamps.
+    var json: SyncJSONValue {
+        switch self {
+        case .string(let value): return .string(value)
+        case .int(let value): return .int(value)
+        case .double(let value): return .double(value)
+        case .bool(let value): return .bool(value)
+        case .date(let value): return .string(BackupDateCodec.string(from: value))
+        case .uuid(let value): return .string(value.uuidString)
+        }
+    }
+}
+
+extension SyncBackupDTO {
+    /// Every non-nil stored field — declared once per DTO so the
+    /// canonical hash and the wire JSON always cover the same set.
+    var syncFields: [(String, SyncDTOField)] {
+        switch self {
+        case .account(let dto): return Self.fields(dto)
+        case .category(let dto): return Self.fields(dto)
+        case .business(let dto): return Self.fields(dto)
+        case .transaction(let dto): return Self.fields(dto)
+        case .loanRateChange(let dto): return Self.fields(dto)
+        case .budget(let dto): return Self.fields(dto)
+        case .recurringRule(let dto): return Self.fields(dto)
+        case .rentalUnit(let dto): return Self.fields(dto)
+        case .rentalLease(let dto): return Self.fields(dto)
+        }
+    }
+
+    private static func fields(_ dto: BackupAccount) -> [(String, SyncDTOField)] {
+        var fields: [(String, SyncDTOField)] = [
+            ("id", .uuid(dto.id)),
+            ("name", .string(dto.name)),
+            ("kindRaw", .string(dto.kindRaw)),
+            ("openingBalance", .int(dto.openingBalance)),
+            ("icon", .string(dto.icon)),
+            ("colorHex", .string(dto.colorHex)),
+            ("note", .string(dto.note)),
+            ("sortOrder", .int(Int64(dto.sortOrder))),
+            ("isArchived", .bool(dto.isArchived)),
+            ("createdAt", .date(dto.createdAt)),
+        ]
+        if let v = dto.creditLimit { fields.append(("creditLimit", .int(v))) }
+        if let v = dto.statementDay { fields.append(("statementDay", .int(Int64(v)))) }
+        if let v = dto.graceDays { fields.append(("graceDays", .int(Int64(v)))) }
+        if let v = dto.loanPrincipal { fields.append(("loanPrincipal", .int(v))) }
+        if let v = dto.loanAnnualRatePercent { fields.append(("loanAnnualRatePercent", .double(v))) }
+        if let v = dto.loanTermMonths { fields.append(("loanTermMonths", .int(Int64(v)))) }
+        if let v = dto.loanStartDate { fields.append(("loanStartDate", .date(v))) }
+        if let v = dto.loanPaymentDay { fields.append(("loanPaymentDay", .int(Int64(v)))) }
+        if let v = dto.loanMethodRaw { fields.append(("loanMethodRaw", .string(v))) }
+        if let v = dto.externalSource { fields.append(("externalSource", .string(v))) }
+        if let v = dto.externalAccountID { fields.append(("externalAccountID", .string(v))) }
+        if let v = dto.businessID { fields.append(("businessID", .uuid(v))) }
+        return fields
+    }
+
+    private static func fields(_ dto: BackupCategory) -> [(String, SyncDTOField)] {
+        [
+            ("id", .uuid(dto.id)),
+            ("name", .string(dto.name)),
+            ("kindRaw", .string(dto.kindRaw)),
+            ("icon", .string(dto.icon)),
+            ("colorHex", .string(dto.colorHex)),
+            ("sortOrder", .int(Int64(dto.sortOrder))),
+            ("isArchived", .bool(dto.isArchived)),
+        ]
+    }
+
+    private static func fields(_ dto: BackupBusiness) -> [(String, SyncDTOField)] {
+        [
+            ("id", .uuid(dto.id)),
+            ("name", .string(dto.name)),
+            ("icon", .string(dto.icon)),
+            ("colorHex", .string(dto.colorHex)),
+            ("note", .string(dto.note)),
+            ("sortOrder", .int(Int64(dto.sortOrder))),
+            ("isArchived", .bool(dto.isArchived)),
+        ]
+    }
+
+    private static func fields(_ dto: BackupTransaction) -> [(String, SyncDTOField)] {
+        var fields: [(String, SyncDTOField)] = [
+            ("id", .uuid(dto.id)),
+            ("kindRaw", .string(dto.kindRaw)),
+            ("amount", .int(dto.amount)),
+            ("date", .date(dto.date)),
+            ("note", .string(dto.note)),
+            ("needsReview", .bool(dto.needsReview)),
+            ("createdAt", .date(dto.createdAt)),
+            ("updatedAt", .date(dto.updatedAt)),
+        ]
+        if let v = dto.accountID { fields.append(("accountID", .uuid(v))) }
+        if let v = dto.toAccountID { fields.append(("toAccountID", .uuid(v))) }
+        if let v = dto.categoryID { fields.append(("categoryID", .uuid(v))) }
+        if let v = dto.businessID { fields.append(("businessID", .uuid(v))) }
+        if let v = dto.externalSource { fields.append(("externalSource", .string(v))) }
+        if let v = dto.externalID { fields.append(("externalID", .string(v))) }
+        if let v = dto.rentalLeaseID { fields.append(("rentalLeaseID", .uuid(v))) }
+        if let v = dto.rentalPeriod { fields.append(("rentalPeriod", .date(v))) }
+        return fields
+    }
+
+    private static func fields(_ dto: BackupLoanRateChange) -> [(String, SyncDTOField)] {
+        var fields: [(String, SyncDTOField)] = [
+            ("id", .uuid(dto.id)),
+            ("fromInstallment", .int(Int64(dto.fromInstallment))),
+            ("annualRatePercent", .double(dto.annualRatePercent)),
+        ]
+        if let v = dto.accountID { fields.append(("accountID", .uuid(v))) }
+        return fields
+    }
+
+    private static func fields(_ dto: BackupBudget) -> [(String, SyncDTOField)] {
+        var fields: [(String, SyncDTOField)] = [
+            ("id", .uuid(dto.id)),
+            ("monthlyLimit", .int(dto.monthlyLimit)),
+            ("isActive", .bool(dto.isActive)),
+            ("note", .string(dto.note)),
+            ("createdAt", .date(dto.createdAt)),
+        ]
+        if let v = dto.categoryID { fields.append(("categoryID", .uuid(v))) }
+        return fields
+    }
+
+    private static func fields(_ dto: BackupRecurringRule) -> [(String, SyncDTOField)] {
+        var fields: [(String, SyncDTOField)] = [
+            ("id", .uuid(dto.id)),
+            ("title", .string(dto.title)),
+            ("kindRaw", .string(dto.kindRaw)),
+            ("amount", .int(dto.amount)),
+            ("note", .string(dto.note)),
+            ("frequencyRaw", .string(dto.frequencyRaw)),
+            ("interval", .int(Int64(dto.interval))),
+            ("startDate", .date(dto.startDate)),
+            ("autoCreate", .bool(dto.autoCreate)),
+            ("isActive", .bool(dto.isActive)),
+            ("createdAt", .date(dto.createdAt)),
+        ]
+        if let v = dto.accountID { fields.append(("accountID", .uuid(v))) }
+        if let v = dto.toAccountID { fields.append(("toAccountID", .uuid(v))) }
+        if let v = dto.categoryID { fields.append(("categoryID", .uuid(v))) }
+        if let v = dto.businessID { fields.append(("businessID", .uuid(v))) }
+        if let v = dto.endDate { fields.append(("endDate", .date(v))) }
+        if let v = dto.maximumOccurrences { fields.append(("maximumOccurrences", .int(Int64(v)))) }
+        if let v = dto.lastGeneratedDate { fields.append(("lastGeneratedDate", .date(v))) }
+        return fields
+    }
+
+    private static func fields(_ dto: BackupRentalUnit) -> [(String, SyncDTOField)] {
+        var fields: [(String, SyncDTOField)] = [
+            ("id", .uuid(dto.id)),
+            ("name", .string(dto.name)),
+            ("listPrice", .int(dto.listPrice)),
+            ("note", .string(dto.note)),
+            ("sortOrder", .int(Int64(dto.sortOrder))),
+            ("isArchived", .bool(dto.isArchived)),
+            ("createdAt", .date(dto.createdAt)),
+        ]
+        if let v = dto.businessID { fields.append(("businessID", .uuid(v))) }
+        return fields
+    }
+
+    private static func fields(_ dto: BackupRentalLease) -> [(String, SyncDTOField)] {
+        var fields: [(String, SyncDTOField)] = [
+            ("id", .uuid(dto.id)),
+            ("tenantName", .string(dto.tenantName)),
+            ("tenantPhone", .string(dto.tenantPhone)),
+            ("startDate", .date(dto.startDate)),
+            ("monthlyRent", .int(dto.monthlyRent)),
+            ("deposit", .int(dto.deposit)),
+            ("paymentDay", .int(Int64(dto.paymentDay))),
+            ("isActive", .bool(dto.isActive)),
+            ("note", .string(dto.note)),
+            ("createdAt", .date(dto.createdAt)),
+        ]
+        if let v = dto.endDate { fields.append(("endDate", .date(v))) }
+        if let v = dto.unitID { fields.append(("unitID", .uuid(v))) }
+        return fields
+    }
+}
+
 /// Per-row mapping between the SwiftData models and their backup-v5
 /// DTOs — the sync engine's read/write seam. Everything is a thin
 /// dispatch over `BackupDocument`'s per-row initializers and
@@ -140,16 +349,33 @@ enum SyncRecordMapper {
         try decode(entity: entity, from: JSONEncoder().encode(value))
     }
 
-    /// The DTO as the `SyncJSONValue` a `SyncChange.data` carries —
-    /// encoded with the backup encoder, then re-parsed.
+    /// The DTO as the `SyncJSONValue` a `SyncChange.data` carries — built
+    /// field-by-field in the wire's byte shape, no encode → parse round
+    /// trip.
     static func jsonValue(of dto: SyncBackupDTO) throws -> SyncJSONValue {
-        try SyncJSONValue(jsonData: encode(dto))
+        .object(Dictionary(
+            uniqueKeysWithValues: dto.syncFields.map { ($0.0, $0.1.json) }))
+    }
+
+    /// The DTO's canonical field list — `SyncContentHasher.hash(fields:)`
+    /// input; produces byte-identical canonical bytes to the
+    /// encode → parse → canonicalize pipeline it replaced.
+    static func canonicalFields(
+        of dto: SyncBackupDTO
+    ) -> [(String, SyncCanonicalScalar)] {
+        dto.syncFields.map { ($0.0, $0.1.canonical) }
+    }
+
+    /// Content hash of a DTO — `SyncDiff`'s local input and the hash a
+    /// pulled record's decoded DTO takes. One function, both directions.
+    static func contentHash(of dto: SyncBackupDTO) -> String {
+        SyncContentHasher.hash(fields: canonicalFields(of: dto))
     }
 
     /// Content hash of the row's DTO — `SyncDiff`'s local input.
     static func contentHash(of row: any PersistentModel) throws -> String? {
         guard let dto = dto(of: row) else { return nil }
-        return try SyncContentHasher.hash(jsonData: encode(dto))
+        return contentHash(of: dto)
     }
 
     /// The parent references a pulled DTO carries — every non-nil `…ID`
