@@ -9,6 +9,21 @@
 #
 # Shard 1 also includes testOnlineLaunch when that test exists in AppUITests.
 # Put a new UI test into the lightest shard below.
+#
+# Test-body time from run 45773347916 (test-without-building; xcresulttool):
+#   testWiredFeatureScreens 360s   testFinanceSync 57s
+#   testAccountsAndDebts 282s      testTransactionsAddEditDelete 199s
+#   testTabsReportsAndSettings 96s
+#   testRentalsImportAndReminders 275s
+#   testAIEntryPointsAndSpendingShare 135s
+#   testTransactionScopes 94s
+#   testBillSplit 98s  testAgentSharedConversation 80s
+#   testAgentHistory 74s  testAgentProposalConfirm 67s
+#   testAgentLedgerAccess 44s
+# Shard 1 stays the two names below so testOnlineLaunch can still be appended.
+# The other three are packed to ~7.5–8.5 min of test body (the old shard 2
+# was 577s and the long pole).
+# Keep these name lists easy to merge.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,9 +32,9 @@ n="${1:-}"
 prefix="-only-testing:AMFinanceUITests/AMFinanceUITests"
 
 shard1=(testWiredFeatureScreens testFinanceSync)
-shard2=(testTabsReportsAndSettings testTransactionsAddEditDelete testAccountsAndDebts)
-shard3=(testRentalsImportAndReminders testAIEntryPointsAndSpendingShare testTransactionScopes)
-shard4=(testBillSplit testAgentLedgerAccess testAgentProposalConfirm testAgentSharedConversation testAgentHistory)
+shard2=(testTransactionsAddEditDelete testAccountsAndDebts)
+shard3=(testRentalsImportAndReminders testAIEntryPointsAndSpendingShare testTabsReportsAndSettings)
+shard4=(testBillSplit testAgentLedgerAccess testAgentProposalConfirm testAgentSharedConversation testAgentHistory testTransactionScopes)
 
 # BSD grep on the runners has no reliable --include, so search the files directly.
 have_test() {
