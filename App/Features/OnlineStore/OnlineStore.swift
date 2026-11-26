@@ -85,7 +85,21 @@ final class OnlineStore {
     func start() async {
         guard !started else { return }
         started = true
+        await holdLoadingGateForUITest()
         await evaluate()
+    }
+
+    /// `-uiTestOnline` only. The in-app fake answers the export before
+    /// XCUITest has attached, so the loading gate would already be gone
+    /// when the test looks. Holding here — with the spinner suppressed,
+    /// see `OnlineGateProgressView` — lets the app go idle while the
+    /// gate is still up.
+    private func holdLoadingGateForUITest() async {
+        #if DEBUG
+        guard FinanceSyncUITestSupport.onlineEnabled(
+            arguments: ProcessInfo.processInfo.arguments) else { return }
+        try? await Task.sleep(for: .seconds(12))
+        #endif
     }
 
     /// "Đăng nhập" on the sign-in screen.
@@ -172,23 +186,39 @@ final class OnlineStore {
         reloading = true
         defer { reloading = false }
         coordinator?.stopLiveUpdates()
+        await coordinator?.waitForEngineIdle()
         phase = .loading
-        do {
-            let snapshot = try await api.exportSnapshot()
-            try await bootstrap.loadOnline(snapshot: snapshot)
-            LedgerBalanceStores.shared(for: container).invalidate()
-            await afterLoad()
-            rejectionMessage = message
-            phase = .ready
-            restartLiveUpdates()
-            return true
-        } catch FinanceSyncError.unauthorized {
-            phase = .signedOut
-            return false
-        } catch {
-            phase = .failed(Self.text(for: error))
-            return false
+        for attempt in 0..<2 {
+            do {
+                try await applyExport(message: message)
+                return true
+            } catch FinanceSyncBootstrapError.syncInProgress where attempt == 0 {
+                // The cycle we just waited on can still have started its
+                // coalesced follow-up. One more wait, then the load.
+                await coordinator?.waitForEngineIdle()
+            } catch FinanceSyncError.unauthorized {
+                phase = .signedOut
+                return false
+            } catch {
+                phase = .failed(Self.text(for: error))
+                return false
+            }
         }
+        phase = .failed(Self.text(for: FinanceSyncBootstrapError.syncInProgress))
+        return false
+    }
+
+    /// Export → replace the in-memory store → one reconcile cycle.
+    /// Throws `FinanceSyncBootstrapError.syncInProgress` when the
+    /// engine is still busy; the caller retries once.
+    private func applyExport(message: String?) async throws {
+        let snapshot = try await api.exportSnapshot()
+        try await bootstrap.loadOnline(snapshot: snapshot)
+        LedgerBalanceStores.shared(for: container).invalidate()
+        await afterLoad()
+        rejectionMessage = message
+        phase = .ready
+        restartLiveUpdates()
     }
 
     /// POST /v1/backup/import — REPLACE the server with `body` (a
