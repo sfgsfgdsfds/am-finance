@@ -431,4 +431,175 @@ struct BackgroundRefreshTests {
         #expect(center.delivered[0].body
             == "7 giao dịch mới, tổng chi 700.000 ₫")
     }
+
+    // MARK: - Launch handler isolation
+
+    /// `Thread.isMainThread` is unavailable in asynchronous contexts on
+    /// this SDK. A synchronous probe is callable from `Task.detached`
+    /// and from the main-actor hop without tripping that ban.
+    private enum MainThreadProbe {
+        static func isMainThread() -> Bool { Thread.isMainThread }
+    }
+
+    /// Records `BGTask` callbacks. The real task cannot be constructed
+    /// and is not `Sendable`; this is the seam `handleLaunch` takes.
+    private final class RecordingRefreshTask: BackgroundRefreshTaskHandling,
+        @unchecked Sendable {
+        let isAppRefresh: Bool
+        private let lock = NSLock()
+        private var completions: [Bool] = []
+        private var expiration: (@Sendable () -> Void)?
+        private var scheduleCount = 0
+        private var runCalls = 0
+        private var runOnMain: Bool?
+
+        init(isAppRefresh: Bool) { self.isAppRefresh = isAppRefresh }
+
+        func setExpirationHandler(_ handler: @escaping @Sendable () -> Void) {
+            lock.lock()
+            expiration = handler
+            lock.unlock()
+        }
+
+        func setTaskCompleted(success: Bool) {
+            lock.lock()
+            completions.append(success)
+            lock.unlock()
+        }
+
+        /// Invokes the installed expiration handler on the caller's thread.
+        func fireExpiration() {
+            lock.lock()
+            let handler = expiration
+            lock.unlock()
+            handler?()
+        }
+
+        func noteScheduled() {
+            lock.lock()
+            scheduleCount += 1
+            lock.unlock()
+        }
+
+        func noteRun(onMain: Bool) {
+            lock.lock()
+            runCalls += 1
+            runOnMain = onMain
+            lock.unlock()
+        }
+
+        func snapshot() -> (
+            completions: [Bool], schedules: Int, runCalls: Int, runOnMain: Bool?
+        ) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (completions, scheduleCount, runCalls, runOnMain)
+        }
+    }
+
+    /// Polls until the background handler has completed, or the deadline
+    /// passes. The main-actor hop is asynchronous relative to the
+    /// detached caller.
+    private func waitForCompletion(
+        _ task: RecordingRefreshTask, count: Int = 1
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(3))
+        while task.snapshot().completions.count < count {
+            if clock.now >= deadline { return false }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return true
+    }
+
+    /// The system calls the launch handler on a background queue. Invoking
+    /// the nonisolated entry from `Task.detached` must not trap, the
+    /// runner hops to the main actor, and completion happens once.
+    /// A later expiration call — also off the main thread — must not
+    /// complete a second time.
+    @Test func launchHandlerFromDetachedTaskDoesNotTrap() async {
+        let task = RecordingRefreshTask(isAppRefresh: true)
+        let enteredOffMain = await Task.detached { () -> Bool in
+            let offMain = !MainThreadProbe.isMainThread()
+            BackgroundRefreshScheduler.handleLaunch(
+                task: task,
+                run: { @MainActor in
+                    task.noteRun(onMain: MainThreadProbe.isMainThread())
+                    return BackgroundRefreshRunner.Summary()
+                },
+                scheduleNext: { @Sendable in task.noteScheduled() }
+            )
+            return offMain
+        }.value
+
+        #expect(enteredOffMain)
+        #expect(await waitForCompletion(task))
+        let afterRun = task.snapshot()
+        #expect(afterRun.completions == [true])
+        #expect(afterRun.schedules == 1)
+        #expect(afterRun.runCalls == 1)
+        #expect(afterRun.runOnMain == true)
+
+        await Task.detached {
+            #expect(!MainThreadProbe.isMainThread())
+            task.fireExpiration()
+        }.value
+        #expect(task.snapshot().completions == [true])
+    }
+
+    /// Expiration fires on the background thread while the run is still
+    /// in flight: completion is `false`, exactly once, even after the
+    /// cancelled run later reaches its own `complete`.
+    @Test func expirationFromBackgroundThreadCompletesExactlyOnce() async {
+        let task = RecordingRefreshTask(isAppRefresh: true)
+        await Task.detached {
+            #expect(!MainThreadProbe.isMainThread())
+            BackgroundRefreshScheduler.handleLaunch(
+                task: task,
+                run: { @MainActor in
+                    task.noteRun(onMain: MainThreadProbe.isMainThread())
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .milliseconds(5))
+                    }
+                    return BackgroundRefreshRunner.Summary(cancelled: true)
+                },
+                scheduleNext: { @Sendable in task.noteScheduled() }
+            )
+            task.fireExpiration()
+        }.value
+
+        #expect(await waitForCompletion(task))
+        // The cancelled run still starts and must not complete again.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(3))
+        while task.snapshot().runCalls < 1 {
+            if clock.now >= deadline { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let snap = task.snapshot()
+        #expect(snap.completions == [false])
+        #expect(snap.runCalls == 1)
+        #expect(snap.runOnMain == true)
+    }
+
+    /// A task that is not a refresh task completes `false` on the calling
+    /// thread and never starts the runner or the re-arm.
+    @Test func nonRefreshTaskCompletesFalseOffMainWithoutRunning() async {
+        let task = RecordingRefreshTask(isAppRefresh: false)
+        let snap = await Task.detached {
+            #expect(!MainThreadProbe.isMainThread())
+            BackgroundRefreshScheduler.handleLaunch(
+                task: task,
+                run: { @MainActor in
+                    task.noteRun(onMain: true)
+                    return BackgroundRefreshRunner.Summary()
+                },
+                scheduleNext: { @Sendable in task.noteScheduled() }
+            )
+            return task.snapshot()
+        }.value
+        #expect(snap.completions == [false])
+        #expect(snap.schedules == 0)
+        #expect(snap.runCalls == 0)
+    }
 }
