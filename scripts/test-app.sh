@@ -6,6 +6,9 @@
 # ./scripts/test-ui.sh for it.
 # Quiet on success; prints the failure log tail and exits non-zero on failure.
 # Lock, simulator pick and retry details: scripts/lib-test.sh.
+# CI sets AM_TEST_PRODUCTS to a build-for-testing artifact and this script
+# runs test-without-building; a local run (which workers must not start on
+# the owner's Mac) still compiles.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

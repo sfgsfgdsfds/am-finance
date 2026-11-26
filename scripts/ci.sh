@@ -14,10 +14,13 @@
 #   ./scripts/ci.sh prune
 #       Delete remote ci/* branches whose tip commit is older than 3 days.
 #
-# Suites: all | unit | ui | ui1 | ui2 | ui3 | ui4 | build
+# Suites: all | quick | unit | ui | ui1 | ui2 | ui3 | ui4 | build
 # The owner's Mac must not run xcodebuild or simulators; this script only
 # pushes and polls. swift test of FinanceCore locally is fine.
 set -euo pipefail
+
+# Inline python must not leave bytecode in the tree.
+export PYTHONDONTWRITEBYTECODE=1
 
 REPO="sfgsfgdsfds/am-finance"
 URL="https://github.com/${REPO}.git"
@@ -44,15 +47,15 @@ sleep_until() { # $1 deadline epoch
 }
 
 usage() {
-  echo "usage: ci.sh run <all|unit|ui|ui1|ui2|ui3|ui4|build>" >&2
-  echo "       ci.sh verify <all|unit|ui|ui1|ui2|ui3|ui4|build>" >&2
+  echo "usage: ci.sh run <all|quick|unit|ui|ui1|ui2|ui3|ui4|build>" >&2
+  echo "       ci.sh verify <all|quick|unit|ui|ui1|ui2|ui3|ui4|build>" >&2
   echo "       ci.sh prune" >&2
   exit 2
 }
 
 valid_suite() {
   case "$1" in
-    all|unit|ui|ui1|ui2|ui3|ui4|build) return 0 ;;
+    all|quick|unit|ui|ui1|ui2|ui3|ui4|build) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -175,7 +178,7 @@ print_job_summary() { # $1 run id
   local id="$1"
   gh_repo run view "$id" --json jobs \
     --jq '.jobs[] | "\(.name)\t\(.conclusion // .status)\t\(.startedAt // "")\t\(.completedAt // "")"' \
-    | python3 -c '
+    | python3 -B -c '
 import sys
 from datetime import datetime
 total = 0.0
@@ -450,7 +453,7 @@ cmd_prune() {
       continue
     fi
     iso="$(gh_repo api "repos/${REPO}/commits/${sha}" --jq .commit.committer.date)"
-    old="$(python3 -c '
+    old="$(python3 -B -c '
 import sys, datetime
 iso = sys.argv[1].replace("Z", "+00:00")
 dt = datetime.datetime.fromisoformat(iso)
