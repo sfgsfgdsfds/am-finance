@@ -1,0 +1,23 @@
+name: macOS setup
+description: Restore XcodeGen and SwiftPM caches and select the newest Xcode
+inputs:
+  cache-key:
+    description: Full actions/cache key (hashFiles is evaluated by the caller)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Cache XcodeGen and SwiftPM
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/Library/Caches/amfinance-tools
+          ~/Library/Caches/org.swift.swiftpm
+          ~/Library/org.swift.swiftpm
+          Packages/FinanceCore/.build
+        key: ${{ inputs.cache-key }}
+        restore-keys: |
+          amfinance-xcodegen-2.46.0-
+    - name: Select newest Xcode
+      shell: bash
+      run: ./scripts/ci-select-xcode.sh
