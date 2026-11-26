@@ -1,2 +1,2 @@
 swift test --package-path Packages/FinanceCore
-./scripts/ci.sh verify all
+./scripts/ci.sh verify quick

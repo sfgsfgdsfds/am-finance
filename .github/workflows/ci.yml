@@ -6,11 +6,23 @@
 # xcode-27 cannot build this tree. The job selects the highest
 # /Applications/Xcode_*.app (skipping a same-version beta).
 #
-# Push to main runs every job. Push to ci/** reads suite=<all|unit|ui|ui1..ui4|build>
-# from the head commit message (scripts/ci.sh writes "ci: suite=<suite>").
-# workflow_dispatch defaults to all.
+# Push to main runs every job. Push to ci/** reads
+# suite=<all|quick|unit|ui|ui1..ui4|build> from the head commit message
+# (scripts/ci.sh writes "ci: suite=<suite>"). workflow_dispatch defaults to all.
+#
+# `products` compiles once (build-for-testing, no simulator). Test jobs
+# download that artifact and run test-without-building. The account runs at
+# most 5 macOS jobs at once, so `all` is shaped as:
+#   phase 1: products + release   (release is ~5 min and does not block tests)
+#   phase 2: unit + ui1..ui4      (5 test jobs; release has already finished)
+# `quick` is products (app + both test bundles) + the unit tests. No UI, no
+# release. Workers gate on quick; `all` is the full gate before a device install.
 
 name: CI
+
+# CI python must not write scripts/__pycache__ into the workspace.
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
 
 on:
   push:
@@ -26,6 +38,7 @@ on:
         type: choice
         options:
           - all
+          - quick
           - unit
           - ui
           - ui1
@@ -48,6 +61,8 @@ jobs:
     timeout-minutes: 10
     outputs:
       suite: ${{ steps.suite.outputs.suite }}
+      products: ${{ steps.suite.outputs.products }}
+      build_ui: ${{ steps.suite.outputs.build_ui }}
       unit: ${{ steps.suite.outputs.unit }}
       build: ${{ steps.suite.outputs.build }}
       ui_matrix: ${{ steps.suite.outputs.ui_matrix }}
@@ -68,7 +83,7 @@ jobs:
           elif [ "$REF" = "refs/heads/main" ]; then
             suite="all"
           elif [[ "$REF" == refs/heads/ci/* ]]; then
-            if [[ "$MSG" =~ (^|[^[:alnum:]])suite=(all|unit|ui[1-4]|ui|build)([^[:alnum:]]|$) ]]; then
+            if [[ "$MSG" =~ (^|[^[:alnum:]])suite=(all|quick|unit|ui[1-4]|ui|build)([^[:alnum:]]|$) ]]; then
               suite="${BASH_REMATCH[2]}"
             else
               echo "ci branch commit message has no suite= token" >&2
@@ -81,12 +96,14 @@ jobs:
             exit 2
           fi
           case "$suite" in
-            all|unit|ui|ui1|ui2|ui3|ui4|build) ;;
+            all|quick|unit|ui|ui1|ui2|ui3|ui4|build) ;;
             *)
               echo "invalid suite '$suite'" >&2
               exit 2
               ;;
           esac
+          products=false
+          build_ui=0
           unit=false
           build=false
           ui1=false
@@ -95,6 +112,8 @@ jobs:
           ui4=false
           case "$suite" in
             all)
+              products=true
+              build_ui=1
               unit=true
               build=true
               ui1=true
@@ -102,18 +121,28 @@ jobs:
               ui3=true
               ui4=true
               ;;
-            unit) unit=true ;;
+            quick)
+              products=true
+              build_ui=1
+              unit=true
+              ;;
+            unit)
+              products=true
+              unit=true
+              ;;
             build) build=true ;;
             ui)
+              products=true
+              build_ui=1
               ui1=true
               ui2=true
               ui3=true
               ui4=true
               ;;
-            ui1) ui1=true ;;
-            ui2) ui2=true ;;
-            ui3) ui3=true ;;
-            ui4) ui4=true ;;
+            ui1) products=true; build_ui=1; ui1=true ;;
+            ui2) products=true; build_ui=1; ui2=true ;;
+            ui3) products=true; build_ui=1; ui3=true ;;
+            ui4) products=true; build_ui=1; ui4=true ;;
           esac
           shards=""
           [ "$ui1" = true ] && shards='1'
@@ -127,18 +156,20 @@ jobs:
           fi
           {
             echo "suite=${suite}"
+            echo "products=${products}"
+            echo "build_ui=${build_ui}"
             echo "unit=${unit}"
             echo "build=${build}"
             echo "ui_matrix=${matrix}"
           } >> "$GITHUB_OUTPUT"
-          echo "suite=${suite} unit=${unit} build=${build} ui_matrix=${matrix}"
+          echo "suite=${suite} products=${products} build_ui=${build_ui} unit=${unit} build=${build} ui_matrix=${matrix}"
 
-  unit:
-    name: unit
+  products:
+    name: products
     needs: prepare
-    if: needs.prepare.result == 'success' && needs.prepare.outputs.unit == 'true'
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.products == 'true'
     runs-on: xcode-27
-    timeout-minutes: 45
+    timeout-minutes: 40
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -146,9 +177,62 @@ jobs:
         uses: ./.github/actions/macos-setup
         with:
           cache-key: amfinance-xcodegen-2.46.0-${{ hashFiles('scripts/bootstrap.sh', 'Packages/FinanceCore/Package.swift', 'Packages/FinanceCore/Package.resolved') }}
+      # SDK / explicit modules are content-addressed. Restoring an older
+      # tree's cache cannot make this build test a stale binary: a module
+      # whose hash does not match is rebuilt, and test jobs never run the
+      # cached products — they run the artifact uploaded below.
+      - name: Cache explicit modules
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            DerivedData/ModuleCache.noindex
+            DerivedData/SDKStatCaches.noindex
+            DerivedData/SDKExplicitPrecompiledModules
+            DerivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+            DerivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+          key: amfinance-modcache-${{ env.XCODE_VERSION }}-v1
+      - name: Build for testing
+        env:
+          AM_BUILD_UI: ${{ needs.prepare.outputs.build_ui }}
+        run: ./scripts/ci-build-for-testing.sh
+      - name: Upload test products
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-products-${{ github.run_id }}
+          path: DerivedData/Build/Products
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: true
+          compression-level: 1
+      - name: Upload failure artifacts
+        if: failure()
+        uses: ./.github/actions/upload-failure
+        with:
+          name: products-${{ github.run_id }}
+
+  unit:
+    name: unit
+    needs: [prepare, products]
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.unit == 'true' && needs.products.result == 'success'
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup
+        uses: ./.github/actions/macos-setup
+        with:
+          cache-key: amfinance-xcodegen-2.46.0-${{ hashFiles('scripts/bootstrap.sh', 'Packages/FinanceCore/Package.swift', 'Packages/FinanceCore/Package.resolved') }}
+      - name: Download test products
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: test-products-${{ github.run_id }}
+          path: DerivedData/Build/Products
       - name: FinanceCore tests
         run: swift test --package-path Packages/FinanceCore
       - name: App unit tests
+        env:
+          AM_TEST_PRODUCTS: ${{ github.workspace }}/DerivedData/Build/Products
         run: ./scripts/test-app.sh
       - name: Upload failure artifacts
         if: failure()
@@ -158,10 +242,10 @@ jobs:
 
   ui:
     name: ui${{ matrix.shard }}
-    needs: prepare
-    if: needs.prepare.result == 'success' && needs.prepare.outputs.ui_matrix != '[]'
+    needs: [prepare, products]
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.ui_matrix != '[]' && needs.products.result == 'success'
     runs-on: xcode-27
-    timeout-minutes: 45
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -173,7 +257,14 @@ jobs:
         uses: ./.github/actions/macos-setup
         with:
           cache-key: amfinance-xcodegen-2.46.0-${{ hashFiles('scripts/bootstrap.sh', 'Packages/FinanceCore/Package.swift', 'Packages/FinanceCore/Package.resolved') }}
+      - name: Download test products
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: test-products-${{ github.run_id }}
+          path: DerivedData/Build/Products
       - name: UI shard ${{ matrix.shard }}
+        env:
+          AM_TEST_PRODUCTS: ${{ github.workspace }}/DerivedData/Build/Products
         run: |
           set -euo pipefail
           filters="$(./scripts/ui-shards.sh "${{ matrix.shard }}")"
@@ -191,7 +282,7 @@ jobs:
     needs: prepare
     if: needs.prepare.result == 'success' && needs.prepare.outputs.build == 'true'
     runs-on: xcode-27
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
