@@ -56,7 +56,8 @@ final class FinanceSyncCoordinator {
     /// Records the server refused (`422` index ≥ 0), parked until their
     /// local content changes.
     private(set) var quarantined: [SyncQuarantineSnapshot] = []
-    /// Server host shown on the settings screen.
+    /// Server base URL shown on the Máy chủ screen
+    /// (`https://finance.ledinhdai.com/api`).
     let serverDisplay: String
 
     private let engine: FinanceSyncEngine
@@ -627,7 +628,7 @@ extension FinanceSyncCoordinator {
                 tokenProvider: FinanceSyncUITestSupport.TokenProvider(),
                 urlSession: fake.session)
             signedIn = { true }
-            serverDisplay = fake.baseURL.host ?? fake.baseURL.absoluteString
+            serverDisplay = fake.baseURL.absoluteString
         } else {
             let baseURL = try config.resolved()
             api = FinanceSyncAPIClient(
@@ -636,7 +637,7 @@ extension FinanceSyncCoordinator {
                 if case .signedIn = await session.status { return true }
                 return false
             }
-            serverDisplay = baseURL.host ?? config.baseURL
+            serverDisplay = baseURL.absoluteString
         }
         #else
         let baseURL = try config.resolved()
@@ -645,7 +646,7 @@ extension FinanceSyncCoordinator {
             if case .signedIn = await session.status { return true }
             return false
         }
-        serverDisplay = baseURL.host ?? config.baseURL
+        serverDisplay = baseURL.absoluteString
         #endif
 
         let engine = FinanceSyncEngine(

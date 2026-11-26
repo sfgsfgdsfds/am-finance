@@ -75,17 +75,15 @@ extension Notification.Name {
 
 /// Performs the two "Xoá dữ liệu" resets.
 ///
-/// Every model deletion lands in one context `save()`: level A deletes
-/// `LedgerTransaction` rows directly (no tombstones — imports must come
-/// back) and commits; level B calls `BackupRestorer.deleteAllRows` and
-/// `SeedData.seedIfNeeded`, whose own save commits deletions and seed
-/// inserts together — so both levels are atomic and a failure rolls back
-/// with nothing deleted. The UserDefaults-backed stores are cleared only
-/// after the commit (they cannot roll back anyway).
-///
-/// `save`/`seed` are seams: tests inject a throwing closure to prove a
-/// failed commit deletes nothing. `seed` is where level B's commit really
-/// happens — `SeedData.seedIfNeeded` wraps `context.save()`.
+/// Both levels act on the server: the service builds the backup-v5
+/// document the ledger should become (level A = the current store with
+/// every transaction removed; level B = `SeedData` defaults only), POSTs
+/// it to `v1/backup/import` (REPLACE) and the caller reloads the online
+/// store from the export. Device-local state that is not in the backup
+/// — import cursors and tombstones, CSV memory, Agent conversations, and
+/// on level B the rest of the owned defaults — is cleared only after the
+/// import succeeds. When no server hook is set (previews and plain UI
+/// tests), the same document is restored into the local context instead.
 @MainActor
 struct DataResetService {
     /// `@AppStorage` key of the quick-add editor's last-used account —
@@ -125,14 +123,14 @@ struct DataResetService {
     /// Plain defaults for the two `@AppStorage` scalars — the last-used
     /// account and the last-backup stamp have no store type of their own.
     let defaults: UserDefaults
-    /// Commit seam — production saves the context; a test throws here to
-    /// simulate a failed level-A save.
-    var save: (ModelContext) throws -> Void = { try $0.save() }
-    /// Reseed seam — production runs `SeedData.seedIfNeeded`; a test
-    /// throws here to simulate level B's commit failing.
-    var seed: (ModelContext) throws -> Void = {
-        try SeedData.seedIfNeeded(context: $0)
-    }
+    /// POST the encoded backup-v5 document (`v1/backup/import` REPLACE).
+    /// Nil in previews and plain UI tests — the document is restored
+    /// locally instead. A throw leaves the device untouched.
+    var importReplace: ((Data) async throws -> Void)?
+    /// Runs after a successful import and the device-local cleanup.
+    /// Production posts `.dataResetCompleted` and reloads from the
+    /// export. Nil when the document was applied locally.
+    var reload: ((DataResetSummary) async throws -> Void)?
 
     init(
         stateStore: any WalletSyncStateStoring = WalletSyncStateStore(),
@@ -155,6 +153,8 @@ struct DataResetService {
         self.reminderCenter = reminderCenter
         self.conversationStore = conversationStore
         self.defaults = defaults
+        self.importReplace = nil
+        self.reload = nil
     }
 
     // MARK: - Counts
@@ -197,42 +197,47 @@ struct DataResetService {
         }
     }
 
-    // MARK: - Level A
+    // MARK: - Document
 
-    /// Deletes every `LedgerTransaction` in one save. Accounts keep their
-    /// opening balance (the balance falls back to it), and every other
-    /// model plus all settings stay. Then clears the bank-import memory —
-    /// sync cursors back to the start and all tombstones gone — while the
-    /// account links and their import-from dates survive, so the next
-    /// sync re-imports history instead of resurrecting nothing.
-    @discardableResult
-    func resetTransactions(in context: ModelContext) throws -> DataResetSummary {
-        do {
-            let rows = try context.fetch(FetchDescriptor<LedgerTransaction>())
-            for row in rows { context.delete(row) }
-            try save(context)
-            resetImportMemory(in: context)
-            return DataResetSummary(rows: [DataResetSummary.Row(
-                modelName: "LedgerTransaction",
-                displayName: "giao dịch",
-                count: rows.count
-            )])
-        } catch {
-            context.rollback()
-            throw DataResetError.failed(error)
+    /// The backup-v5 document the server should hold after `level`.
+    /// Level A is the current store with transactions removed (import
+    /// memory is device-local and is not part of the document). Level B
+    /// is a freshly seeded store — default categories, businesses and
+    /// the "Tiền mặt" account, nothing else.
+    func resultingDocument(
+        for level: DataResetLevel,
+        in context: ModelContext,
+        now: Date = .now
+    ) throws -> BackupDocument {
+        switch level {
+        case .transactions:
+            var document = try BackupCodec.document(
+                context: context, exportedAt: now)
+            document.transactions = []
+            return document
+        case .everything:
+            let scratch = try AppModelContainer.make(inMemory: true)
+            let seeded = ModelContext(scratch)
+            try SeedData.seedIfNeeded(context: seeded)
+            return try BackupCodec.document(context: seeded, exportedAt: now)
         }
     }
 
-    // MARK: - Level B
+    // MARK: - Apply
 
-    /// Deletes every row of every model in `AppSchema`, then reseeds the
-    /// defaults. `SeedData.seedIfNeeded`'s own `save()` is the level's
-    /// single commit — it covers the pending deletions and the inserted
-    /// seed rows atomically; the `save` seam after it normally has
-    /// nothing left to write. On any failure `rollback` restores the
-    /// store untouched.
-    ///
-    /// Also clears every app-owned state: wallet sync links/cursors/
+    /// Level A — transactions gone on the server, everything else kept.
+    /// Then clears the bank-import memory (cursors back to the start,
+    /// tombstones gone) while account links and their import-from dates
+    /// survive, and wipes Agent conversations.
+    @discardableResult
+    func resetTransactions(
+        in context: ModelContext
+    ) async throws -> DataResetSummary {
+        try await apply(.transactions, in: context)
+    }
+
+    /// Level B — the server is replaced by the seed document. Also
+    /// clears every app-owned device state: wallet sync links/cursors/
     /// tombstones, auto-categorization rules, CSV mappings and undo
     /// batches, per-loan interest-basis keys, the saved Agent
     /// conversations, the last-used account, the last-backup stamp,
@@ -243,18 +248,46 @@ struct DataResetService {
     func resetEverything(
         in context: ModelContext
     ) async throws -> DataResetSummary {
-        do {
-            let summary = try plannedSummary(for: .everything, in: context)
-            try BackupRestorer.deleteAllRows(in: context)
-            try seed(context)
-            try save(context)
+        try await apply(.everything, in: context)
+    }
+
+    private func apply(
+        _ level: DataResetLevel, in context: ModelContext
+    ) async throws -> DataResetSummary {
+        let summary = try plannedSummary(for: level, in: context)
+        let document = try resultingDocument(for: level, in: context)
+        if let importReplace {
+            do {
+                try await importReplace(try BackupCodec.encode(document))
+            } catch {
+                throw DataResetError.failed(error)
+            }
+        } else {
+            do {
+                _ = try BackupRestorer.restore(
+                    document, mode: .replace, into: context)
+            } catch {
+                context.rollback()
+                throw DataResetError.failed(error)
+            }
+        }
+        switch level {
+        case .transactions:
+            resetImportMemory(in: context)
+        case .everything:
             clearOwnedState()
             await removePendingReminders()
-            return summary
-        } catch {
-            context.rollback()
-            throw DataResetError.failed(error)
         }
+        if let reload {
+            do {
+                try await reload(summary)
+            } catch let error as DataResetError {
+                throw error
+            } catch {
+                throw DataResetError.failed(error)
+            }
+        }
+        return summary
     }
 
     // MARK: - Store cleanup

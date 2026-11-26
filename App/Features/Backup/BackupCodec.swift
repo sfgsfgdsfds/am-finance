@@ -80,21 +80,28 @@ enum BackupCodec {
         )
     }
 
-    /// Fetches everything in `context` and returns the encoded backup file.
-    static func encode(context: ModelContext, exportedAt: Date = .now) throws -> Data {
-        let doc = document(
-            accounts: try context.fetch(FetchDescriptor<Account>()),
-            categories: try context.fetch(FetchDescriptor<LedgerCategory>()),
-            businesses: try context.fetch(FetchDescriptor<Business>()),
-            transactions: try context.fetch(FetchDescriptor<LedgerTransaction>()),
-            loanRateChanges: try context.fetch(FetchDescriptor<LoanRateChange>()),
-            budgets: try context.fetch(FetchDescriptor<Budget>()),
-            recurringRules: try context.fetch(FetchDescriptor<RecurringRule>()),
-            rentalUnits: try context.fetch(FetchDescriptor<RentalUnit>()),
-            rentalLeases: try context.fetch(FetchDescriptor<RentalLease>()),
+    /// Fetches everything in `context` into a backup-v5 document. Arrays
+    /// are sorted the same way `encode` writes them.
+    static func document(
+        context: ModelContext, exportedAt: Date = .now
+    ) throws -> BackupDocument {
+        try document(
+            accounts: context.fetch(FetchDescriptor<Account>()),
+            categories: context.fetch(FetchDescriptor<LedgerCategory>()),
+            businesses: context.fetch(FetchDescriptor<Business>()),
+            transactions: context.fetch(FetchDescriptor<LedgerTransaction>()),
+            loanRateChanges: context.fetch(FetchDescriptor<LoanRateChange>()),
+            budgets: context.fetch(FetchDescriptor<Budget>()),
+            recurringRules: context.fetch(FetchDescriptor<RecurringRule>()),
+            rentalUnits: context.fetch(FetchDescriptor<RentalUnit>()),
+            rentalLeases: context.fetch(FetchDescriptor<RentalLease>()),
             exportedAt: exportedAt
         )
-        return try encode(doc)
+    }
+
+    /// Fetches everything in `context` and returns the encoded backup file.
+    static func encode(context: ModelContext, exportedAt: Date = .now) throws -> Data {
+        try encode(try document(context: context, exportedAt: exportedAt))
     }
 
     static func encode(_ document: BackupDocument) throws -> Data {

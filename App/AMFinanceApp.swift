@@ -17,6 +17,11 @@ struct AMFinanceApp: App {
     /// no network). Every real launch has one: the app container is an
     /// in-memory store loaded from the server before any tab appears.
     private let onlineStore: OnlineStore?
+    /// True only for the real online pipeline (and `-uiTestOnline`).
+    /// The fake-server UI test still gets an `OnlineStore` so "Tải lại
+    /// dữ liệu" works, but the seeded tabs stay in front — no sign-in
+    /// gate.
+    private let showsOnlineGate: Bool
     /// Rebuilt when "Xoá dữ liệu" finishes: a fresh view identity drops
     /// every screen's references to deleted SwiftData objects and returns
     /// every navigation stack to its root.
@@ -58,8 +63,9 @@ struct AMFinanceApp: App {
             // Plain UI-test launches get no coordinator at all — the
             // same treatment `syncCoordinator` gets — so no shadow store,
             // refresh task, timer or save observer exists while tests
-            // run. Only `-uiTestFakeSyncServer` builds one (it points the
-            // API at the in-app fake — see FinanceSyncUITestSupport).
+            // run. `-uiTestFakeSyncServer` without `-uiTestOnline` builds
+            // the stack plus an OnlineStore (no gate) so the Máy chủ
+            // page can reload against the in-app fake.
             let fakeSyncServer = arguments.contains("-uiTestFakeSyncServer")
             if let stack {
                 self.financeSyncCoordinator = MainActor.assumeIsolated {
@@ -70,13 +76,25 @@ struct AMFinanceApp: App {
                         stack: stack, container: container,
                         fakeServer: uiTest)
                 }
+                self.showsOnlineGate = true
+            } else if fakeSyncServer,
+                      let fakeStack = MainActor.assumeIsolated({
+                          try? FinanceSyncCoordinator.makeStack(
+                              container: container)
+                      }) {
+                self.financeSyncCoordinator = MainActor.assumeIsolated {
+                    fakeStack.coordinator
+                }
+                self.onlineStore = MainActor.assumeIsolated {
+                    OnlineStore.live(
+                        stack: fakeStack, container: container,
+                        fakeServer: true)
+                }
+                self.showsOnlineGate = false
             } else {
-                self.financeSyncCoordinator = uiTest && !fakeSyncServer
-                    ? nil
-                    : MainActor.assumeIsolated {
-                        try? FinanceSyncCoordinator.live(container: container)
-                    }
+                self.financeSyncCoordinator = nil
                 self.onlineStore = nil
+                self.showsOnlineGate = false
             }
             // BGTaskScheduler demands registration before the launch
             // sequence finishes — App.init is the earliest hook there is.
@@ -84,7 +102,6 @@ struct AMFinanceApp: App {
             MainActor.assumeIsolated {
                 BackgroundRefreshScheduler.registerHandler(
                     container: container,
-                    financeSync: self.financeSyncCoordinator,
                     onlineStore: self.onlineStore)
             }
         } catch {
@@ -92,13 +109,14 @@ struct AMFinanceApp: App {
             self.syncCoordinator = nil
             self.financeSyncCoordinator = nil
             self.onlineStore = nil
+            self.showsOnlineGate = false
         }
     }
 
     var body: some Scene {
         WindowGroup {
             if let container {
-                if let onlineStore {
+                if let onlineStore, showsOnlineGate {
                     OnlineGate(store: onlineStore) {
                         rootContent(container: container)
                     }
@@ -120,6 +138,7 @@ struct AMFinanceApp: App {
         RootTabView(syncCoordinator: syncCoordinator)
             .modelContainer(container)
             .environment(\.financeSync, financeSyncCoordinator)
+            .environment(\.onlineStore, onlineStore)
             .appScenePhaseHooks(container: container)
             .id(dataResetToken)
             // After `.id` so a data-reset rebuild does not tear

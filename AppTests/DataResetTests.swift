@@ -130,7 +130,7 @@ struct DataResetTests {
 
     // MARK: - Level A
 
-    @Test func levelARemovesOnlyTransactions() throws {
+    @Test func levelARemovesOnlyTransactions() async throws {
         let context = try makeContext()
         try SeedData.seedIfNeeded(context: context)
         let defaults = makeDefaults()
@@ -196,7 +196,7 @@ struct DataResetTests {
                 headers: ["d", "a", "n"]),
             for: bank.id)
 
-        let summary = try service.resetTransactions(in: context)
+        let summary = try await service.resetTransactions(in: context)
 
         // Transactions gone — every other model untouched.
         #expect(summary.transactions == 2)
@@ -432,7 +432,7 @@ struct DataResetTests {
 
     // MARK: - Failure keeps everything
 
-    @Test func failedLevelASaveDeletesNothing() throws {
+    @Test func failedLevelASaveDeletesNothing() async throws {
         let context = try makeContext()
         try SeedData.seedIfNeeded(context: context)
         let states = WalletSyncInMemoryStateStore()
@@ -447,9 +447,9 @@ struct DataResetTests {
         states.recordTombstones(
             ["t1"], source: WalletSyncEngine.externalSource)
 
-        service.save = { _ in throw DataResetTestError.commitFailed }
-        #expect(throws: DataResetError.self) {
-            try service.resetTransactions(in: context)
+        service.importReplace = { _ in throw DataResetTestError.commitFailed }
+        await #expect(throws: DataResetError.self) {
+            try await service.resetTransactions(in: context)
         }
         #expect(
             try context.fetchCount(FetchDescriptor<LedgerTransaction>())
@@ -472,7 +472,7 @@ struct DataResetTests {
         let before = try service.plannedSummary(
             for: .everything, in: context)
 
-        service.seed = { _ in throw DataResetTestError.commitFailed }
+        service.importReplace = { _ in throw DataResetTestError.commitFailed }
         await #expect(throws: DataResetError.self) {
             _ = try await service.resetEverything(in: context)
         }
@@ -509,4 +509,121 @@ struct DataResetTests {
                     "\(bad) should not match")
         }
     }
+
+    // MARK: - Document building
+
+    /// Level A is the current ledger with transactions removed. Accounts,
+    /// categories and the other models stay; import memory is not part
+    /// of the document (it is device-local).
+    @Test func levelADocumentDropsTransactionsOnly() throws {
+        let context = try makeContext()
+        try SeedData.seedIfNeeded(context: context)
+        let service = makeService(defaults: makeDefaults())
+        let cash = try #require(try fetchAll(Account.self, in: context).first)
+        context.insert(LedgerTransaction(
+            kind: .expense, amount: 12_000, account: cash))
+        context.insert(Budget(monthlyLimit: 50_000, category: try #require(
+            try fetchAll(LedgerCategory.self, in: context).first)))
+        try context.save()
+
+        let full = try BackupCodec.document(context: context)
+        let document = try service.resultingDocument(
+            for: .transactions, in: context)
+        #expect(full.transactions.count == 1)
+        #expect(document.transactions.isEmpty)
+        #expect(document.accounts.map(\.id) == full.accounts.map(\.id))
+        #expect(document.categories.map(\.id) == full.categories.map(\.id))
+        #expect(document.businesses.map(\.id) == full.businesses.map(\.id))
+        #expect(document.budgets.map(\.id) == full.budgets.map(\.id))
+        #expect(document.loanRateChanges.isEmpty)
+        #expect(document.recurringRules.isEmpty)
+    }
+
+    /// Level B is exactly a fresh seed: default categories, businesses
+    /// and "Tiền mặt", and none of the user's extra rows.
+    @Test func levelBDocumentIsSeedDefaultsOnly() throws {
+        let context = try makeContext()
+        try SeedData.seedIfNeeded(context: context)
+        let service = makeService(defaults: makeDefaults())
+        context.insert(Account(name: "Thêm", kind: .bank))
+        context.insert(LedgerCategory(
+            name: "Cafe", kind: .expense, sortOrder: 99))
+        let cash = try #require(try fetchAll(Account.self, in: context)
+            .first { $0.name == "Tiền mặt" })
+        context.insert(LedgerTransaction(
+            kind: .expense, amount: 1, account: cash))
+        try context.save()
+
+        let oracle = try makeContext()
+        try SeedData.seedIfNeeded(context: oracle)
+        let expected = try BackupCodec.document(context: oracle)
+        let document = try service.resultingDocument(
+            for: .everything, in: context)
+
+        #expect(document.accounts.map(\.id) == expected.accounts.map(\.id))
+        #expect(document.accounts.map(\.name) == ["Tiền mặt"])
+        #expect(document.categories.map(\.id) == expected.categories.map(\.id))
+        #expect(document.businesses.map(\.id) == expected.businesses.map(\.id))
+        #expect(document.transactions.isEmpty)
+        #expect(document.budgets.isEmpty)
+        #expect(document.loanRateChanges.isEmpty)
+        #expect(document.recurringRules.isEmpty)
+        #expect(document.rentalUnits.isEmpty)
+        #expect(document.rentalLeases.isEmpty)
+    }
+
+    /// Level A posts the transaction-free document as a REPLACE import.
+    /// The server export that comes back has no transactions; a failed
+    /// import would have left the local row in place (covered above).
+    @Test func levelAImportReplacesServerTransactions() async throws {
+        let context = try makeContext()
+        try SeedData.seedIfNeeded(context: context)
+        let cash = try #require(try fetchAll(Account.self, in: context).first)
+        context.insert(LedgerTransaction(
+            kind: .expense, amount: 9_000, account: cash))
+        try context.save()
+
+        let server = FakeSyncServer()
+        let api = syncTestClient(for: server)
+        var service = makeService(defaults: makeDefaults())
+        service.importReplace = { body in
+            _ = try await api.importBackup(body)
+        }
+        service.reload = { _ in
+            let snapshot = try await api.exportSnapshot()
+            #expect(snapshot.document.transactions.isEmpty)
+            #expect(snapshot.document.accounts.map(\.name).contains("Tiền mặt"))
+        }
+        _ = try await service.resetTransactions(in: context)
+        let snapshot = try await api.exportSnapshot()
+        #expect(snapshot.document.transactions.isEmpty)
+        #expect(!snapshot.document.accounts.isEmpty)
+    }
+
+    /// Level B's import is the seed document only — the extra local
+    /// account never reaches the server.
+    @Test func levelBImportReplacesServerWithSeed() async throws {
+        let context = try makeContext()
+        try SeedData.seedIfNeeded(context: context)
+        context.insert(Account(name: "Không được lên server", kind: .bank))
+        try context.save()
+
+        let server = FakeSyncServer()
+        let api = syncTestClient(for: server)
+        var service = makeService(defaults: makeDefaults())
+        service.importReplace = { body in
+            _ = try await api.importBackup(body)
+        }
+        _ = try await service.resetEverything(in: context)
+        let snapshot = try await api.exportSnapshot()
+        #expect(snapshot.document.accounts.map(\.name) == ["Tiền mặt"])
+        #expect(snapshot.document.transactions.isEmpty)
+        #expect(snapshot.document.categories.count == 21)
+        let oracle = try makeContext()
+        try SeedData.seedIfNeeded(context: oracle)
+        let expected = try BackupCodec.document(context: oracle)
+        #expect(snapshot.document.businesses.map(\.id)
+            == expected.businesses.map(\.id))
+    }
+
 }

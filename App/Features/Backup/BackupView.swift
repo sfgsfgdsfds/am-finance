@@ -7,9 +7,9 @@ import UniformTypeIdentifiers
 /// NavigationStack (from Settings); it must not wrap itself in one.
 struct BackupView: View {
     @Environment(\.modelContext) private var modelContext
-    /// Two-way web sync — when enabled a replace-restore also propagates
-    /// to the web on the next sync; the confirm flow says so.
-    @Environment(\.financeSync) private var financeSync
+    /// Online store — a replace-restore POSTs the document and reloads.
+    /// Nil in previews and plain UI tests, which replace locally.
+    @Environment(\.onlineStore) private var onlineStore
     @Query private var accounts: [Account]
     @Query private var categories: [LedgerCategory]
     @Query private var businesses: [Business]
@@ -163,26 +163,14 @@ struct BackupView: View {
             Text("Khôi phục")
         } footer: {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Chọn tệp JSON đã xuất trước đó. Bạn sẽ xem tóm tắt nội dung tệp trước khi quyết định gộp hay thay thế.")
-                if financeSync?.enabled == true {
-                    Label(
-                        "Đồng bộ với web đang bật — khôi phục thay thế cũng sẽ áp dụng lên dữ liệu trên web ở lần đồng bộ tới.",
-                        systemImage: "exclamationmark.triangle.fill"
-                    )
-                    .foregroundStyle(.orange)
-                }
+                Text("Chọn tệp JSON đã xuất trước đó. Bạn sẽ xem tóm tắt nội dung tệp trước khi quyết định gộp hay thay thế. Gộp ghi vào dữ liệu trên máy rồi đẩy lên máy chủ — tệp lớn có thể mất một lúc. Thay thế xoá dữ liệu trên máy chủ và tải lại bản sao lưu.")
             }
         }
     }
 
-    /// The replace-confirm message — plus the web-sync warning line when
-    /// sync is on, since the wipe propagates to the server next sync.
+    /// Replace wipes the server, then the phone reloads that document.
     private var replaceConfirmText: String {
-        var text = "Toàn bộ dữ liệu hiện có sẽ bị xoá và thay bằng nội dung bản sao lưu. Thao tác này không thể hoàn tác."
-        if financeSync?.enabled == true {
-            text += " Đồng bộ với web đang bật — thay đổi này cũng sẽ áp dụng lên dữ liệu trên web ở lần đồng bộ tới."
-        }
-        return text
+        "Toàn bộ dữ liệu trên máy chủ sẽ bị xoá và thay bằng nội dung bản sao lưu, rồi máy tải lại. Thao tác này không thể hoàn tác."
     }
 
     // MARK: - Status helpers
@@ -258,16 +246,55 @@ struct BackupView: View {
         return """
         Xuất lúc: \(date) · phiên bản \(document.appVersion)
         \(document.accounts.count) tài khoản · \(document.categories.count) danh mục · \(document.businesses.count) doanh nghiệp · \(document.transactions.count) giao dịch
+        Gộp có thể mất một lúc với tệp lớn vì các thay đổi được đẩy lên máy chủ.
         """
     }
 
     private func performRestore(_ document: BackupDocument, mode: BackupRestoreMode) {
+        Task { await performRestoreAsync(document, mode: mode) }
+    }
+
+    private func performRestoreAsync(
+        _ document: BackupDocument, mode: BackupRestoreMode
+    ) async {
         defer { importedDocument = nil }
         do {
-            let result = try BackupRestorer.restore(document, mode: mode, into: modelContext)
-            notice = BackupNotice(
-                message: "Khôi phục xong: \(result.inserted) mục mới, \(result.updated) cập nhật, \(result.skipped) bỏ qua."
-            )
+            switch mode {
+            case .replace:
+                if let onlineStore {
+                    _ = try await BackupServerRestore(
+                        importReplace: { try await onlineStore.importBackup($0) },
+                        reload: {
+                            let ok = await onlineStore.reload(
+                                message: "Đã khôi phục bản sao lưu.")
+                            if !ok {
+                                throw BackupRestoreFailure(
+                                    message: "Không tải lại được dữ liệu từ máy chủ sau khi khôi phục.")
+                            }
+                        }
+                    ).perform(document, mode: .replace, into: modelContext)
+                    notice = BackupNotice(
+                        message: "Đã thay thế dữ liệu trên máy chủ và tải lại.")
+                } else {
+                    let result = try BackupRestorer.restore(
+                        document, mode: .replace, into: modelContext)
+                    notice = BackupNotice(
+                        message: "Khôi phục xong: \(result.inserted) mục mới, \(result.updated) cập nhật, \(result.skipped) bỏ qua.")
+                }
+            case .merge:
+                let outcome = try await BackupServerRestore(
+                    importReplace: { _ in
+                        throw BackupRestoreFailure(
+                            message: "Gộp không gửi tệp lên máy chủ.")
+                    },
+                    reload: {}
+                ).perform(document, mode: .merge, into: modelContext)
+                guard case .merged(let result) = outcome else {
+                    throw BackupRestoreFailure(message: "Khôi phục thất bại.")
+                }
+                notice = BackupNotice(
+                    message: "Khôi phục xong: \(result.inserted) mục mới, \(result.updated) cập nhật, \(result.skipped) bỏ qua. Các thay đổi được đẩy lên máy chủ — tệp lớn có thể mất một lúc.")
+            }
         } catch let error as BackupError {
             notice = BackupNotice(message: error.errorDescription ?? "Khôi phục thất bại.")
         } catch {

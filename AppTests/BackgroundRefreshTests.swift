@@ -100,7 +100,6 @@ struct BackgroundRefreshTests {
         generator: FakeGenerator = FakeGenerator(),
         reminders: FakeReminders = FakeReminders(),
         center: FakeCenter = FakeCenter(),
-        financeSync: FakeSync? = nil,
         bankTransactions: Bool = true,
         foregrounded: Bool = false
     ) -> BackgroundRefreshRunner {
@@ -108,7 +107,6 @@ struct BackgroundRefreshTests {
         store.save(ReminderSettings(bankTransactions: bankTransactions))
         return BackgroundRefreshRunner(
             sync: sync, generator: generator, reminders: reminders,
-            financeSync: financeSync,
             settingsStore: store, center: center,
             isForegrounded: { foregrounded })
     }
@@ -237,26 +235,25 @@ struct BackgroundRefreshTests {
 
     /// The online store has not loaded (a BG launch, signed out, still
     /// loading, failed): the in-memory ledger is empty, so EVERY data
-    /// step — wallet sync, web sync, recurring posting, reminder rebuild
-    /// — is skipped and nothing is notified.
+    /// step — wallet sync, recurring posting, reminder rebuild — is
+    /// skipped and nothing is notified. There is no web-sync step.
     @Test func runSkipsEveryDataStepWhenOnlineStoreNotReady() async {
         let sync = FakeSync()
         sync.result = BackgroundRefreshSyncResult(
             status: .synced, insertedRows: [row("tx-1", amount: -1)])
-        let financeSync = FakeSync()
         let generator = FakeGenerator()
         let reminders = FakeReminders()
         let center = FakeCenter()
         let store = ReminderSettingsStore(defaults: makeDefaults())
         let runner = BackgroundRefreshRunner(
             sync: sync, generator: generator, reminders: reminders,
-            financeSync: financeSync, settingsStore: store, center: center,
+            settingsStore: store, center: center,
             isDataReady: { false })
 
         let summary = await runner.run(now: baseDate)
 
         #expect(summary == BackgroundRefreshRunner.Summary())
-        #expect(sync.calls == 0 && financeSync.calls == 0)
+        #expect(sync.calls == 0)
         #expect(generator.calls == 0 && reminders.calls == 0)
         #expect(center.delivered.isEmpty)
     }
@@ -342,45 +339,6 @@ struct BackgroundRefreshTests {
     /// The web-sync step runs between wallet sync and recurring when a
     /// coordinator is wired, and its outcome lands in the summary —
     /// never a notification.
-    @Test func financeSyncStepRunsAndNeverNotifies() async {
-        let financeSync = FakeSync()
-        financeSync.result = BackgroundRefreshSyncResult(
-            status: .synced,
-            // Even rows the step claimed are not bank rows — the web
-            // sync's own rows must never reach the notification plan.
-            insertedRows: [row("web-1", amount: -1_000)])
-        let reminders = FakeReminders()
-        let runner = makeRunner(
-            reminders: reminders, financeSync: financeSync)
-
-        let summary = await runner.run()
-
-        #expect(summary.financeSync == .ok)
-        #expect(financeSync.calls == 1)
-        #expect(summary.newBankTransactions == 0)
-        #expect(summary.notificationsSent == 0)
-    }
-
-    /// A failed web sync is isolated — recurring and reminders still run.
-    @Test func failingFinanceSyncIsIsolated() async {
-        let financeSync = FakeSync()
-        financeSync.result = BackgroundRefreshSyncResult(
-            status: .failed, errorDescription: "máy chủ lỗi")
-        let generator = FakeGenerator()
-        generator.created = 1
-        let runner = makeRunner(
-            generator: generator, financeSync: financeSync)
-
-        let summary = await runner.run()
-
-        #expect(summary.financeSync == .failed("máy chủ lỗi"))
-        #expect(summary.recurring == .ok && summary.recurringCreated == 1)
-        #expect(generator.calls == 1)
-    }
-
-    // MARK: - Runner: notification gating
-
-    /// The "Thông báo giao dịch ngân hàng mới" switch off → silence.
     @Test func switchOffSendsNoNotifications() async {
         let sync = FakeSync()
         sync.result = BackgroundRefreshSyncResult(

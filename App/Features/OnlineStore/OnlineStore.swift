@@ -47,6 +47,7 @@ final class OnlineStore {
     private let coordinator: FinanceSyncCoordinator?
     private let isSignedIn: @Sendable () async -> Bool
     private let performSignIn: @MainActor () async throws -> Void
+    private let performSignOut: @MainActor () async -> Void
     private let afterLoad: @MainActor () async -> Void
     private var started = false
     private var running = false
@@ -63,6 +64,7 @@ final class OnlineStore {
         coordinator: FinanceSyncCoordinator? = nil,
         isSignedIn: @escaping @Sendable () async -> Bool,
         signIn: @escaping @MainActor () async throws -> Void,
+        signOut: @escaping @MainActor () async -> Void = {},
         afterLoad: @escaping @MainActor () async -> Void = {}
     ) {
         self.container = container
@@ -72,6 +74,7 @@ final class OnlineStore {
         self.coordinator = coordinator
         self.isSignedIn = isSignedIn
         self.performSignIn = signIn
+        self.performSignOut = signOut
         self.afterLoad = afterLoad
         if let coordinator {
             bind(coordinator)
@@ -154,7 +157,18 @@ final class OnlineStore {
     /// `reason` (already "Máy chủ từ chối thay đổi: …") once the screen
     /// is showing server truth again.
     func handleRejection(_ reason: String) async {
-        guard !reloading else { return }
+        await reload(message: reason)
+    }
+
+    /// Reloads the in-memory store from `GET /v1/backup/export`. Used by
+    /// a rejected push, "Tải lại dữ liệu", a server data reset and a
+    /// replace-restore. `message`, when non-nil, is the gate's alert
+    /// once the store is ready again; nil clears any previous notice.
+    /// Returns false when a reload is already running or the load failed
+    /// (the phase is then `.failed` or `.signedOut`).
+    @discardableResult
+    func reload(message: String? = nil) async -> Bool {
+        guard !reloading else { return false }
         reloading = true
         defer { reloading = false }
         coordinator?.stopLiveUpdates()
@@ -164,14 +178,44 @@ final class OnlineStore {
             try await bootstrap.loadOnline(snapshot: snapshot)
             LedgerBalanceStores.shared(for: container).invalidate()
             await afterLoad()
-            rejectionMessage = reason
+            rejectionMessage = message
             phase = .ready
             restartLiveUpdates()
+            return true
         } catch FinanceSyncError.unauthorized {
             phase = .signedOut
+            return false
         } catch {
             phase = .failed(Self.text(for: error))
+            return false
         }
+    }
+
+    /// POST /v1/backup/import — REPLACE the server with `body` (a
+    /// backup-v5 document). Callers reload afterwards so the in-memory
+    /// store matches what the server just stored.
+    func importBackup(_ body: Data) async throws {
+        _ = try await api.importBackup(body)
+    }
+
+    /// "Đăng xuất": stop live updates, drop the in-memory ledger without
+    /// pushing the wipe, revoke the WalletLink session, and return to
+    /// the sign-in gate. Server data is left as it is.
+    func signOut() async {
+        guard !reloading else { return }
+        coordinator?.stopLiveUpdates()
+        await coordinator?.disconnect()
+        let context = container.mainContext
+        FinanceSyncSaveFilter.asEngine {
+            try? BackupRestorer.deleteAllRows(in: context)
+            try? context.save()
+        }
+        LedgerBalanceStores.shared(for: container).invalidate()
+        await performSignOut()
+        rejectionMessage = nil
+        legacyNotice = nil
+        signInError = nil
+        phase = .signedOut
     }
 
     private func restartLiveUpdates() {
@@ -232,10 +276,13 @@ extension OnlineStore {
         fakeServer: Bool = false
     ) -> OnlineStore {
         let signIn: @MainActor () async throws -> Void
+        let signOut: @MainActor () async -> Void
         if fakeServer {
             signIn = {}
+            signOut = {}
         } else {
             signIn = { try await session.signIn() }
+            signOut = { await session.signOut() }
         }
         return OnlineStore(
             container: container,
@@ -245,6 +292,7 @@ extension OnlineStore {
             coordinator: stack.coordinator,
             isSignedIn: stack.isSignedIn,
             signIn: signIn,
+            signOut: signOut,
             afterLoad: { await stack.coordinator.refreshState() })
     }
 
