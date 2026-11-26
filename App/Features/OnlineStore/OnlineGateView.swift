@@ -184,3 +184,18 @@ private struct OnlineSignInView: View {
         }
     }
 }
+
+private struct OnlineStoreEnvironmentKey: EnvironmentKey {
+    static let defaultValue: OnlineStore? = nil
+}
+
+extension EnvironmentValues {
+    /// The app-level online store, injected on the root. Nil in
+    /// previews and in plain `-uiTestInMemoryStore` launches (no
+    /// server). The Máy chủ page, data reset and replace-restore use
+    /// it to import and reload.
+    var onlineStore: OnlineStore? {
+        get { self[OnlineStoreEnvironmentKey.self] }
+        set { self[OnlineStoreEnvironmentKey.self] = newValue }
+    }
+}

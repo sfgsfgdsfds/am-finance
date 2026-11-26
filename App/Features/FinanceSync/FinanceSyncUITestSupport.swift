@@ -10,8 +10,9 @@ import Foundation
 /// sync contract to drive the whole flow offline: paged pull with seq
 /// cursors and tombstones, idempotent push with per-change results,
 /// deferred foreign-key validation, and the backup REPLACE import —
-/// plus a fake signed-in token provider, so `FinanceSyncSettingsView`
-/// renders its signed-in state without a real AMX login.
+/// plus a fake signed-in token provider, so the Máy chủ page
+/// (`ServerStatusView`) renders its signed-in state without a real
+/// AMX login. "Tải lại dữ liệu" reloads through this server.
 enum FinanceSyncUITestSupport {
     /// The launch argument that turns the fake server on.
     static let launchArgument = "-uiTestFakeSyncServer"

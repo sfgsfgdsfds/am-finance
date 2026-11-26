@@ -1071,4 +1071,62 @@ struct BackupTests {
             lastExport: now.addingTimeInterval(-6 * 86_400), now: now
         ))
     }
+
+    // MARK: - Restore routing
+
+    @Test func replaceRoutesThroughServerImportThenReload() async throws {
+        let context = try makeContext()
+        try SeedData.seedIfNeeded(context: context)
+        let before = try context.fetchCount(FetchDescriptor<Account>())
+        let document = try BackupCodec.document(context: context)
+        var imported: Data?
+        var reloaded = false
+        let router = BackupServerRestore(
+            importReplace: { imported = $0 },
+            reload: { reloaded = true })
+        let outcome = try await router.perform(
+            document, mode: .replace, into: context)
+        #expect(outcome == .replacedOnServer)
+        #expect(reloaded)
+        let decoded = try BackupCodec.decode(try #require(imported))
+        #expect(decoded.accounts.map(\.id) == document.accounts.map(\.id))
+        #expect(decoded.transactions.map(\.id) == document.transactions.map(\.id))
+        // Replace must not touch the in-memory store — the reload does.
+        #expect(try context.fetchCount(FetchDescriptor<Account>()) == before)
+    }
+
+    @Test func mergeRestoresLocallyAndDoesNotImport() async throws {
+        let context = try makeContext()
+        try SeedData.seedIfNeeded(context: context)
+        let before = try context.fetchCount(FetchDescriptor<Account>())
+        let other = try makeContext()
+        try SeedData.seedIfNeeded(context: other)
+        other.insert(Account(name: "Gộp thêm", kind: .bank, openingBalance: 10))
+        try other.save()
+        let document = try BackupCodec.document(context: other)
+
+        var imported = false
+        var reloaded = false
+        let router = BackupServerRestore(
+            importReplace: { _ in imported = true },
+            reload: { reloaded = true })
+        let outcome = try await router.perform(
+            document, mode: .merge, into: context)
+        #expect(!imported)
+        #expect(!reloaded)
+        guard case .merged(let result) = outcome else {
+            Issue.record("merge did not restore locally")
+            return
+        }
+        #expect(result.inserted >= 1)
+        #expect(try context.fetchCount(FetchDescriptor<Account>()) == before + 1)
+        let names = try fetchAll(Account.self, in: context).map(\.name)
+        #expect(names.contains("Gộp thêm"))
+    }
+
+    @Test func restoreRouteMatchesMode() {
+        #expect(BackupRestoreRouting.route(for: .replace) == .replaceOnServer)
+        #expect(BackupRestoreRouting.route(for: .merge) == .mergeInMemory)
+    }
+
 }

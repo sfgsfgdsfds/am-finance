@@ -28,12 +28,11 @@ enum BackgroundRefreshScheduler {
 
     /// Registers the refresh handler once. Call at launch, before the
     /// first scene — `BGTaskScheduler` requires registration to complete
-    /// before the launch sequence finishes. `financeSync` is the
-    /// app-level coordinator — passed into every run's web-sync step.
+    /// before the launch sequence finishes. There is no web-sync step:
+    /// the in-memory store is not loaded in the background.
     @MainActor
     static func registerHandler(
         container: ModelContainer,
-        financeSync: FinanceSyncCoordinator? = nil,
         onlineStore: OnlineStore? = nil
     ) {
         guard !didRegister, !isDisabled else { return }
@@ -47,7 +46,7 @@ enum BackgroundRefreshScheduler {
             }
             handle(
                 task: refresh, container: container,
-                financeSync: financeSync, onlineStore: onlineStore)
+                onlineStore: onlineStore)
         }
     }
 
@@ -70,14 +69,12 @@ enum BackgroundRefreshScheduler {
     /// import.
     private static func handle(
         task: BGAppRefreshTask, container: ModelContainer,
-        financeSync: FinanceSyncCoordinator?,
         onlineStore: OnlineStore?
     ) {
         let box = BackgroundTaskBox(task)
         let work = Task { @MainActor in
             let runner = BackgroundRefreshRunner.live(
-                container: container, financeSync: financeSync,
-                onlineStore: onlineStore)
+                container: container, onlineStore: onlineStore)
             let summary = await runner.run()
             scheduleNext()
             box.task.setTaskCompleted(success: !summary.cancelled)

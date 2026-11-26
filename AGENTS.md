@@ -51,9 +51,11 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
 - Adding `-uiTestFakeSyncServer` (also honoured only beside the
   in-memory store, DEBUG-only) points the finance sync at an in-app
   in-memory server (push/pull/import + seq + tombstones) with a fake
-  signed-in token — `testFinanceSync` drives the enable + push flow
-  end to end. Automatic sync triggers are inert under
-  `-uiTestInMemoryStore`, so the manual "Đồng bộ ngay" is deterministic.
+  signed-in token — `testFinanceSync` drives the Máy chủ page
+  (status visible, "Tải lại dữ liệu" reloads from the fake export).
+  Without `-uiTestOnline` the sign-in gate stays off so the seeded
+  tabs are immediate. Automatic sync triggers are inert under
+  `-uiTestInMemoryStore`.
 - Row taps need `.onTapGesture` (List-row `Button` actions don't fire on
   iOS 26); assertions on off-screen list items must scroll first.
 
@@ -135,8 +137,8 @@ workers know what already exists. Pushed views must not create their own
   restore, swipe to delete, "Xoá tất cả".
 - `AIAssistant/` — `AISettingsView` (Settings → Trợ lý AI → "Nhà cung cấp AI"; hosts the "Quyền của Agent" pickers), `AIInboxSuggestView` (inbox toolbar's "Phân loại bằng AI"), `AICaptureView` (the `root.aiCapture` satellite beside "+"); shared plumbing `AIClient`/`AIChatClientProtocol`, `AIChatScope` + `AIChatContextLoader`/`AIFinanceContextBuilder` summaries, extraction/categorization parsers.
 - `AppLock/` — `AppLockSettingsView`, the `.appLockProtected()` modifier on the root; `AppLockController.shared`.
-- `BackgroundRefresh/` — `BackgroundRefreshScheduler` (BGAppRefreshTask `vn.amx.finance.refresh`, registered in `AMFinanceApp`), `BackgroundRefreshRunner` (background wallet sync + recurring + reminders with local notifications), `BackgroundRefreshNotificationPlan`.
-- `Backup/` — `BackupView` (Settings → Dữ liệu).
+- `BackgroundRefresh/` — `BackgroundRefreshScheduler` (BGAppRefreshTask `vn.amx.finance.refresh`, registered in `AMFinanceApp`), `BackgroundRefreshRunner` (background wallet sync + recurring + reminders with local notifications — no web-sync step; the in-memory store is not loaded in the background), `BackgroundRefreshNotificationPlan`.
+- `Backup/` — `BackupView` (Settings → Dữ liệu). Export is the in-memory ledger. Restore `.replace` POSTs the document to `v1/backup/import` then `OnlineStore.reload()`; `.merge` restores into memory and the engine pushes it (large files can take a while).
 - `BillSplit/` — `BillSplitView` (chia bill sheet; `seed:` from the
   transaction editor's unsaved draft or `transaction:` + `BillSplitOriginal`
   for an in-place split), `BillRepaymentSheet` (income → repayment),
@@ -233,10 +235,12 @@ workers know what already exists. Pushed views must not create their own
   gated on `coordinator.enabled`/`refreshState()` writes only on real
   changes — a `.dataResetCompleted` forces the next
   cycle FULL, and the engine/bootstrap `addLocalStoreChangeHook`
-  invalidates `LedgerBalanceStores`. `FinanceSyncSettingsView`
-  (Settings → Dữ liệu → "Đồng bộ với web", AX ids `financeSync.*`)
-  hosts status/report/quarantine, the probe-driven first-sync choice
-  with destructive confirms, and Đồng bộ ngay/Tạm dừng/Ngắt kết nối.
+  invalidates `LedgerBalanceStores`. `ServerStatusView`
+  (Settings → Dữ liệu → "Máy chủ", AX ids `server.*`) shows the server
+  URL, the signed-in WalletLink account, the connection state and the
+  last update time, plus "Tải lại dữ liệu" (`OnlineStore.reload()`) and
+  "Đăng xuất" (WalletLink `signOut`, in-memory data dropped, back to
+  the sign-in gate). There is no enable/pause/disconnect UI.
   Only USER saves trigger the auto-sync (`FinanceSyncSaveFilter`:
   engine-origin thread mark + synced-entity names + container), and
   `FinanceSyncMainContextRefresher` re-fetches overwritten rows the main
@@ -247,19 +251,19 @@ workers know what already exists. Pushed views must not create their own
   `GET /v1/sync/wait` while the scene is active (`isOnline` drops on a
   transport failure; a `422` sets `rejectionReloadPending` and the store
   reloads from the export).
-  `BackgroundRefreshRunner` runs the web sync as a second
-  `BackgroundRefreshSyncing` step behind the same seam.
+  `BackgroundRefreshRunner` does not run a web-sync step — the store is
+  not loaded in the background. The skip-when-not-ready guard stays.
   `FinanceSyncUITestSupport` is the DEBUG-only `-uiTestFakeSyncServer`
   in-app fake (mirror of `FakeSyncServer` minus test seams) + fixed
-  token provider; `DataResetView` footers and the `BackupView` replace
-  confirm warn that enabled sync propagates the change to the web.
-- `DataReset/` — `DataResetView` (Settings → Dữ liệu → "Xoá dữ liệu"): level A wipes transactions + import memory, level B wipes every model and reseeds; BOTH levels also wipe the saved Agent conversation history (`DataResetService.conversationStore.deleteAll()`); `DataResetService`, `DataResetSummary`; success posts `.dataResetCompleted` → `AMFinanceApp` rebuilds the root.
+  token provider; it drives the Máy chủ page. Data reset and a
+  replace-restore POST `v1/backup/import` (REPLACE) and reload.
+- `DataReset/` — `DataResetView` (Settings → Dữ liệu → "Xoá dữ liệu"): level A (transactions) and level B (everything, then `SeedData` defaults) build the resulting backup-v5 document, POST `v1/backup/import` (REPLACE) and `OnlineStore.reload()`; footers say the web copy is deleted too. BOTH levels also wipe the saved Agent conversation history (`DataResetService.conversationStore.deleteAll()`); `DataResetService`, `DataResetSummary`; success posts `.dataResetCompleted` → `AMFinanceApp` rebuilds the root. Plain UI-test launches (no server) restore that same document locally.
 - `Debts/` — `DebtsView` ("Nợ & Thẻ" tab).
 - `Loans/` — `LoanDetailView(account:)`, `LoanPaymentSheet`, `LoanPrepaymentSheet`, `LoanRateChangeSheet`.
 - `OnlineStore/` — the online-only launch (stage 1; the web server IS the
   backend, nothing is persisted locally). `OnlineStore` (@MainActor
   @Observable; phases `starting → signedOut → migratingLegacy → loading →
-  ready | failed(text)`, `isOnline`, `rejectionMessage`, `signIn()`/`retry()`) is created in `AMFinanceApp`
+  ready | failed(text)`, `isOnline`, `rejectionMessage`, `signIn()`/`retry()`, `reload(message:)` — the one reload path for a rejected push, "Tải lại dữ liệu", data reset and replace-restore — and `signOut()`) is created in `AMFinanceApp`
   for every real launch (and for `-uiTestInMemoryStore -uiTestFakeSyncServer
   -uiTestOnline`, DEBUG) over an in-memory app container with NO
   `SeedData` and an in-memory shadow; `OnlineGate` (`OnlineGateView`) shows
@@ -285,8 +289,8 @@ workers know what already exists. Pushed views must not create their own
   then `default.store*`/`FinanceSync.store*` are MOVED (never deleted) into
   the folder. `LegacyMigration.json` records folder/decisions so a retry
   after any failure resumes; any failure moves nothing → `failed`.
-  `BackgroundRefreshRunner(isDataReady:)` skips wallet sync, web sync,
-  recurring AND reminders until the store is `ready`. Tests:
+  `BackgroundRefreshRunner(isDataReady:)` skips wallet sync, recurring
+  AND reminders until the store is `ready` (no web-sync step). Tests:
   `AppTests/OnlineStoreTests.swift` (temp-directory Application Support,
   `FakeSyncServer` export/head/`setFailure` seams).
 - `Receivables/` — `ReceivablesView(business:?)`, `ReceivableDetailView(account:)`, `ReceivableActionSheet` (advance/repayment/fee/write-off).

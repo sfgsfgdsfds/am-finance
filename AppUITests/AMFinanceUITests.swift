@@ -1409,16 +1409,13 @@ final class AMFinanceUITests: XCTestCase {
             "restored conversation did not show the earlier message")
     }
 
-    // MARK: - 10. Web sync (fake server)
+    // MARK: - 10. Server status (fake server)
 
-    /// "Đồng bộ với web" end to end against the in-app fake server:
-    /// relaunched with `-uiTestFakeSyncServer` beside the in-memory
-    /// store, the screen counts as signed in and every request is served
-    /// in memory. Enable with the upload choice, confirm the destructive
-    /// replace, verify the synced status, add a transaction through
-    /// quick-add, then "Đồng bộ ngay" reports exactly one sent change.
-    /// Automatic triggers are inert under the UI-test launch, so the
-    /// manual button is the only sync — the report stays deterministic.
+    /// "Máy chủ" against the in-app fake server: relaunched with
+    /// `-uiTestFakeSyncServer` beside the in-memory store, the screen
+    /// shows the server URL, a signed-in account and the connection
+    /// state. "Tải lại dữ liệu" reloads from the fake export — the last
+    /// update row leaves "Chưa cập nhật".
     func testFinanceSync() throws {
         app.terminate()
         // `terminate()` returns while the process may still be dying —
@@ -1432,7 +1429,6 @@ final class AMFinanceUITests: XCTestCase {
         ]
         app.launch()
 
-        // Cài đặt → Dữ liệu → Đồng bộ với web.
         let gear = app.buttons["Cài đặt"]
         XCTAssertTrue(waitReady(gear, timeout: 15), "settings gear missing")
         gear.tap()
@@ -1440,68 +1436,47 @@ final class AMFinanceUITests: XCTestCase {
             app.navigationBars.staticTexts["Cài đặt"]
                 .waitForExistence(timeout: 5),
             "settings screen missing")
-        tapOption("Đồng bộ với web")
+        tapOption("Máy chủ")
         XCTAssertTrue(
-            app.navigationBars.staticTexts["Đồng bộ với web"]
+            app.navigationBars.staticTexts["Máy chủ"]
                 .waitForExistence(timeout: 5),
-            "finance sync screen missing")
+            "server screen missing")
 
-        // The fake provider counts as signed in — the row is a merged
-        // LabeledContent label ("Đăng nhập, Đã đăng nhập").
+        let url = scopedElement("server.url")
+        XCTAssertTrue(url.waitForExistence(timeout: 5), "server URL row missing")
         XCTAssertTrue(
-            app.staticTexts
-                .matching(NSPredicate(
-                    format: "label CONTAINS %@", "Đã đăng nhập"))
-                .firstMatch.waitForExistence(timeout: 5),
-            "signed-in state missing")
+            url.label.contains("uitest.financesync.local"),
+            "server URL missing the fake host — got '\(url.label)'")
 
-        // Enable → probe → the upload choice → destructive confirm.
-        tapOption("Bật đồng bộ")
+        let account = scopedElement("server.account")
+        let signedIn = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "Đã đăng nhập"),
+            object: account)
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [signedIn], timeout: 5), .completed,
+            "signed-in account missing — got '\(account.label)'")
+
+        let connection = scopedElement("server.connection")
         XCTAssertTrue(
-            app.staticTexts
-                .matching(NSPredicate(
-                    format: "label CONTAINS %@", "Trên iPhone:"))
-                .firstMatch.waitForExistence(timeout: 10),
-            "probe summary missing")
-        tapOption("Đưa dữ liệu iPhone lên web")
-        confirmDestructive(
-            label: "Thay thế trên web",
-            dialogTitle: "Thay thế dữ liệu?")
+            connection.label.contains("Đang kết nối"),
+            "connection state missing — got '\(connection.label)'")
 
-        // Synced: state shows Đang bật and the first report landed.
+        let updated = scopedElement("server.lastUpdate")
         XCTAssertTrue(
-            app.staticTexts
-                .matching(NSPredicate(
-                    format: "label CONTAINS %@", "Đang bật"))
-                .firstMatch.waitForExistence(timeout: 15),
-            "enabled state missing after bootstrap")
-        XCTAssertTrue(
-            app.staticTexts
-                .matching(NSPredicate(
-                    format: "label CONTAINS %@", "Đã gửi"))
-                .firstMatch.waitForExistence(timeout: 5),
-            "first sync report missing")
+            updated.label.contains("Chưa cập nhật"),
+            "expected no update yet — got '\(updated.label)'")
 
-        // A quick-add expense — to be pushed by the manual sync below.
-        goBack(to: "Cài đặt")
-        goBack(to: "Tổng quan")
-        quickAddExpense(amount: 45_000, category: "Ăn uống")
-
-        // Back into the sync screen → "Đồng bộ ngay" reports 1 sent.
-        XCTAssertTrue(waitReady(gear, timeout: 10), "settings gear missing")
-        gear.tap()
-        tapOption("Đồng bộ với web")
-        // The button stays disabled until the sign-in probe lands —
-        // wait for enabled, not just hittable (a disabled tap is a
-        // silent no-op).
         tapWhenReady(
-            app.buttons["Đồng bộ ngay"], "sync-now button missing")
-        XCTAssertTrue(
-            app.staticTexts
-                .matching(NSPredicate(
-                    format: "label CONTAINS %@", "Đã gửi 1 ·"))
-                .firstMatch.waitForExistence(timeout: 15),
-            "sync report does not show 1 sent change")
+            app.buttons["server.reload"], "reload button missing")
+        let refreshed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", "Hôm nay"),
+            object: scopedElement("server.lastUpdate"))
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [refreshed], timeout: 20), .completed,
+            "reload did not record an update — got '\(scopedElement("server.lastUpdate").label)'")
+        XCTAssertFalse(
+            app.staticTexts["Không tải lại được"].exists,
+            "reload failed")
     }
 
     // MARK: - Flow helpers
