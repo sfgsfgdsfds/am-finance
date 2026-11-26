@@ -39,15 +39,40 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
 
 The owner's Mac is an Apple M1 with 8 GB of RAM — too weak for Xcode and
 simulators. Workers must **not** run `xcodebuild`, `./scripts/test-app.sh`,
-`./scripts/test-ui.sh`, `./scripts/build-release.sh`, or boot a simulator
-locally. Iterate on GitHub with `./scripts/ci.sh run <suite>` (`unit`, `ui`,
-`ui1`..`ui4`, `build`, or `all`): use `unit` or a single `uiN` while
-iterating and finish with `all`. `swift test --package-path Packages/FinanceCore`
+`./scripts/test-ui.sh`, `./scripts/build-release.sh`, `./scripts/ci-build-for-testing.sh`,
+or boot a simulator locally. Iterate on GitHub with `./scripts/ci.sh run <suite>`
+(`quick`, `unit`, `ui`, `ui1`..`ui4`, `build`, or `all`).
+
+**Gate each change on `quick`.** `quick` compiles the app and both test
+bundles (`build-for-testing`, no simulator) and runs FinanceCore plus the
+882 app unit tests. `.amdev/checks` is `swift test --package-path
+Packages/FinanceCore` plus `./scripts/ci.sh verify quick`. **Run `all` once
+per batch, before a device install** — it is the full gate (unit + every UI
+shard + the unsigned Release simulator build). `swift test` of FinanceCore
 locally is fine. A device install is the only local Xcode build.
-`./scripts/ci.sh verify <suite>` is what `.amdev/checks` runs — it reuses a
-green `ci/<suite>-<tree>` or `ci/all-<tree>` run and never waits longer than
-14 minutes. `./scripts/ci.sh prune` deletes remote `ci/*` branches older than
-3 days.
+`./scripts/ci.sh verify <suite>` reuses a green `ci/<suite>-<tree>` or
+`ci/all-<tree>` run and never waits longer than 14 minutes.
+`./scripts/ci.sh prune` deletes remote `ci/*` branches older than 3 days.
+
+One `products` job compiles; test jobs download the artifact and run
+`test-without-building` (retry-once on a simulator failure stays). The
+Release build runs beside `products`, not after the tests, and the test
+wave is at most 5 macOS jobs so nothing queues behind the account cap.
+Explicit-module caches are keyed by the selected Xcode version only —
+modules are content-addressed, and test jobs run this run's artifact, so a
+stale cache cannot go green on old binaries.
+
+Why `unit` used to take ~25 min (run 45752846072) against ~5 min locally:
+the 882 tests themselves passed in **149s** and FinanceCore's 231 tests in
+**9s**. `xcodebuild test` boots the simulator and starts the test runner
+while swiftc is still compiling. On a 3-vCPU runner that compile takes long
+enough for the runner to die (`handleStalledWait` / "test runner crashed"),
+the transient-retry fires after ~17 min, and the whole compile starts over.
+UI shards showed the same stall (ui3's 34 min job); the test bodies were
+shard1 349s, shard2 444s, shard3 375s, shard4 476s. Building once, with no
+simulator, removes that. Shard name lists stay in `scripts/ui-shards.sh`
+(shard 1 still gains `testOnlineLaunch` when that test exists). Wall-clock
+after the split is recorded below once the green `all` / `quick` runs land.
 
 ## UI smoke tests
 

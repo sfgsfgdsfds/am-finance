@@ -53,5 +53,11 @@ if [ -n "${GITHUB_ENV:-}" ]; then
 fi
 sudo xcodebuild -license accept || true
 xcodebuild -version
+xcode_ver="$(xcodebuild -version | awk 'NR==1 { print $2; exit }')"
+if [ -n "${GITHUB_ENV:-}" ]; then
+  # Used as the explicit-module cache key. SDK modules are content-addressed,
+  # so a cache from an older tree cannot produce a wrong binary.
+  echo "XCODE_VERSION=${xcode_ver}" >> "$GITHUB_ENV"
+fi
 echo "--- iOS runtimes ---"
 xcrun simctl list runtimes
