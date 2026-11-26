@@ -279,19 +279,30 @@ struct OnlineLiveTests {
         let (server, ids) = try await serverWithLedger()
         let (device, coordinator, store) = try makeStack(server: server)
         await store.start()
+        // `store.start()` arms the long-poll (50 ms holds). Every successful
+        // wait marks the session online, and that write can land during the
+        // failed cycle's `refreshState` — after the push has already set
+        // offline — so a direct read of `isOnline` flakes. Stop the loop,
+        // let any in-flight cycle finish, then poll. The sibling
+        // `networkErrorGoesOfflineThenRecovers` keeps the loop because the
+        // failure there is the wait itself.
+        coordinator.stopLiveUpdates()
+        await coordinator.waitForEngineIdle()
         server.setTransportFailure(pathSuffix: "/v1/sync/push", enabled: true)
         let row = try tx(device.context, ids.expenseTx)
         row.amount = 8_888
         row.updatedAt = .now
         try device.context.save()
         #expect(await coordinator.syncNow() == false)
-        #expect(store.isOnline == false)
+        #expect(await waitUntil { store.isOnline == false })
+        #expect(coordinator.isOnline == false)
         #expect(coordinator.lastError?.contains("mạng") == true
             || coordinator.lastError?.contains("kết nối") == true)
 
         server.setTransportFailure(pathSuffix: "/v1/sync/push", enabled: false)
         #expect(await coordinator.syncNow())
-        #expect(store.isOnline)
+        #expect(await waitUntil { store.isOnline })
+        #expect(coordinator.isOnline)
         guard case .object(let fields)? = server.row(
             entity: "transaction", id: ids.expenseTx)?.data
         else {
