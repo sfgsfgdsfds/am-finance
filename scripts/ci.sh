@@ -14,7 +14,7 @@
 #   ./scripts/ci.sh prune
 #       Delete remote ci/* branches whose tip commit is older than 3 days.
 #
-# Suites: all | unit | ui | ui1 | ui2 | ui3 | ui4 | build
+# Suites: all | quick | unit | ui | ui1 | ui2 | ui3 | ui4 | build
 # The owner's Mac must not run xcodebuild or simulators; this script only
 # pushes and polls. swift test of FinanceCore locally is fine.
 set -euo pipefail
@@ -44,15 +44,15 @@ sleep_until() { # $1 deadline epoch
 }
 
 usage() {
-  echo "usage: ci.sh run <all|unit|ui|ui1|ui2|ui3|ui4|build>" >&2
-  echo "       ci.sh verify <all|unit|ui|ui1|ui2|ui3|ui4|build>" >&2
+  echo "usage: ci.sh run <all|quick|unit|ui|ui1|ui2|ui3|ui4|build>" >&2
+  echo "       ci.sh verify <all|quick|unit|ui|ui1|ui2|ui3|ui4|build>" >&2
   echo "       ci.sh prune" >&2
   exit 2
 }
 
 valid_suite() {
   case "$1" in
-    all|unit|ui|ui1|ui2|ui3|ui4|build) return 0 ;;
+    all|quick|unit|ui|ui1|ui2|ui3|ui4|build) return 0 ;;
     *) return 1 ;;
   esac
 }

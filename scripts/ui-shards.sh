@@ -9,6 +9,14 @@
 #
 # Shard 1 also includes testOnlineLaunch when that test exists in AppUITests.
 # Put a new UI test into the lightest shard below.
+#
+# Test-body time on the green run 45752846072 (xcodebuild's "Executed N tests
+# in Xs", compile and the runner-stall retry excluded):
+#   shard 1  349s   shard 2  444s   shard 3  375s   shard 4  476s
+# ui3's 34 min job was a ~21 min test-runner stall while the app was still
+# compiling, plus queueing behind the 5-macOS-job cap — not a longer shard.
+# Keep these name lists easy to merge; testOnlineLaunch stays appended to
+# shard 1 when the test exists.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
