@@ -108,11 +108,28 @@ final class FinanceSyncUITestStubProtocol: URLProtocol {
     }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+    private var stopped = false
+
     override func startLoading() {
         guard let server = Self.server else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return
         }
+        // Same rule as the unit-test stub: never block the loader queue.
+        // A long-poll with nothing new parks `deliver` until a write or
+        // the requested timeout.
+        let deliver = { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.deliver(server: server)
+        }
+        if server.parkWaitIfNeeded(
+            request, token: ObjectIdentifier(self), deliver: deliver) {
+            return
+        }
+        deliver()
+    }
+
+    private func deliver(server: FinanceSyncUITestServer) {
         do {
             let (response, data) = try server.handle(request)
             client?.urlProtocol(
@@ -124,7 +141,10 @@ final class FinanceSyncUITestStubProtocol: URLProtocol {
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        stopped = true
+        Self.server?.cancelWait(token: ObjectIdentifier(self))
+    }
 }
 
 private struct UITestServerKey: Hashable {
@@ -168,10 +188,118 @@ final class FinanceSyncUITestServer: @unchecked Sendable {
         FinanceSyncUITestStubProtocol.server = self
     }
 
+    // MARK: - Long-poll
+
+    private final class Waiter {
+        let token: ObjectIdentifier
+        let cursor: Int64
+        let deliver: () -> Void
+        var fired = false
+        var timer: DispatchSourceTimer?
+        init(
+            token: ObjectIdentifier, cursor: Int64,
+            deliver: @escaping () -> Void
+        ) {
+            self.token = token
+            self.cursor = cursor
+            self.deliver = deliver
+        }
+    }
+
+    private var waiters: [Waiter] = []
+
+    /// Parks `GET /v1/sync/wait` until a later write moves the high-water
+    /// past `cursor`, or `timeout` elapses (the delivery then answers
+    /// 204). Returns false when the request can be answered now.
+    func parkWaitIfNeeded(
+        _ request: URLRequest,
+        token: ObjectIdentifier,
+        deliver: @escaping () -> Void
+    ) -> Bool {
+        guard request.url?.path.hasSuffix("/v1/sync/wait") == true,
+              let url = request.url
+        else { return false }
+        let query = URLComponents(
+            url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let cursor = Int64(query.first { $0.name == "cursor" }?.value ?? "") ?? 0
+        let timeout = Double(query.first { $0.name == "timeout" }?.value ?? "") ?? 25
+        lock.lock()
+        let ready = nextSeq > cursor
+        if ready {
+            lock.unlock()
+            return false
+        }
+        let waiter = Waiter(token: token, cursor: cursor, deliver: deliver)
+        waiters.append(waiter)
+        lock.unlock()
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        timer.schedule(deadline: .now() + max(timeout, 0))
+        timer.setEventHandler { [weak self, weak waiter] in
+            guard let self, let waiter else { return }
+            self.fire(waiter)
+        }
+        waiter.timer = timer
+        timer.resume()
+        return true
+    }
+
+    func cancelWait(token: ObjectIdentifier) {
+        lock.lock()
+        let matches = waiters.filter { $0.token == token && !$0.fired }
+        for waiter in matches { waiter.fired = true }
+        waiters.removeAll { $0.fired }
+        lock.unlock()
+        for waiter in matches { waiter.timer?.cancel() }
+    }
+
+    private func fire(_ waiter: Waiter) {
+        lock.lock()
+        guard !waiter.fired else { lock.unlock(); return }
+        waiter.fired = true
+        waiters.removeAll { $0 === waiter }
+        lock.unlock()
+        waiter.timer?.cancel()
+        waiter.deliver()
+    }
+
+    private func wakeWaits() {
+        lock.lock()
+        let ready = waiters.filter { !$0.fired && nextSeq > $0.cursor }
+        for waiter in ready { waiter.fired = true }
+        waiters.removeAll { $0.fired }
+        lock.unlock()
+        for waiter in ready {
+            waiter.timer?.cancel()
+            waiter.deliver()
+        }
+    }
+
+    private func handleWait(
+        _ request: URLRequest
+    ) throws -> (HTTPURLResponse, Data) {
+        let url = request.url!
+        let query = URLComponents(
+            url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let cursor = Int64(query.first { $0.name == "cursor" }?.value ?? "") ?? 0
+        if nextSeq > cursor {
+            let payload: [String: Int64] = ["high_water_seq": nextSeq]
+            return (http(url), try JSONEncoder().encode(payload))
+        }
+        return (http(url, status: 204), Data())
+    }
+
     func handle(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
         let url = request.url!
         lock.lock()
-        defer { lock.unlock() }
+        let seqBefore = nextSeq
+        defer {
+            let changed = nextSeq != seqBefore
+            lock.unlock()
+            if changed { wakeWaits() }
+        }
+        if url.path.hasSuffix("/v1/sync/wait") {
+            return try handleWait(request)
+        }
         if url.path.hasSuffix("/v1/sync/pull") {
             return try handlePull(request)
         }

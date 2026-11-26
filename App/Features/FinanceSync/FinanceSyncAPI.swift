@@ -155,6 +155,34 @@ struct FinanceSyncAPIClient: Sendable {
         return try decode(SyncHeadResponse.self, from: data).highWaterSeq
     }
 
+    /// GET /v1/sync/wait?cursor=&timeout= — long-poll. Returns the
+    /// server's high-water seq when it has moved past `cursor` (HTTP
+    /// 200); `nil` when the server held the request for `timeout` seconds
+    /// and nothing new arrived (HTTP 204). The request timeout is longer
+    /// than the server hold so a quiet 204 is not a client-side timeout.
+    /// 400 and 401 surface as `FinanceSyncError` like every other call.
+    func wait(cursor: Int64, timeout: TimeInterval = 25) async throws -> Int64? {
+        let seconds = max(0, timeout)
+        let (data, http) = try await performRaw(
+            method: "GET", path: "v1/sync/wait",
+            query: [
+                URLQueryItem(name: "cursor", value: String(max(cursor, 0))),
+                URLQueryItem(name: "timeout", value: Self.timeoutQuery(seconds)),
+            ],
+            timeoutInterval: seconds + 10)
+        if http.statusCode == 204 { return nil }
+        return try decode(SyncHeadResponse.self, from: data).highWaterSeq
+    }
+
+    /// `25` for whole seconds, a short decimal for tests that hold the
+    /// fake server for a fraction of a second.
+    private static func timeoutQuery(_ seconds: TimeInterval) -> String {
+        if seconds < 10_000, seconds == seconds.rounded() {
+            return String(Int(seconds))
+        }
+        return String(seconds)
+    }
+
     /// GET /v1/backup/export — every live row of the user as one
     /// backup-v5 document read in a single snapshot, plus the change
     /// stream position of that snapshot: pulling from `cursor == syncSeq`
@@ -186,11 +214,13 @@ struct FinanceSyncAPIClient: Sendable {
         path: String,
         query: [URLQueryItem] = [],
         body: Data? = nil,
-        idempotencyKey: String? = nil
+        idempotencyKey: String? = nil,
+        timeoutInterval: TimeInterval? = nil
     ) async throws -> Data {
         try await performRaw(
             method: method, path: path, query: query,
-            body: body, idempotencyKey: idempotencyKey).0
+            body: body, idempotencyKey: idempotencyKey,
+            timeoutInterval: timeoutInterval).0
     }
 
     /// Performs the request with the Bearer header; on a 401 refreshes
@@ -201,7 +231,8 @@ struct FinanceSyncAPIClient: Sendable {
         path: String,
         query: [URLQueryItem] = [],
         body: Data? = nil,
-        idempotencyKey: String? = nil
+        idempotencyKey: String? = nil,
+        timeoutInterval: TimeInterval? = nil
     ) async throws -> (Data, HTTPURLResponse) {
         var token = try await accessToken()
         for attempt in 0...1 {
@@ -213,6 +244,7 @@ struct FinanceSyncAPIClient: Sendable {
 
             var request = URLRequest(url: url)
             request.httpMethod = method
+            if let timeoutInterval { request.timeoutInterval = timeoutInterval }
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             if let body {
                 request.httpBody = body
@@ -242,6 +274,10 @@ struct FinanceSyncAPIClient: Sendable {
                 throw FinanceSyncError.transport("Phản hồi không hợp lệ.")
             }
             return (data, http)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         } catch let error as FinanceSyncError {
             throw error
         } catch {

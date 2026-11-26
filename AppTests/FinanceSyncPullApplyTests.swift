@@ -281,11 +281,12 @@ struct FinanceSyncPullApplyTests {
 
     // MARK: - Main-context visibility
 
-    /// Measured: SwiftData does not push a background save's property
-    /// updates into instances the main context already holds (only a later
-    /// main-context fetch does). The coordinator wires
-    /// `FinanceSyncMainContextRefresher` onto the engine; it runs before
-    /// `syncOnce` returns, so the screen is current right after the cycle.
+    /// The coordinator wires `FinanceSyncMainContextRefresher` onto the
+    /// engine; it runs before `syncOnce` returns, so the registered
+    /// object is current AND its observers have fired right after the
+    /// cycle. The re-fetch alone updates values without Observation —
+    /// the refresher re-assigns the synced properties through their
+    /// setters (inside `asEngine`, so the save is not a user edit).
     @Test func mainContextSeesAppliedEditRightAfterTheCycle() async throws {
         let pair = try await makePair()
         await FinanceSyncMainContextRefresher.install(
@@ -312,24 +313,60 @@ struct FinanceSyncPullApplyTests {
         #expect(report.applied == 1)
 
         // No fetch in between: the already-displayed object itself is
-        // current.
+        // current, and the setter pass notified the observer that was
+        // watching `amount` (a row view holding the object redraws).
         #expect(shown.amount == 77_000)
         #expect(shown.note == "sửa trên web")
+        #expect(report.pushedUpserts == 0)
         try await Task.sleep(for: .milliseconds(300))
-        // Measured: the refresher's re-fetch updates the values in place
-        // but does NOT fire Observation for the registered instance, so a
-        // row view holding it may stay stale until something else
-        // re-renders it. Online-only stage 2 makes observers fire.
-        withKnownIssue(
-            "re-fetch updates values without notifying observers",
-            isIntermittent: true
-        ) {
-            #expect(observed.value)
-        }
+        #expect(observed.value)
         let fetched = try #require(try mainContext.fetch(
             FetchDescriptor<LedgerTransaction>(
                 predicate: #Predicate { $0.id == id })).first)
         #expect(fetched.amount == 77_000)
+    }
+
+    /// Inserts and deletes merge into the main context with the engine's
+    /// save, so a `@Query`-style fetch sees them as soon as the cycle
+    /// returns — including a row the main context had already loaded.
+    @Test func mainContextFetchSeesInsertAndDeleteRightAfterTheCycle() async throws {
+        let pair = try await makePair()
+        await FinanceSyncMainContextRefresher.install(
+            on: pair.b.engine, container: pair.b.container)
+        let mainContext = pair.b.container.mainContext
+        let removedID = pair.ids.bigIncomeTx
+        let doomed = try mainContext.fetch(FetchDescriptor<LedgerTransaction>(
+            predicate: #Predicate { $0.id == removedID }))
+        #expect(doomed.count == 1)
+
+        guard case .object(var fields)? = pair.server.row(
+            entity: "transaction", id: pair.ids.expenseTx)?.data
+        else {
+            Issue.record("seed transaction missing")
+            return
+        }
+        let newID = UUID()
+        fields["id"] = .string(newID.uuidString)
+        fields["amount"] = .int(8_000)
+        fields["note"] = .string("mới từ web")
+        fields.removeValue(forKey: "externalID")
+        pair.server.putRecord(
+            entity: "transaction", id: newID, data: .object(fields))
+        pair.server.putRecord(
+            entity: "transaction", id: removedID, deleted: true, data: nil)
+
+        let report = try await pair.b.engine.syncOnce()
+        #expect(report.applied >= 1)
+        #expect(report.deletedLocally == 1)
+
+        let gone = try mainContext.fetch(FetchDescriptor<LedgerTransaction>(
+            predicate: #Predicate { $0.id == removedID }))
+        #expect(gone.isEmpty)
+        let inserted = try mainContext.fetch(FetchDescriptor<LedgerTransaction>(
+            predicate: #Predicate { $0.id == newID }))
+        #expect(inserted.count == 1)
+        #expect(inserted.first?.amount == 8_000)
+        #expect(inserted.first?.note == "mới từ web")
     }
 
     @Test func mainContextRefreshCoversEveryRegisteredEntity() async throws {

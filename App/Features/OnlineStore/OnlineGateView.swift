@@ -7,12 +7,18 @@ import SwiftUI
 struct OnlineGate<Content: View>: View {
     let store: OnlineStore
     @ViewBuilder var content: () -> Content
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
             switch store.phase {
             case .ready:
                 content()
+                    .overlay {
+                        if !store.isOnline {
+                            OnlineOfflineOverlay()
+                        }
+                    }
                     .alert(
                         "Dữ liệu cũ trên iPhone",
                         isPresented: Binding(
@@ -22,6 +28,16 @@ struct OnlineGate<Content: View>: View {
                         Button("Đã hiểu", role: .cancel) {}
                     } message: {
                         Text(store.legacyNotice ?? "")
+                    }
+                    .alert(
+                        store.rejectionMessage ?? "Máy chủ từ chối thay đổi",
+                        isPresented: Binding(
+                            get: { store.rejectionMessage != nil },
+                            set: { if !$0 { store.dismissRejection() } })
+                    ) {
+                        Button("Đã hiểu", role: .cancel) {}
+                    } message: {
+                        Text("Dữ liệu trên máy đã được tải lại theo máy chủ.")
                     }
             case .starting, .loading:
                 OnlineGateProgressView(
@@ -40,6 +56,33 @@ struct OnlineGate<Content: View>: View {
             }
         }
         .task { await store.start() }
+        .onAppear { store.setForeground(scenePhase == .active) }
+        .onChange(of: scenePhase) { _, phase in
+            store.setForeground(phase == .active)
+        }
+    }
+}
+
+/// Non-dismissable cover while the server cannot be reached. Taps land
+/// here, so the ledger behind it cannot be edited until a request
+/// succeeds and the store clears `isOnline`.
+private struct OnlineOfflineOverlay: View {
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+            VStack(spacing: 16) {
+                ProgressView()
+                Text("Mất kết nối máy chủ — đang thử lại…")
+                    .font(.subheadline)
+                    .multilineTextAlignment(.center)
+            }
+            .padding(24)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            .padding()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("online.offline")
     }
 }
 

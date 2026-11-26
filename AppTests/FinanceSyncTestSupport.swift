@@ -39,19 +39,28 @@ final class SyncStubProtocol: URLProtocol {
     }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+    /// Set from `stopLoading` so a wait that wakes a moment too late does
+    /// not call the client after the load was cancelled.
+    private var stopped = false
+
     override func startLoading() {
         guard let server = Self.server(for: request.url?.host) else {
             client?.urlProtocol(self, didFailWithError: URLError(.unknown))
             return
         }
         // IMPORTANT: never block inside startLoading — the loader queue
-        // is serial for the whole process, so a parked pull would stall
-        // every other stubbed request until the 60s request timeout.
-        // The hold seam parks the DELIVERY instead: the load stays open
-        // asynchronously and the server replays `deliver` on release.
+        // is serial for the whole process, so a parked pull (or a
+        // long-poll wait) would stall every other stubbed request until
+        // the 60s request timeout. The hold seams park the DELIVERY
+        // instead: the load stays open asynchronously and the server
+        // replays `deliver` on release, on a write, or on timeout.
         let deliver = { [weak self] in
-            guard let self else { return }
+            guard let self, !self.stopped else { return }
             self.deliver(server: server)
+        }
+        if server.parkWaitIfNeeded(
+            request, token: ObjectIdentifier(self), deliver: deliver) {
+            return
         }
         if server.holdIfArmed(request, deliver: deliver) { return }
         deliver()
@@ -69,7 +78,11 @@ final class SyncStubProtocol: URLProtocol {
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        stopped = true
+        SyncStubProtocol.server(for: request.url?.host)?
+            .cancelWait(token: ObjectIdentifier(self))
+    }
 }
 
 struct FixedTokenProvider: WalletLinkAccessTokenProviding {
@@ -151,6 +164,14 @@ final class FakeSyncServer: @unchecked Sendable {
     private(set) var exportCount = 0
     /// `GET /v1/sync/head` requests answered.
     private(set) var headCount = 0
+    /// `GET /v1/sync/wait` requests accepted (parked or answered).
+    private(set) var waitCount = 0
+    /// Added to the high-water advertised by wait, so a test can force a
+    /// 200 when the stream has not actually moved (the empty-pull guard).
+    var waitSeqOffset: Int64 = 0
+    /// Path suffixes whose requests throw `URLError.networkConnectionLost`
+    /// instead of answering HTTP — a dead network, not a status code.
+    private var transportPaths: Set<String> = []
     /// The `cursor` of every pull request, in order.
     private(set) var pullCursors: [Int64] = []
     /// Export seams: omit the body's `syncSeq` (header fallback) or
@@ -161,6 +182,19 @@ final class FakeSyncServer: @unchecked Sendable {
     func setFailure(pathSuffix: String, status: Int?) {
         lock.lock()
         failingPaths[pathSuffix] = status
+        lock.unlock()
+    }
+
+    /// While enabled, matching requests fail at the transport layer
+    /// (`URLError.networkConnectionLost`) — the offline path, as opposed
+    /// to `setFailure`'s HTTP status.
+    func setTransportFailure(pathSuffix: String, enabled: Bool) {
+        lock.lock()
+        if enabled {
+            transportPaths.insert(pathSuffix)
+        } else {
+            transportPaths.remove(pathSuffix)
+        }
         lock.unlock()
     }
 
@@ -214,6 +248,118 @@ final class FakeSyncServer: @unchecked Sendable {
         for deliver in deliveries { deliver() }
     }
 
+    // MARK: - Long-poll (`GET /v1/sync/wait`)
+
+    /// A parked wait. `fired` is set under `lock` by whichever of wake,
+    /// timeout or cancel happens first; only wake and timeout deliver.
+    private final class Waiter {
+        let token: ObjectIdentifier
+        let cursor: Int64
+        let deliver: () -> Void
+        var fired = false
+        var timer: DispatchSourceTimer?
+        init(
+            token: ObjectIdentifier, cursor: Int64,
+            deliver: @escaping () -> Void
+        ) {
+            self.token = token
+            self.cursor = cursor
+            self.deliver = deliver
+        }
+    }
+
+    private var waiters: [Waiter] = []
+
+    /// Parks a wait that cannot be answered yet. Returns false when the
+    /// request should be answered (or failed) immediately — the caller
+    /// delivers on the loader thread. Never blocks.
+    func parkWaitIfNeeded(
+        _ request: URLRequest,
+        token: ObjectIdentifier,
+        deliver: @escaping () -> Void
+    ) -> Bool {
+        guard request.url?.path.hasSuffix("/v1/sync/wait") == true,
+              let url = request.url
+        else { return false }
+        let query = URLComponents(
+            url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let cursor = Int64(query.first { $0.name == "cursor" }?.value ?? "") ?? 0
+        let timeout = Double(query.first { $0.name == "timeout" }?.value ?? "") ?? 25
+        lock.lock()
+        waitCount += 1
+        let failNow = transportPaths.contains { url.path.hasSuffix($0) }
+            || failingPaths.contains { url.path.hasSuffix($0.key) }
+        let ready = nextSeq + waitSeqOffset > cursor
+        if failNow || ready {
+            lock.unlock()
+            return false
+        }
+        let waiter = Waiter(token: token, cursor: cursor, deliver: deliver)
+        waiters.append(waiter)
+        lock.unlock()
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        timer.schedule(deadline: .now() + max(timeout, 0))
+        timer.setEventHandler { [weak self, weak waiter] in
+            guard let self, let waiter else { return }
+            self.fire(waiter)
+        }
+        waiter.timer = timer
+        timer.resume()
+        return true
+    }
+
+    func cancelWait(token: ObjectIdentifier) {
+        lock.lock()
+        let matches = waiters.filter { $0.token == token && !$0.fired }
+        for waiter in matches { waiter.fired = true }
+        waiters.removeAll { $0.fired }
+        lock.unlock()
+        for waiter in matches { waiter.timer?.cancel() }
+    }
+
+    private func fire(_ waiter: Waiter) {
+        lock.lock()
+        guard !waiter.fired else { lock.unlock(); return }
+        waiter.fired = true
+        waiters.removeAll { $0 === waiter }
+        lock.unlock()
+        waiter.timer?.cancel()
+        waiter.deliver()
+    }
+
+    /// Answers every parked wait whose cursor the stream has passed.
+    /// Called after the lock is released — `deliver` re-enters `handle`.
+    private func wakeWaits() {
+        lock.lock()
+        let ready = waiters.filter {
+            !$0.fired && nextSeq + waitSeqOffset > $0.cursor
+        }
+        for waiter in ready { waiter.fired = true }
+        waiters.removeAll { $0.fired }
+        lock.unlock()
+        for waiter in ready {
+            waiter.timer?.cancel()
+            waiter.deliver()
+        }
+    }
+
+    /// 200 `{"high_water_seq": M}` when M > cursor, otherwise 204.
+    /// Called with `lock` held.
+    private func handleWait(
+        _ request: URLRequest
+    ) throws -> (HTTPURLResponse, Data) {
+        let url = request.url!
+        let query = URLComponents(
+            url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let cursor = Int64(query.first { $0.name == "cursor" }?.value ?? "") ?? 0
+        let advertised = nextSeq + waitSeqOffset
+        if advertised > cursor {
+            let payload: [String: Int64] = ["high_water_seq": advertised]
+            return (http(url), try JSONEncoder().encode(payload))
+        }
+        return (http(url, status: 204), Data())
+    }
+
     /// Unique host so parallel test suites cannot clobber each other's
     /// fake — `syncTestClient(for:)` addresses `baseURL`.
     let host: String
@@ -254,11 +400,13 @@ final class FakeSyncServer: @unchecked Sendable {
         data: SyncJSONValue?
     ) -> Int64 {
         lock.lock()
-        defer { lock.unlock() }
         nextSeq += 1
         rows[ServerKey(entity: entity, id: id)] =
             ServerRow(seq: nextSeq, deleted: deleted, data: data)
-        return nextSeq
+        let seq = nextSeq
+        lock.unlock()
+        wakeWaits()
+        return seq
     }
 
     /// Queues a server-side write committed just before the next
@@ -276,10 +424,21 @@ final class FakeSyncServer: @unchecked Sendable {
     func handle(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
         let url = request.url!
         lock.lock()
-        defer { lock.unlock() }
+        let seqBefore = nextSeq
+        defer {
+            let changed = nextSeq != seqBefore
+            lock.unlock()
+            if changed { wakeWaits() }
+        }
+        for suffix in transportPaths where url.path.hasSuffix(suffix) {
+            throw URLError(.networkConnectionLost)
+        }
         for (suffix, status) in failingPaths where url.path.hasSuffix(suffix) {
             return (http(url, status: status),
                     Data(#"{"error":"internal"}"#.utf8))
+        }
+        if url.path.hasSuffix("/v1/sync/wait") {
+            return try handleWait(request)
         }
         if url.path.hasSuffix("/v1/sync/pull") {
             return try handlePull(request)

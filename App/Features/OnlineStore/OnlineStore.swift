@@ -30,6 +30,13 @@ final class OnlineStore {
     private(set) var signInError: String?
     /// One-time notice about the legacy migration, shown once ready.
     private(set) var legacyNotice: String?
+    /// False while a wait/push/pull cannot reach the server. The gate
+    /// draws a blocking overlay until a request succeeds again.
+    private(set) var isOnline = true
+    /// "Máy chủ từ chối thay đổi: …" after a rejected push, once the
+    /// store has been reloaded to server truth. Nil when there is
+    /// nothing to tell the user.
+    private(set) var rejectionMessage: String?
 
     var isReady: Bool { phase == .ready }
 
@@ -37,17 +44,23 @@ final class OnlineStore {
     private let api: FinanceSyncAPIClient
     private let bootstrap: FinanceSyncBootstrap
     private let migrator: LegacyStoreMigrator?
+    private let coordinator: FinanceSyncCoordinator?
     private let isSignedIn: @Sendable () async -> Bool
     private let performSignIn: @MainActor () async throws -> Void
     private let afterLoad: @MainActor () async -> Void
     private var started = false
     private var running = false
+    private var reloading = false
+    /// The scene is in the foreground. Updated by the gate; assumed true
+    /// until the first scene-phase callback so a launch starts the loop.
+    private var foreground = true
 
     init(
         container: ModelContainer,
         api: FinanceSyncAPIClient,
         bootstrap: FinanceSyncBootstrap,
         migrator: LegacyStoreMigrator? = nil,
+        coordinator: FinanceSyncCoordinator? = nil,
         isSignedIn: @escaping @Sendable () async -> Bool,
         signIn: @escaping @MainActor () async throws -> Void,
         afterLoad: @escaping @MainActor () async -> Void = {}
@@ -56,9 +69,13 @@ final class OnlineStore {
         self.api = api
         self.bootstrap = bootstrap
         self.migrator = migrator
+        self.coordinator = coordinator
         self.isSignedIn = isSignedIn
         self.performSignIn = signIn
         self.afterLoad = afterLoad
+        if let coordinator {
+            bind(coordinator)
+        }
     }
 
     /// Entry point of the gate view — idempotent.
@@ -92,6 +109,78 @@ final class OnlineStore {
         migrator?.dismissNotice()
     }
 
+    func dismissRejection() {
+        rejectionMessage = nil
+    }
+
+    /// The gate reports scene activity. Leaving the foreground cancels
+    /// the long-poll; returning starts it again and runs a cycle
+    /// immediately so edits made on the web while backgrounded show up
+    /// without waiting out the previous hold.
+    func setForeground(_ active: Bool) {
+        let returning = active && !foreground
+        foreground = active
+        guard coordinator?.instantWrites == true else { return }
+        if active, isReady {
+            coordinator?.startLiveUpdates()
+            if returning {
+                Task { await self.coordinator?.syncNow() }
+            }
+        } else if !active {
+            coordinator?.stopLiveUpdates()
+        }
+    }
+
+    func setOnline(_ online: Bool) {
+        if isOnline != online { isOnline = online }
+    }
+
+    // MARK: - Online session
+
+    /// Instant pushes and the rejection/connectivity callbacks. Called
+    /// from `init` once every stored property exists.
+    private func bind(_ coordinator: FinanceSyncCoordinator) {
+        coordinator.instantWrites = true
+        coordinator.onOnlineChange = { [weak self] online in
+            self?.setOnline(online)
+        }
+        coordinator.onRejectedPush = { [weak self] reason in
+            await self?.handleRejection(reason)
+        }
+    }
+
+    /// The server refused a record. Drop the diverged local row by
+    /// reloading the export — the same path as launch — and surface
+    /// `reason` (already "Máy chủ từ chối thay đổi: …") once the screen
+    /// is showing server truth again.
+    func handleRejection(_ reason: String) async {
+        guard !reloading else { return }
+        reloading = true
+        defer { reloading = false }
+        coordinator?.stopLiveUpdates()
+        phase = .loading
+        do {
+            let snapshot = try await api.exportSnapshot()
+            try await bootstrap.loadOnline(snapshot: snapshot)
+            LedgerBalanceStores.shared(for: container).invalidate()
+            await afterLoad()
+            rejectionMessage = reason
+            phase = .ready
+            restartLiveUpdates()
+        } catch FinanceSyncError.unauthorized {
+            phase = .signedOut
+        } catch {
+            phase = .failed(Self.text(for: error))
+        }
+    }
+
+    private func restartLiveUpdates() {
+        guard let coordinator, coordinator.instantWrites, isReady, foreground else {
+            return
+        }
+        coordinator.startLiveUpdates()
+    }
+
     // MARK: - Pipeline
 
     private func evaluate() async {
@@ -118,6 +207,7 @@ final class OnlineStore {
             await afterLoad()
             legacyNotice = migrator?.pendingNotice
             phase = .ready
+            restartLiveUpdates()
         } catch FinanceSyncError.unauthorized {
             phase = .signedOut
         } catch {
@@ -152,6 +242,7 @@ extension OnlineStore {
             api: stack.api,
             bootstrap: stack.bootstrap,
             migrator: fakeServer ? nil : LegacyStoreMigrator(api: stack.api),
+            coordinator: stack.coordinator,
             isSignedIn: stack.isSignedIn,
             signIn: signIn,
             afterLoad: { await stack.coordinator.refreshState() })

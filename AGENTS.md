@@ -157,8 +157,8 @@ workers know what already exists. Pushed views must not create their own
   launch runs it over an in-memory app store AND an in-memory shadow —
   `FinanceSyncCoordinator.makeStack(inMemoryShadow: true)`, no
   `FinanceSync.store` file is opened; `FinanceSyncBootstrap.loadOnline`
-  is the launch load and `FinanceSyncAPIClient.exportSnapshot()`/`head()`
-  its server calls — see `OnlineStore/`): `FinanceSyncEngine`
+  is the launch load and `FinanceSyncAPIClient.exportSnapshot()`/`head()`/
+  `wait(cursor:timeout:)` its server calls — see `OnlineStore/`): `FinanceSyncEngine`
   (`actor` owning a background `ModelContext` — `syncOnce(fullScan:)` pulls from the
   shadow cursor with parent-before-child deferred resolution, then
   diffs local content hashes vs the shadow and pushes `SyncBatcher`
@@ -220,7 +220,9 @@ workers know what already exists. Pushed views must not create their own
   App wiring: `FinanceSyncCoordinator` (@MainActor @Observable,
   single-flight `syncNow`/`syncIfStale`, `enable(mode:)` via the
   bootstrap, `pause()`/`resume()`/`disconnect()`, the ~3 s debounced
-  local-save trigger and Vietnamese `errorText`) is created once in
+  local-save trigger — instant, no debounce, while `instantWrites` is on
+  (online mode; saves during a cycle coalesce into one follow-up) — and
+  Vietnamese `errorText`) is created once in
   `AMFinanceApp` and injected via `.environment(\.financeSync)` —
   under `-uiTestInMemoryStore` WITHOUT `-uiTestFakeSyncServer` the
   coordinator is not created at all (like `WalletSyncCoordinator`), so
@@ -238,8 +240,13 @@ workers know what already exists. Pushed views must not create their own
   Only USER saves trigger the auto-sync (`FinanceSyncSaveFilter`:
   engine-origin thread mark + synced-entity names + container), and
   `FinanceSyncMainContextRefresher` re-fetches overwritten rows the main
-  context holds after each applied page (its observation gap is a known
-  issue in `FinanceSyncPullApplyTests`, for stage 2).
+  context holds after each applied page, then writes the synced
+  properties back through their setters and saves inside
+  `FinanceSyncSaveFilter.asEngine` so Observation fires without
+  scheduling a push. In online mode the coordinator also long-polls
+  `GET /v1/sync/wait` while the scene is active (`isOnline` drops on a
+  transport failure; a `422` sets `rejectionReloadPending` and the store
+  reloads from the export).
   `BackgroundRefreshRunner` runs the web sync as a second
   `BackgroundRefreshSyncing` step behind the same seam.
   `FinanceSyncUITestSupport` is the DEBUG-only `-uiTestFakeSyncServer`
@@ -252,13 +259,16 @@ workers know what already exists. Pushed views must not create their own
 - `OnlineStore/` — the online-only launch (stage 1; the web server IS the
   backend, nothing is persisted locally). `OnlineStore` (@MainActor
   @Observable; phases `starting → signedOut → migratingLegacy → loading →
-  ready | failed(text)`, `signIn()`/`retry()`) is created in `AMFinanceApp`
+  ready | failed(text)`, `isOnline`, `rejectionMessage`, `signIn()`/`retry()`) is created in `AMFinanceApp`
   for every real launch (and for `-uiTestInMemoryStore -uiTestFakeSyncServer
   -uiTestOnline`, DEBUG) over an in-memory app container with NO
   `SeedData` and an in-memory shadow; `OnlineGate` (`OnlineGateView`) shows
   `RootTabView` — and so recurring/reminder/wallet-sync activation — ONLY
   in `ready`, else sign-in (client-id field when WalletLink is not
-  configured) / loading / error + "Thử lại". Load = `GET /v1/backup/export`
+  configured) / loading / error + "Thử lại". While `ready` but offline
+  the gate covers the tabs with "Mất kết nối máy chủ — đang thử lại…".
+  A rejected push (`422`) reloads this same path and alerts
+  "Máy chủ từ chối thay đổi: …". Load = `GET /v1/backup/export`
   (`FinanceSyncSnapshot`: document + `syncSeq`, body wins over
   `X-Sync-Seq`) → `FinanceSyncBootstrap.loadOnline`: `.replace` restore
   inside `FinanceSyncSaveFilter.asEngine`, shadow = local hashes at cursor

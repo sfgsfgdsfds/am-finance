@@ -280,12 +280,11 @@ actor FinanceSyncBootstrap {
             + document.rentalLeases.count
         let brandNew = snapshot.syncSeq == 0 && rowCount == 0
 
-        let restored = try FinanceSyncSaveFilter.asEngine {
-            let result = try BackupRestorer.restore(
-                document, mode: .replace, into: context)
-            if brandNew { try SeedData.seedIfNeeded(context: context) }
-            return result
-        }
+        // The engine's context, not this bootstrap's: a reload after a
+        // rejected push has to forget the rows the engine already
+        // registered, or the reconcile diff would push them again.
+        let restored = try await engine.replaceAll(
+            document, seedIfEmpty: brandNew)
         report.restoreInserted = restored.inserted
         report.restoreUpdated = restored.updated
         report.restoreSkipped = restored.skipped
