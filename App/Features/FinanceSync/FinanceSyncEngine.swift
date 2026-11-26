@@ -142,7 +142,13 @@ actor FinanceSyncEngine {
     let pullLimit: Int
     /// The engine's own context on `modelContainer` — every fetched row,
     /// applied DTO and tombstone delete happens here, off the main actor.
-    private let context: ModelContext
+    /// Replaced with a fresh context at the start of each cycle
+    /// (`adoptFreshContext`) so a user save committed on the main context
+    /// is visible immediately. A context kept across cycles keeps the
+    /// objects it already registered, and SwiftData does not refresh
+    /// their values from another context's save — a quick scan would
+    /// then miss the edit and the push would never happen.
+    private var context: ModelContext
 
     /// `409` pull+retry rounds per `syncOnce` before the cycle fails.
     static let maxConflictRounds = 3
@@ -213,6 +219,27 @@ actor FinanceSyncEngine {
         changedRowObservers.append(observer)
     }
 
+    /// Replaces every row in this engine's context with `document` (and
+    /// seeds an empty document when `seedIfEmpty`). Used by the online
+    /// load, including a rejection reload: restoring here — not on a
+    /// second context — drops the rows this actor already has registered,
+    /// so the next diff cannot push a copy the server just refused.
+    /// The save is engine-tagged and does not schedule a user sync.
+    func replaceAll(
+        _ document: BackupDocument, seedIfEmpty: Bool
+    ) throws -> BackupRestoreResult {
+        adoptFreshContext()
+        let result = try FinanceSyncSaveFilter.asEngine {
+            let restored = try BackupRestorer.restore(
+                document, mode: .replace, into: context)
+            if seedIfEmpty { try SeedData.seedIfNeeded(context: context) }
+            return restored
+        }
+        maps = BackupRowMaps()
+        pendingRefs.removeAll()
+        return result
+    }
+
     /// One sync cycle — see the type docstring for the four steps.
     /// `fullScan: true` forces a FULL local hash pass for the diff; the
     /// default is QUICK when the persisted markers allow it.
@@ -221,6 +248,7 @@ actor FinanceSyncEngine {
         guard !inFlight else { throw FinanceSyncEngineError.alreadyRunning }
         inFlight = true
         defer { inFlight = false }
+        adoptFreshContext()
         let started = ContinuousClock.now
         var report = FinanceSyncReport()
         do {
@@ -877,6 +905,15 @@ actor FinanceSyncEngine {
         case .rentalUnit: maps.rentalUnits.removeValue(forKey: key.id)
         case .rentalLease: maps.rentalLeases.removeValue(forKey: key.id)
         }
+    }
+
+    /// Drops every registered object so the next fetch reads the store,
+/// including edits another context committed a moment ago.
+    private func adoptFreshContext() {
+        let context = ModelContext(modelContainer)
+        context.autosaveEnabled = false
+        self.context = context
+        maps = BackupRowMaps()
     }
 
     private func notifyLocalStoreChanged() {

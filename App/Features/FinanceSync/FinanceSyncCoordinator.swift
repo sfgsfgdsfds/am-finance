@@ -70,6 +70,26 @@ final class FinanceSyncCoordinator {
     /// The next sync must run a FULL scan — set by `.dataResetCompleted`,
     /// whose wipe+reseed the QUICK scan's `updatedAt` window must not trust.
     private var pendingFullScan = false
+    /// Online-only: a user save starts a cycle immediately, and a `422`
+    /// quarantines the row only long enough to reload server truth.
+    var instantWrites = false
+    /// False after a wait/push/pull transport failure, until a request
+    /// succeeds. The online gate blocks editing while this is false.
+    private(set) var isOnline = true
+    /// "Máy chủ từ chối thay đổi: …" — set when an online push is rejected.
+    private(set) var rejectionReason: String?
+    /// A rejected online push must reload the store once the coalesced
+    /// follow-up has had a chance to send the edits that were valid.
+    private var rejectionReloadPending = false
+    /// Fired on the offline/online transition. The online store mirrors
+    /// `isOnline` onto the gate.
+    var onOnlineChange: (@MainActor (Bool) -> Void)?
+    /// Fired once after a cycle (and its coalesced follow-up) quarantined
+    /// at least one record while `instantWrites` is on. The argument is
+    /// the alert text. The online store reloads from the export.
+    var onRejectedPush: (@MainActor (String) async -> Void)?
+    private var liveTask: Task<Void, Never>?
+    private var liveGeneration = 0
     /// The shadow state has been read at least once — `performSync`
     /// refreshes once before gating so an early trigger after launch is
     /// not dropped by a still-unloaded `enabled`.
@@ -79,8 +99,18 @@ final class FinanceSyncCoordinator {
     private var saveCenter: NotificationCenter = .default
 
     /// Debounce between a local save and the auto-sync it triggers —
-    /// coalesces bursts of edits; tests shrink it.
+    /// coalesces bursts of edits; tests shrink it. Ignored while
+    /// `instantWrites` is on (online mode pushes on the save itself).
     var localSaveDebounce: Duration = .seconds(3)
+    /// Long-poll hold passed to `GET /v1/sync/wait`. Tests shrink it.
+    var liveWaitTimeout: TimeInterval = 25
+    /// First pause after a wait/push/pull transport failure. Doubles up
+    /// to `liveBackoffMaximum`.
+    var liveBackoffInitial: Duration = .seconds(1)
+    var liveBackoffMaximum: Duration = .seconds(30)
+    /// After a wait that reported new seqs but the cycle pulled nothing —
+    /// keeps a server that answers 200 instantly from spinning.
+    var liveEmptyPullDelay: Duration = .seconds(1)
     /// `syncIfStale` window — a fresher `lastSyncAt` skips the cycle.
     var staleInterval: TimeInterval = 60
 
@@ -152,13 +182,35 @@ final class FinanceSyncCoordinator {
     /// the in-flight run's result. Returns false without side effects
     /// when disabled or signed out. `fullScan` forces a FULL local hash
     /// pass — the manual "Đồng bộ ngay".
+    ///
+    /// A save that landed mid-cycle (`pendingLocalSave`) becomes exactly
+    /// one follow-up: an immediate `syncNow` in online mode, a fresh
+    /// debounce otherwise. The follow-up runs only after `inFlight` is
+    /// cleared, so it cannot piggyback on the cycle that already passed
+    /// its diff.
     @discardableResult
     func syncNow(fullScan: Bool = false) async -> Bool {
         if let inFlight { return await inFlight.value }
         let task = Task { await performSync(fullScan: fullScan) }
         inFlight = task
-        defer { inFlight = nil }
-        return await task.value
+        let result = await task.value
+        inFlight = nil
+        if pendingLocalSave, enabled, !isBootstrapping {
+            pendingLocalSave = false
+            if instantWrites {
+                _ = await syncNow()
+            } else {
+                armDebounce()
+            }
+        }
+        if rejectionReloadPending {
+            rejectionReloadPending = false
+            await refreshState()
+            let reason = Self.rejectionText(quarantined)
+            rejectionReason = reason
+            await onRejectedPush?(reason)
+        }
+        return result
     }
 
     /// Sync only when the last successful sync is older than the window
@@ -172,14 +224,18 @@ final class FinanceSyncCoordinator {
         return await syncNow()
     }
 
-    /// Debounced sync after a local save: every save re-arms a ~3 s
-    /// timer so a burst of edits costs one cycle. Saves arriving
-    /// mid-cycle arm a single follow-up pass instead — the run they
-    /// landed in may already be past its diff phase.
+    /// Sync after a local save. Online mode (`instantWrites`) starts a
+    /// cycle on the save itself — no debounce. Either way, saves that
+    /// land while a cycle is in flight collapse into one follow-up
+    /// (`pendingLocalSave`) instead of a loop.
     func noteLocalSave() {
         guard enabled, !isBootstrapping else { return }
-        if isSyncing {
+        if inFlight != nil || isSyncing {
             pendingLocalSave = true
+            return
+        }
+        if instantWrites {
+            Task { [weak self] in await self?.syncNow() }
             return
         }
         armDebounce()
@@ -314,23 +370,31 @@ final class FinanceSyncCoordinator {
         guard await isSignedIn() else { return false }
         isSyncing = true
         let succeeded: Bool
+        var reportQuarantined = 0
         do {
             let scan = fullScan || pendingFullScan
             let report = try await engine.syncOnce(fullScan: scan)
             pendingFullScan = false
             lastReport = report
             lastError = nil
+            reportQuarantined = report.quarantined
             succeeded = true
         } catch {
-            lastError = Self.errorText(error)
+            if !Self.isCancellation(error) {
+                lastError = Self.errorText(error)
+                if Self.isNetwork(error) { setOnline(false) }
+            }
             succeeded = false
         }
         isSyncing = false
-        if pendingLocalSave {
-            // A save landed mid-cycle — schedule one follow-up so it
-            // does not wait for the next timer or edit.
-            pendingLocalSave = false
-            armDebounce()
+        if succeeded {
+            setOnline(true)
+            if instantWrites, reportQuarantined > 0 {
+                // Consumed by `syncNow` after a coalesced follow-up, so a
+                // valid edit saved during this cycle still reaches the
+                // server before the reload throws the rejected row away.
+                rejectionReloadPending = true
+            }
         }
         await refreshState()
         return succeeded
@@ -362,6 +426,126 @@ final class FinanceSyncCoordinator {
         pendingFullScan = true
         if lastReport != nil { lastReport = nil }
         Task { await self.refreshState() }
+    }
+
+    private func setOnline(_ online: Bool) {
+        guard isOnline != online else { return }
+        isOnline = online
+        onOnlineChange?(online)
+    }
+
+    /// Alert copy for a rejected online push. `entries` is the shadow's
+    /// quarantine list (already refreshed).
+    static func rejectionText(_ entries: [SyncQuarantineSnapshot]) -> String {
+        let messages = entries.map(\.message).filter { !$0.isEmpty }
+        let detail = messages.isEmpty
+            ? "dữ liệu không hợp lệ"
+            : messages.joined(separator: "; ")
+        return "Máy chủ từ chối thay đổi: \(detail)"
+    }
+
+    static func isNetwork(_ error: Error) -> Bool {
+        if isCancellation(error) { return false }
+        if let syncError = error as? FinanceSyncError {
+            if case .transport = syncError { return true }
+            return false
+        }
+        return error is URLError
+    }
+
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return true
+        }
+        return false
+    }
+
+    // MARK: - Live updates
+
+    /// One long-poll loop. No-op when one is already running. Online mode
+    /// starts it while the scene is active and the store is ready; leaving
+    /// the foreground cancels it (`stopLiveUpdates`).
+    func startLiveUpdates() {
+        guard liveTask == nil else { return }
+        let generation = liveGeneration
+        liveTask = Task { [weak self] in
+            await self?.runLiveUpdates(generation: generation)
+        }
+    }
+
+    /// Cancels the long-poll. An in-flight cycle is left to finish — the
+    /// wait itself is what gets cancelled. A later `startLiveUpdates`
+    /// begins a fresh loop; the old one exits because its generation no
+    /// longer matches.
+    func stopLiveUpdates() {
+        liveGeneration += 1
+        liveTask?.cancel()
+        liveTask = nil
+    }
+
+    /// Waits on the shadow pull cursor. 200 → one cycle, then loop; 204 →
+    /// loop; a transport failure marks the connection offline and backs
+    /// off from `liveBackoffInitial` to `liveBackoffMaximum`. A 200 whose
+    /// cycle pulled nothing sleeps `liveEmptyPullDelay` so an instant
+    /// answer cannot spin. Coming back online always runs a cycle, so an
+    /// edit saved just before the drop still pushes.
+    private func runLiveUpdates(generation: Int) async {
+        var backoff = liveBackoffInitial
+        while !Task.isCancelled, liveGeneration == generation {
+            let cursor = (try? await shadow.pullCursor()) ?? 0
+            do {
+                let advanced = try await engineAPI().wait(
+                    cursor: cursor, timeout: liveWaitTimeout)
+                guard !Task.isCancelled, liveGeneration == generation else { return }
+                let wasOffline = !isOnline
+                setOnline(true)
+                backoff = liveBackoffInitial
+                if let seq = advanced, seq > cursor {
+                    let ok = await syncDetached()
+                    guard !Task.isCancelled, liveGeneration == generation else { return }
+                    if !isOnline {
+                        backoff = await sleepBackoff(backoff)
+                        continue
+                    }
+                    if !ok || (lastReport?.pulled ?? 0) == 0 {
+                        try await Task.sleep(for: liveEmptyPullDelay)
+                    }
+                } else if wasOffline {
+                    _ = await syncDetached()
+                    guard !Task.isCancelled, liveGeneration == generation else { return }
+                    if !isOnline { backoff = await sleepBackoff(backoff) }
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                if Task.isCancelled || Self.isCancellation(error)
+                    || liveGeneration != generation { return }
+                if Self.isNetwork(error) { setOnline(false) }
+                backoff = await sleepBackoff(backoff)
+            }
+        }
+    }
+
+    /// `syncNow` on its own task so cancelling the long-poll (backgrounding)
+    /// does not abort a push that is already on the wire.
+    private func syncDetached() async -> Bool {
+        await Task { @MainActor [weak self] in
+            await self?.syncNow() ?? false
+        }.value
+    }
+
+    private func engineAPI() -> FinanceSyncAPIClient {
+        engine.api
+    }
+
+    /// Sleeps the current delay and returns the next one (doubled, capped).
+    /// Cancellation ends the sleep early; the caller rechecks the task.
+    private func sleepBackoff(_ backoff: Duration) async -> Duration {
+        let doubled = backoff * 2
+        let next = doubled > liveBackoffMaximum ? liveBackoffMaximum : doubled
+        try? await Task.sleep(for: backoff)
+        return next
     }
 
     /// Vietnamese one-liner for a sync failure — the user-facing mapping
