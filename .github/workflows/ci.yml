@@ -1,0 +1,208 @@
+# AM Finance CI.
+#
+# Runner: xcode-27 (GitHub-hosted macOS 27 arm64 public preview). It ships
+# Xcode 27.2 (27B52) — the same build as the project machine — plus 27.1 and
+# 27.0. macos-latest is macOS 26 / Xcode 26.6 and is only a fallback if
+# xcode-27 cannot build this tree. The job selects the highest
+# /Applications/Xcode_*.app (skipping a same-version beta).
+#
+# Push to main runs every job. Push to ci/** reads suite=<all|unit|ui|ui1..ui4|build>
+# from the head commit message (scripts/ci.sh writes "ci: suite=<suite>").
+# workflow_dispatch defaults to all.
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "ci/**"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Suite to run
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - unit
+          - ui
+          - ui1
+          - ui2
+          - ui3
+          - ui4
+          - build
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      suite: ${{ steps.suite.outputs.suite }}
+      unit: ${{ steps.suite.outputs.unit }}
+      build: ${{ steps.suite.outputs.build }}
+      ui_matrix: ${{ steps.suite.outputs.ui_matrix }}
+    steps:
+      - name: Choose suite
+        id: suite
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          MSG: ${{ github.event.head_commit.message }}
+          INPUT: ${{ github.event.inputs.suite }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          suite=""
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            suite="${INPUT:-all}"
+          elif [ "$REF" = "refs/heads/main" ]; then
+            suite="all"
+          elif [[ "$REF" == refs/heads/ci/* ]]; then
+            if [[ "$MSG" =~ (^|[^[:alnum:]])suite=(all|unit|ui[1-4]|ui|build)([^[:alnum:]]|$) ]]; then
+              suite="${BASH_REMATCH[2]}"
+            else
+              echo "ci branch commit message has no suite= token" >&2
+              printf '%s\n' "$MSG" | head -c 400 >&2
+              echo >&2
+              exit 2
+            fi
+          else
+            echo "unexpected ref $REF" >&2
+            exit 2
+          fi
+          case "$suite" in
+            all|unit|ui|ui1|ui2|ui3|ui4|build) ;;
+            *)
+              echo "invalid suite '$suite'" >&2
+              exit 2
+              ;;
+          esac
+          unit=false
+          build=false
+          ui1=false
+          ui2=false
+          ui3=false
+          ui4=false
+          case "$suite" in
+            all)
+              unit=true
+              build=true
+              ui1=true
+              ui2=true
+              ui3=true
+              ui4=true
+              ;;
+            unit) unit=true ;;
+            build) build=true ;;
+            ui)
+              ui1=true
+              ui2=true
+              ui3=true
+              ui4=true
+              ;;
+            ui1) ui1=true ;;
+            ui2) ui2=true ;;
+            ui3) ui3=true ;;
+            ui4) ui4=true ;;
+          esac
+          shards=""
+          [ "$ui1" = true ] && shards='1'
+          [ "$ui2" = true ] && shards="${shards:+$shards,}2"
+          [ "$ui3" = true ] && shards="${shards:+$shards,}3"
+          [ "$ui4" = true ] && shards="${shards:+$shards,}4"
+          if [ -z "$shards" ]; then
+            matrix='[]'
+          else
+            matrix="[${shards}]"
+          fi
+          {
+            echo "suite=${suite}"
+            echo "unit=${unit}"
+            echo "build=${build}"
+            echo "ui_matrix=${matrix}"
+          } >> "$GITHUB_OUTPUT"
+          echo "suite=${suite} unit=${unit} build=${build} ui_matrix=${matrix}"
+
+  unit:
+    name: unit
+    needs: prepare
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.unit == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup
+        uses: ./.github/actions/macos-setup
+        with:
+          cache-key: amfinance-xcodegen-2.46.0-${{ hashFiles('scripts/bootstrap.sh', 'Packages/FinanceCore/Package.swift', 'Packages/FinanceCore/Package.resolved') }}
+      - name: FinanceCore tests
+        run: swift test --package-path Packages/FinanceCore
+      - name: App unit tests
+        run: ./scripts/test-app.sh
+      - name: Upload failure artifacts
+        if: failure()
+        uses: ./.github/actions/upload-failure
+        with:
+          name: unit-${{ github.run_id }}
+
+  ui:
+    name: ui${{ matrix.shard }}
+    needs: prepare
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.ui_matrix != '[]'
+    runs-on: xcode-27
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.ui_matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup
+        uses: ./.github/actions/macos-setup
+        with:
+          cache-key: amfinance-xcodegen-2.46.0-${{ hashFiles('scripts/bootstrap.sh', 'Packages/FinanceCore/Package.swift', 'Packages/FinanceCore/Package.resolved') }}
+      - name: UI shard ${{ matrix.shard }}
+        run: |
+          set -euo pipefail
+          filters="$(./scripts/ui-shards.sh "${{ matrix.shard }}")"
+          echo "AMFINANCE_UI_TEST_FILTERS=${filters}"
+          export AMFINANCE_UI_TEST_FILTERS="${filters}"
+          ./scripts/test-ui.sh
+      - name: Upload failure artifacts
+        if: failure()
+        uses: ./.github/actions/upload-failure
+        with:
+          name: ui${{ matrix.shard }}-${{ github.run_id }}
+
+  build:
+    name: build
+    needs: prepare
+    if: needs.prepare.result == 'success' && needs.prepare.outputs.build == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup
+        uses: ./.github/actions/macos-setup
+        with:
+          cache-key: amfinance-xcodegen-2.46.0-${{ hashFiles('scripts/bootstrap.sh', 'Packages/FinanceCore/Package.swift', 'Packages/FinanceCore/Package.resolved') }}
+      - name: Release simulator build
+        run: ./scripts/build-release.sh
+      - name: Upload failure artifacts
+        if: failure()
+        uses: ./.github/actions/upload-failure
+        with:
+          name: build-${{ github.run_id }}

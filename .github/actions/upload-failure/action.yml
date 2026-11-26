@@ -1,0 +1,60 @@
+name: Upload failure artifacts
+description: On failure, upload xcresult bundles and the temp-log tail
+inputs:
+  name:
+    description: Artifact name
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Collect xcresult and log tail
+      shell: bash
+      run: |
+        set -u
+        mkdir -p ci-artifacts
+        {
+          echo "===== xcodebuild -version ====="
+          xcodebuild -version || true
+          echo "===== DEVELOPER_DIR=${DEVELOPER_DIR:-} ====="
+          echo "===== iOS runtimes ====="
+          xcrun simctl list runtimes || true
+          echo "===== temp log tails ====="
+          shopt -s nullglob
+          logs=("${TMPDIR:-/tmp}"/amfinance-xcodebuild.* "${TMPDIR:-/tmp}"/amfinance-build-release.*)
+          if [ "${#logs[@]}" -eq 0 ]; then
+            echo "(no amfinance temp logs under ${TMPDIR:-/tmp})"
+          fi
+          for f in "${logs[@]}"; do
+            echo "----- $f -----"
+            tail -n 200 "$f" || true
+          done
+        } > ci-artifacts/log-tail.txt
+        n=0
+        search=""
+        if [ -d DerivedData ]; then
+          search="DerivedData"
+        fi
+        if [ -d build ]; then
+          search="${search} build"
+        fi
+        if [ -d "${HOME}/Library/Developer/Xcode/DerivedData" ]; then
+          search="${search} ${HOME}/Library/Developer/Xcode/DerivedData"
+        fi
+        if [ -n "$search" ]; then
+          # shellcheck disable=SC2086
+          find $search -name '*.xcresult' -prune -print 2>/dev/null | while IFS= read -r bundle; do
+            n=$((n + 1))
+            base="$(basename "$bundle" .xcresult)"
+            ditto -c -k --keepParent "$bundle" "ci-artifacts/${n}-${base}.xcresult.zip" || true
+          done
+        fi
+        find ci-artifacts -type f -print
+    - name: Upload artifact
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ inputs.name }}
+        path: ci-artifacts/
+        if-no-files-found: warn
+        retention-days: 14
+        include-hidden-files: true
+        compression-level: 1

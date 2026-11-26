@@ -50,28 +50,69 @@ am_test_lock() {
   fi
 }
 
+# Newest plain iOS runtime, then a normal iPhone. GitHub's xcode-27 image also
+# ships a device-specific seed runtime (iOS-27-2-iPhone19-4) whose only phone
+# is "iPhone Duo"; string-sorting runtimes picks that first and the smoke
+# tests miss rows that fit on a normal phone. Skip that runtime and Duo/SE.
 _pick_device() { # $1: udid to exclude (optional)
   xcrun simctl list devices available -j | python3 -c '
-import json, sys
+import json, re, sys
 exclude = sys.argv[1] or None
 try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(1)
-first = None
-for runtime, devices in sorted(data.get("devices", {}).items(), reverse=True):
+
+def plain_ios(runtime):
+    # ...SimRuntime.iOS-27-2 or iOS-27-2-1. Reject iOS-27-2-iPhone19-4.
+    m = re.search(r"iOS-(\d+(?:-\d+){0,2})$", runtime)
+    if not m:
+        return None
+    return tuple(int(p) for p in m.group(1).split("-"))
+
+def name_score(name):
+    if "Duo" in name or "SE" in name:
+        return -1
+    if re.fullmatch(r"iPhone \d+ Pro Max", name):
+        return 30
+    if re.fullmatch(r"iPhone \d+ Pro", name):
+        return 20
+    if re.fullmatch(r"iPhone \d+", name):
+        return 10
+    if "iPhone" in name:
+        return 0
+    return -1
+
+preferred = []
+fallback = []
+for runtime, devices in data.get("devices", {}).items():
     if "iOS" not in runtime:
         continue
+    version = plain_ios(runtime)
     for dev in devices:
         if not dev.get("isAvailable") or "iPhone" not in dev.get("name", ""):
             continue
-        if first is None:
-            first = dev["udid"]
-        if dev["udid"] != exclude:
-            print(dev["udid"])
-            sys.exit(0)
-if first is not None:
-    print(first)  # only device is the excluded one — reuse it
+        udid = dev["udid"]
+        name = dev.get("name", "")
+        fallback.append((udid, name, runtime))
+        score = name_score(name)
+        if version is None or score < 0 or udid == exclude:
+            continue
+        preferred.append((version, score, name, udid, runtime))
+
+if preferred:
+    preferred.sort(reverse=True)
+    version, score, name, udid, runtime = preferred[0]
+    sys.stderr.write("pick %s on %s\n" % (name, runtime))
+    print(udid)
+    sys.exit(0)
+for udid, name, runtime in fallback:
+    if udid != exclude:
+        sys.stderr.write("pick fallback %s on %s\n" % (name, runtime))
+        print(udid)
+        sys.exit(0)
+if fallback:
+    print(fallback[0][0])
     sys.exit(0)
 sys.exit(1)
 ' "$1"
