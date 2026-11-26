@@ -30,6 +30,13 @@ enum BackgroundRefreshScheduler {
     /// first scene — `BGTaskScheduler` requires registration to complete
     /// before the launch sequence finishes. There is no web-sync step:
     /// the in-memory store is not loaded in the background.
+    ///
+    /// The closure handed to `BGTaskScheduler` is built in
+    /// `installLaunchHandler`, which is `nonisolated`. A closure literal
+    /// written in this `@MainActor` function is inferred `@MainActor`
+    /// (Swift 6), and the scheduler invokes it on a background queue
+    /// (`using: nil`) — the runtime isolation check then traps
+    /// (`swift_task_isCurrentExecutor` / `SIGTRAP`).
     @MainActor
     static func registerHandler(
         container: ModelContainer,
@@ -37,17 +44,8 @@ enum BackgroundRefreshScheduler {
     ) {
         guard !didRegister, !isDisabled else { return }
         didRegister = true
-        BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: taskIdentifier, using: nil
-        ) { task in
-            guard let refresh = task as? BGAppRefreshTask else {
-                task.setTaskCompleted(success: false)
-                return
-            }
-            handle(
-                task: refresh, container: container,
-                onlineStore: onlineStore)
-        }
+        installLaunchHandler(BackgroundRefreshLaunchDependencies(
+            container: container, onlineStore: onlineStore))
     }
 
     /// Submits the next refresh, ~15 minutes out. Called on every
@@ -62,31 +60,121 @@ enum BackgroundRefreshScheduler {
         try? BGTaskScheduler.shared.submit(request)
     }
 
-    /// The refresh handler: run the housekeeping on the main actor,
-    /// re-arm, then report. On expiration the work task is cancelled —
-    /// the engine's page-by-page saves plus the runner's per-step
-    /// cancellation checks unwind quickly and never strand a half-saved
-    /// import.
-    private static func handle(
-        task: BGAppRefreshTask, container: ModelContainer,
-        onlineStore: OnlineStore?
+    /// Body of the launch handler. `nonisolated` and synchronous so a
+    /// background queue — and unit tests, via `Task.detached` — can call
+    /// it without hopping. The runner itself runs inside
+    /// `Task { @MainActor in }`. `setTaskCompleted` fires exactly once,
+    /// from whichever of the work task and the expiration handler wins;
+    /// both are safe to call off the main thread.
+    nonisolated static func handleLaunch(
+        task: any BackgroundRefreshTaskHandling,
+        run: @escaping @MainActor () async -> BackgroundRefreshRunner.Summary,
+        scheduleNext: @escaping @Sendable () -> Void
     ) {
-        let box = BackgroundTaskBox(task)
-        let work = Task { @MainActor in
-            let runner = BackgroundRefreshRunner.live(
-                container: container, onlineStore: onlineStore)
-            let summary = await runner.run()
-            scheduleNext()
-            box.task.setTaskCompleted(success: !summary.cancelled)
+        let gate = BackgroundRefreshCompletionGate { success in
+            task.setTaskCompleted(success: success)
         }
-        task.expirationHandler = { work.cancel() }
+        guard task.isAppRefresh else {
+            gate.complete(success: false)
+            return
+        }
+        let work = Task { @MainActor in
+            let summary = await run()
+            scheduleNext()
+            gate.complete(success: !summary.cancelled)
+        }
+        // `@Sendable` so this closure is not inferred `@MainActor`.
+        // The system calls it on a background queue, and it must call
+        // `setTaskCompleted` before returning — iOS kills the app
+        // otherwise. The gate drops the work task's later attempt.
+        task.setExpirationHandler { @Sendable in
+            work.cancel()
+            gate.complete(success: false)
+        }
+    }
+
+    /// Forms the system launch handler outside any actor. Do not move
+    /// this closure into `registerHandler` — see that method.
+    private nonisolated static func installLaunchHandler(
+        _ dependencies: BackgroundRefreshLaunchDependencies
+    ) {
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: taskIdentifier, using: nil
+        ) { task in
+            handleLaunch(
+                task: SystemBackgroundRefreshTask(task),
+                run: { @MainActor in
+                    let runner = BackgroundRefreshRunner.live(
+                        container: dependencies.container,
+                        onlineStore: dependencies.onlineStore)
+                    return await runner.run()
+                },
+                scheduleNext: { @Sendable in scheduleNext() }
+            )
+        }
     }
 }
 
-/// `BGTask` predates strict concurrency — the system object's completion
-/// call is safe from any queue (the expiration handler itself runs
-/// off-main), so boxing it for the runner task is honest.
-private final class BackgroundTaskBox: @unchecked Sendable {
-    let task: BGTask
-    init(_ task: BGTask) { self.task = task }
+/// The slice of `BGTask` the launch handler uses. The system object is
+/// not `Sendable` and cannot be constructed in tests.
+protocol BackgroundRefreshTaskHandling: AnyObject, Sendable {
+    var isAppRefresh: Bool { get }
+    func setExpirationHandler(_ handler: @escaping @Sendable () -> Void)
+    func setTaskCompleted(success: Bool)
+}
+
+/// Captured at registration. `OnlineStore` is main-actor isolated and is
+/// read only after the handler hops to the main actor.
+private final class BackgroundRefreshLaunchDependencies: @unchecked Sendable {
+    let container: ModelContainer
+    let onlineStore: OnlineStore?
+    init(container: ModelContainer, onlineStore: OnlineStore?) {
+        self.container = container
+        self.onlineStore = onlineStore
+    }
+}
+
+/// `BGTask` predates strict concurrency. Completion and the expiration
+/// handler are safe from any queue; the class opts out of `Sendable`
+/// checking so the nonisolated launch handler can hold the system object.
+private final class SystemBackgroundRefreshTask: BackgroundRefreshTaskHandling,
+    @unchecked Sendable {
+    private let task: BGTask
+    let isAppRefresh: Bool
+
+    init(_ task: BGTask) {
+        self.task = task
+        self.isAppRefresh = task is BGAppRefreshTask
+    }
+
+    func setExpirationHandler(_ handler: @escaping @Sendable () -> Void) {
+        task.expirationHandler = handler
+    }
+
+    func setTaskCompleted(success: Bool) {
+        task.setTaskCompleted(success: success)
+    }
+}
+
+/// Calls the finish closure at most once. The work task and the
+/// expiration handler race; `BGTask` asserts on a second
+/// `setTaskCompleted`.
+private final class BackgroundRefreshCompletionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didComplete = false
+    private let finish: @Sendable (Bool) -> Void
+
+    init(_ finish: @escaping @Sendable (Bool) -> Void) {
+        self.finish = finish
+    }
+
+    func complete(success: Bool) {
+        lock.lock()
+        let first = !didComplete
+        if first { didComplete = true }
+        lock.unlock()
+        // Outside the lock: `finish` calls into the system object, which
+        // must not re-enter `complete` on the same thread and deadlock.
+        if first { finish(success) }
+    }
 }
