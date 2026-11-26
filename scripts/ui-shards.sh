@@ -7,8 +7,9 @@
 #
 #   ./scripts/ui-shards.sh <1|2|3|4>
 #
-# Shard 1 also includes testOnlineLaunch when that test exists in AppUITests.
-# Put a new UI test into the lightest shard below.
+# Shard 1 is the lightest and includes testOnlineLaunch (online gate,
+# quick-add push, reload). Put a new UI test into the lightest shard.
+
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,7 +17,7 @@ n="${1:-}"
 
 prefix="-only-testing:AMFinanceUITests/AMFinanceUITests"
 
-shard1=(testWiredFeatureScreens testFinanceSync)
+shard1=(testWiredFeatureScreens testFinanceSync testOnlineLaunch)
 shard2=(testTabsReportsAndSettings testTransactionsAddEditDelete testAccountsAndDebts)
 shard3=(testRentalsImportAndReminders testAIEntryPointsAndSpendingShare testTransactionScopes)
 shard4=(testBillSplit testAgentLedgerAccess testAgentProposalConfirm testAgentSharedConversation testAgentHistory)
@@ -31,10 +32,6 @@ have_test() {
   done < <(find "$ROOT/AppUITests" -name '*.swift' -type f)
   return 1
 }
-
-if have_test testOnlineLaunch; then
-  shard1+=(testOnlineLaunch)
-fi
 
 case "$n" in
   1) tests=("${shard1[@]}") ;;

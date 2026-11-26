@@ -545,4 +545,84 @@ struct FinanceSyncPullApplyTests {
         #expect(fields["amount"] == SyncJSONValue.int(12_345))
         withExtendedLifetime(forwarder) {}
     }
+
+    /// A pull that lands while the main context holds an unsaved edit on
+    /// a *different* row must commit that edit as a user save — the fake
+    /// server receives it — and must not roll it back. The refresher's
+    /// own setter save stays engine-origin: a later pull of a registered
+    /// row does not schedule another cycle.
+    @Test func pendingUnsavedEditIsPushedAndRefresherSaveDoesNotCycle() async throws {
+        let server = FakeSyncServer()
+        let uploader = try makeSyncDevice(server: server)
+        let ids = try seedFullLedger(in: uploader.context)
+        _ = try await uploader.engine.syncOnce()
+
+        let center = NotificationCenter()
+        let (coordinator, device) = try await makeWatchedCoordinator(
+            server: server, center: center)
+        await FinanceSyncMainContextRefresher.install(
+            on: device.engine, container: device.container)
+        #expect(await coordinator.syncNow())
+        coordinator.instantWrites = true
+        let forwarder = SaveForwarder(to: center) { _ in Thread.isMainThread }
+
+        let main = device.container.mainContext
+        main.autosaveEnabled = false
+        let userRow = try tx(main, ids.expenseTx)
+        let otherRow = try tx(main, ids.bigIncomeTx)
+        userRow.amount = 12_345
+        userRow.note = "sua chua luu"
+        userRow.updatedAt = .now
+        #expect(main.hasChanges)
+
+        try editOnServer(
+            server, entity: .transaction, id: ids.bigIncomeTx,
+            set: ["note": .string("sua tren web")])
+        #expect(await coordinator.syncNow())
+
+        // Committed, not rolled back to the seeded 45_000.
+        #expect(userRow.amount == 12_345)
+        #expect(userRow.note == "sua chua luu")
+        #expect(!main.hasChanges)
+        #expect(otherRow.note == "sua tren web")
+        #expect(forwarder.userForwarded > 0)
+        let stored = try tx(ModelContext(device.container), ids.expenseTx)
+        #expect(stored.amount == 12_345)
+        #expect(stored.note == "sua chua luu")
+
+        let expenseID = ids.expenseTx
+        #expect(await waitForTrue {
+            guard case .object(let fields)? = server.row(
+                entity: "transaction", id: expenseID)?.data
+            else { return false }
+            return fields["amount"] == .int(12_345)
+                && fields["note"] == .string("sua chua luu")
+        })
+        // The user-save follow-up may still be finishing. Once the
+        // server has the edit, another cycle would be the refresher
+        // save leaking through as a user edit.
+        try await Task.sleep(for: .milliseconds(600))
+        let pulls = server.pullCount
+        let userSaves = forwarder.userForwarded
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(server.pullCount == pulls)
+        #expect(forwarder.userForwarded == userSaves)
+
+        // A pull with nothing pending: the setter save must not schedule
+        // a cycle of its own. The row is registered, so the refresher
+        // really does touch and save.
+        _ = try tx(main, ids.transferTx)
+        let calmPulls = server.pullCount
+        let calmSaves = forwarder.userForwarded
+        try editOnServer(
+            server, entity: .transaction, id: ids.transferTx,
+            set: ["note": .string("web chi keo")])
+        #expect(await coordinator.syncNow())
+        #expect(try tx(main, ids.transferTx).note == "web chi keo")
+        #expect(userRow.amount == 12_345)
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(server.pullCount == calmPulls + 1)
+        #expect(forwarder.userForwarded == calmSaves)
+        withExtendedLifetime(forwarder) {}
+    }
 }

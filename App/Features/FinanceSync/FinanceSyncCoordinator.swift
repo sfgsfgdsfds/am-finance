@@ -485,6 +485,29 @@ final class FinanceSyncCoordinator {
         liveTask = nil
     }
 
+    /// Waits until no cycle is registered, including a coalesced
+    /// follow-up the finishing `syncNow` is about to start. Call after
+    /// `stopLiveUpdates` so the long-poll cannot begin another one.
+    /// Two idle observations with a yield between them are required:
+    /// `inFlight` is briefly nil between a cycle and its follow-up, and
+    /// that gap is synchronous on this actor except where `syncNow`
+    /// actually suspends. Not safe to call from inside `syncNow`.
+    func waitForEngineIdle() async {
+        var idlePasses = 0
+        while idlePasses < 2 {
+            if let task = inFlight {
+                idlePasses = 0
+                _ = await task.value
+                await Task.yield()
+                continue
+            }
+            idlePasses += 1
+            if idlePasses < 2 {
+                await Task.yield()
+            }
+        }
+    }
+
     /// Waits on the shadow pull cursor. 200 → one cycle, then loop; 204 →
     /// loop; a transport failure marks the connection offline and backs
     /// off from `liveBackoffInitial` to `liveBackoffMaximum`. A 200 whose
@@ -731,7 +754,9 @@ extension EnvironmentValues {
 /// subscription, no notification observers — so a UI-test run does zero
 /// sync work even when a coordinator exists (the `-uiTestFakeSyncServer`
 /// tests drive sync through explicit buttons, keeping reports
-/// deterministic). A disabled sync is nearly as inert: the timer and
+/// deterministic). The exception is `-uiTestOnline`: that launch
+/// keeps the triggers so a quick-add is pushed to the in-app fake.
+/// A disabled sync is nearly as inert: the timer and
 /// phase/save triggers only ever fire while `coordinator.enabled` —
 /// reading an `@Observable` property inside an action is untracked, so
 /// these checks never re-render the root.
@@ -743,7 +768,15 @@ private struct FinanceSyncAutoRefreshModifier: ViewModifier {
         .autoconnect()
 
     private var automaticTriggersEnabled: Bool {
-        !AppLockSettingsStore.isUITestLaunch()
+        if !AppLockSettingsStore.isUITestLaunch() { return true }
+        #if DEBUG
+        // Online UI tests must push a quick-add. Every other in-memory
+        // launch stays inert so smoke tests stay deterministic.
+        return FinanceSyncUITestSupport.onlineEnabled(
+            arguments: ProcessInfo.processInfo.arguments)
+        #else
+        return false
+        #endif
     }
 
     func body(content: Content) -> some View {
