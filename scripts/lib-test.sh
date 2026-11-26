@@ -15,6 +15,10 @@
 #   AM_TEST_NAME    log prefix ("test-app", "test-ui")
 #   AM_TEST_SCHEME  Xcode scheme to test (each scheme holds exactly one test
 #                   bundle, so nothing extra is built — see project.yml)
+# Optional:
+#   AM_TEST_PRODUCTS  build-for-testing Products directory. When set, run
+#                     test-without-building against that scheme's .xctestrun
+#                     instead of compiling again.
 # then call `am_test_lock <script-path>` and `am_test_run <extra xcodebuild args>`.
 
 : "${ROOT:?set ROOT before sourcing lib-test.sh}"
@@ -122,17 +126,123 @@ sys.exit(1)
 ' "$1"
 }
 
-_xcodebuild_test() { # $1: device udid, $2: log file, rest: extra xcodebuild args
-  local udid="$1" log="$2"
-  shift 2
-  xcodebuild test \
-    -project "$ROOT/AMFinance.xcodeproj" \
-    -scheme "$AM_TEST_SCHEME" \
+_xcodebuild_test() { # $1: device udid, $2: log file, $3: result bundle, rest: extra args
+  local udid="$1" log="$2" results="$3"
+  shift 3
+  local -a cmd
+  # test-without-building reads products from the xctestrun. A fresh
+  # derived-data path would make xcodebuild look for binaries that were
+  # never built there, so only the compile path passes -derivedDataPath.
+  if [ -n "${AM_XCTESTRUN:-}" ]; then
+    cmd=(xcodebuild test-without-building -xctestrun "$AM_XCTESTRUN")
+  else
+    cmd=(
+      xcodebuild test
+      -project "$ROOT/AMFinance.xcodeproj"
+      -scheme "$AM_TEST_SCHEME"
+      -derivedDataPath "$ROOT/DerivedData"
+    )
+  fi
+  "${cmd[@]}" \
     -destination "platform=iOS Simulator,id=${udid}" \
-    -derivedDataPath "$ROOT/DerivedData" \
+    -destination-timeout 120 \
+    -resultBundlePath "$results" \
     CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGN_IDENTITY= \
     "$@" \
     >"$log" 2>&1
+}
+
+# The unit scheme's file is named AMFinance_… and must not match
+# AMFinanceUITests_….
+_resolve_xctestrun() {
+  if [ -n "${AM_XCTESTRUN:-}" ]; then
+    return 0
+  fi
+  local dir="$AM_TEST_PRODUCTS" f base
+  local -a matches=()
+  if [ ! -d "$dir" ]; then
+    echo "$AM_TEST_NAME: products dir missing: $dir" >&2
+    exit 1
+  fi
+  while IFS= read -r f; do
+    base="$(basename "$f")"
+    case "$base" in
+      "${AM_TEST_SCHEME}"_*|"${AM_TEST_SCHEME}.xctestrun") matches+=("$f") ;;
+    esac
+  done < <(find "$dir" -name '*.xctestrun' \( -type f -o -type d \))
+  if [ "${#matches[@]}" -ne 1 ]; then
+    echo "$AM_TEST_NAME: expected 1 xctestrun for ${AM_TEST_SCHEME}, found ${#matches[@]} under $dir" >&2
+    find "$dir" -name '*.xctestrun' -print >&2 || true
+    exit 1
+  fi
+  AM_XCTESTRUN="${matches[0]}"
+}
+
+_prepare_products() {
+  if [ -z "${AM_TEST_PRODUCTS:-}" ]; then
+    return 0
+  fi
+  python3 "$ROOT/scripts/ci-localize-products.py" "$AM_TEST_PRODUCTS"
+  _resolve_xctestrun
+  echo "$AM_TEST_NAME: test-without-building ${AM_XCTESTRUN}" >&2
+}
+
+# Best-effort per-test durations. Never fails the run.
+_report_durations() { # $1 xcresult
+  local bundle="$1" json
+  if [ ! -e "$bundle" ]; then
+    return 0
+  fi
+  json="$(mktemp -t amfinance-xcresult)"
+  if ! xcrun xcresulttool get test-results tests --path "$bundle" --format json >"$json" 2>"$json.err"; then
+    if ! xcrun xcresulttool get test-results tests --path "$bundle" >"$json" 2>>"$json.err"; then
+      echo "$AM_TEST_NAME: xcresulttool could not read durations" >&2
+      return 0
+    fi
+  fi
+  python3 - "$json" <<'PY' || true
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception as exc:
+    print("ci-durations: unreadable json (%s)" % exc)
+    raise SystemExit(0)
+found = []
+def walk(node):
+    if isinstance(node, dict):
+        name = node.get("name") or ""
+        ntype = str(node.get("nodeType") or "")
+        dur = node.get("durationInSeconds")
+        if dur is None and isinstance(node.get("duration"), (int, float)):
+            dur = node.get("duration")
+        children = node.get("children")
+        is_case = "case" in ntype.lower() or (
+            isinstance(name, str) and name.startswith("test") and not children
+        )
+        if is_case and isinstance(name, str) and isinstance(dur, (int, float)):
+            found.append((float(dur), name))
+        for value in node.values():
+            walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            walk(value)
+walk(data)
+uniq = []
+seen = set()
+for item in found:
+    if item in seen:
+        continue
+    seen.add(item)
+    uniq.append(item)
+uniq.sort(reverse=True)
+print("ci-durations: %d test(s)" % len(uniq))
+for dur, name in uniq[:40]:
+    print("  %8.2fs  %s" % (dur, name))
+if len(uniq) > 40:
+    print("  ... %d more" % (len(uniq) - 40))
+PY
 }
 
 # Echo the failing test names / errors found in the xcodebuild log. $1: log file.
@@ -151,7 +261,8 @@ _print_failures() {
 # Prints the test summary on success; failing test names + the log tail and
 # exit non-zero on failure.
 am_test_run() {
-  local device_udid new_udid log booted status attempt
+  local device_udid new_udid log booted status attempt results
+  _prepare_products
   device_udid="$(_pick_device "")" || {
     echo "$AM_TEST_NAME: no available iPhone simulator found" >&2
     exit 1
@@ -160,6 +271,7 @@ am_test_run() {
   echo "$AM_TEST_NAME: using iPhone simulator $device_udid" >&2
 
   log="$(mktemp -t amfinance-xcodebuild)"
+  mkdir -p "$ROOT/build"
   attempt=1
   while true; do
     : >"$log"
@@ -167,8 +279,15 @@ am_test_run() {
     # -b boots the device if needed and blocks until it finishes booting.
     xcrun simctl bootstatus "$device_udid" -b >>"$log" 2>&1 || booted=0
 
-    if [ "$booted" -eq 1 ] && _xcodebuild_test "$device_udid" "$log" "$@"; then
+    results="$ROOT/build/TestResults-${AM_TEST_NAME}-attempt${attempt}.xcresult"
+    rm -rf "$results"
+    if [ "$booted" -eq 1 ] && _xcodebuild_test "$device_udid" "$log" "$results" "$@"; then
       grep -E "Executed [0-9]+ tests?|Test run with [0-9]+ tests?|Test Suite .*(passed|failed)|TEST SUCCEEDED" "$log" | tail -n 15 || true
+      _report_durations "$results" || true
+      if ! grep -qE "Test run with [1-9][0-9]* tests|Executed [1-9][0-9]* tests" "$log"; then
+        echo "$AM_TEST_NAME: ** TEST FAILED ** (xcodebuild succeeded but executed 0 tests)" >&2
+        exit 1
+      fi
       echo "$AM_TEST_NAME: ** TEST SUCCEEDED ** (full log: $log)"
       exit 0
     else
@@ -178,6 +297,10 @@ am_test_run() {
     if [ "$attempt" -eq 1 ] &&
       { [ "$booted" -eq 0 ] || grep -qiE "$AM_TRANSIENT_RE" "$log" 2>/dev/null; }; then
       echo "$AM_TEST_NAME: transient simulator failure — re-booting and retrying once" >&2
+      echo "$AM_TEST_NAME: transient match:" >&2
+      grep -niE "$AM_TRANSIENT_RE" "$log" 2>/dev/null | head -n 20 >&2 || true
+      echo "$AM_TEST_NAME: last 40 lines of the failed attempt:" >&2
+      tail -n 40 "$log" >&2 || true
       xcrun simctl shutdown "$device_udid" >/dev/null 2>&1 || true
       new_udid="$(_pick_device "$device_udid" || true)"
       device_udid="${new_udid:-$device_udid}"
@@ -188,6 +311,7 @@ am_test_run() {
 
     echo "$AM_TEST_NAME: ** TEST FAILED **" >&2
     _print_failures "$log" >&2
+    _report_durations "$results" || true
     echo "$AM_TEST_NAME: last 60 lines of $log:" >&2
     tail -n 60 "$log" >&2
     exit "$status"
