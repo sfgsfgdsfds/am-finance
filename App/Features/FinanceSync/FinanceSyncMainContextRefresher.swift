@@ -22,6 +22,14 @@ import SwiftData
 /// saved inside `FinanceSyncSaveFilter.asEngine`: the save notification
 /// is engine-origin and cannot schedule another push, and the bytes match
 /// the row the engine just stored.
+///
+/// Unsaved user edits already sitting on the main context are saved
+/// first, outside `asEngine`, so the save filter schedules the instant
+/// push. The engine-tagged save — and the `rollback` if that save
+/// throws — covers only this refresher's own setter writes. Rolling
+/// the user's edit back, or committing it as an engine save, drops it:
+/// an in-memory store never gets another chance to push after the app
+/// is killed.
 enum FinanceSyncMainContextRefresher {
     /// Fetch chunk — keeps each `IN` predicate small.
     private static let chunk = 200
@@ -36,8 +44,12 @@ enum FinanceSyncMainContextRefresher {
     }
 
     /// Re-fetches the registered subset of `rows` on `context`, then
-/// re-assigns every synced property so Observation fires, and saves
-/// inside `asEngine` so the write is not a user edit.
+    /// re-assigns every synced property so Observation fires.
+    ///
+    /// A pending user edit is saved first, outside `asEngine`, so the
+    /// save filter schedules the instant push. Only the setter pass is
+    /// saved inside `asEngine`. On failure, `rollback` discards that
+    /// pass alone.
     @MainActor
     static func refresh(_ rows: [SyncChangedRow], in context: ModelContext) {
         func registered<T: PersistentModel>(
@@ -57,6 +69,20 @@ enum FinanceSyncMainContextRefresher {
         let rules = registered(.recurringRule, as: RecurringRule.self)
         let units = registered(.rentalUnit, as: RentalUnit.self)
         let leases = registered(.rentalLease, as: RentalLease.self)
+
+        // Before the re-fetch and before any setter. The re-fetch must
+        // not be the thing that observes `hasChanges` — a user edit has
+        // to be committed first, while it is still the only dirty state.
+        if context.hasChanges {
+            do {
+                try context.save()
+            } catch {
+                // Leave the user's edits dirty. Touching now would mix
+                // them with this pass, and the rollback below would
+                // discard them.
+                return
+            }
+        }
 
         func refetch(_ ids: [UUID], _ fetch: ([UUID]) throws -> Void) {
             var rest = ids[...]
@@ -119,8 +145,9 @@ enum FinanceSyncMainContextRefresher {
                 if context.hasChanges { try context.save() }
             }
         } catch {
-            // The store already holds the pulled values; drop the dirty
-            // flag so a later autosave cannot look like a user edit.
+            // The user edit, if there was one, is already committed.
+            // Drop only this pass's dirty setters so a later autosave
+            // cannot look like a user edit.
             context.rollback()
         }
     }

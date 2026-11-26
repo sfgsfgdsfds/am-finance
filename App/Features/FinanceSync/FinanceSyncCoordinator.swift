@@ -731,7 +731,9 @@ extension EnvironmentValues {
 /// subscription, no notification observers — so a UI-test run does zero
 /// sync work even when a coordinator exists (the `-uiTestFakeSyncServer`
 /// tests drive sync through explicit buttons, keeping reports
-/// deterministic). A disabled sync is nearly as inert: the timer and
+/// deterministic). The exception is `-uiTestOnline`: that launch
+/// keeps the triggers so a quick-add is pushed to the in-app fake.
+/// A disabled sync is nearly as inert: the timer and
 /// phase/save triggers only ever fire while `coordinator.enabled` —
 /// reading an `@Observable` property inside an action is untracked, so
 /// these checks never re-render the root.
@@ -743,7 +745,15 @@ private struct FinanceSyncAutoRefreshModifier: ViewModifier {
         .autoconnect()
 
     private var automaticTriggersEnabled: Bool {
-        !AppLockSettingsStore.isUITestLaunch()
+        if !AppLockSettingsStore.isUITestLaunch() { return true }
+        #if DEBUG
+        // Online UI tests must push a quick-add. Every other in-memory
+        // launch stays inert so smoke tests stay deterministic.
+        return FinanceSyncUITestSupport.onlineEnabled(
+            arguments: ProcessInfo.processInfo.arguments)
+        #else
+        return false
+        #endif
     }
 
     func body(content: Content) -> some View {

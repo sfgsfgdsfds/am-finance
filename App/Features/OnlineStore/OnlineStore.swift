@@ -85,7 +85,21 @@ final class OnlineStore {
     func start() async {
         guard !started else { return }
         started = true
+        await holdLoadingGateForUITest()
         await evaluate()
+    }
+
+    /// `-uiTestOnline` only. The in-app fake answers the export before
+    /// XCUITest has attached, so the loading gate would already be gone
+    /// when the test looks. Holding here — with the spinner suppressed,
+    /// see `OnlineGateProgressView` — lets the app go idle while the
+    /// gate is still up.
+    private func holdLoadingGateForUITest() async {
+        #if DEBUG
+        guard FinanceSyncUITestSupport.onlineEnabled(
+            arguments: ProcessInfo.processInfo.arguments) else { return }
+        try? await Task.sleep(for: .seconds(8))
+        #endif
     }
 
     /// "Đăng nhập" on the sign-in screen.

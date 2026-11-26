@@ -25,7 +25,7 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
 - AMDev stops a single `--check` after 15 minutes and the whole UI suite
   takes longer, so gate it as four shards with `AMFINANCE_UI_TEST_FILTERS`
   (each selector is `-only-testing:AMFinanceUITests/AMFinanceUITests/<name>`):
-  (1) `testWiredFeatureScreens`, `testFinanceSync`; (2)
+  (1) `testWiredFeatureScreens`, `testFinanceSync`, `testOnlineLaunch`; (2)
   `testTabsReportsAndSettings`, `testTransactionsAddEditDelete`,
   `testAccountsAndDebts`; (3) `testRentalsImportAndReminders`,
   `testAIEntryPointsAndSpendingShare`, `testTransactionScopes`; (4)
@@ -54,8 +54,12 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   signed-in token — `testFinanceSync` drives the Máy chủ page
   (status visible, "Tải lại dữ liệu" reloads from the fake export).
   Without `-uiTestOnline` the sign-in gate stays off so the seeded
-  tabs are immediate. Automatic sync triggers are inert under
-  `-uiTestInMemoryStore`.
+  tabs are immediate, and automatic sync triggers stay inert.
+  `-uiTestOnline` (with both flags) runs the online gate against the
+  fake, which is seeded with one account, "Ăn uống" and two
+  transactions; the save observer stays on so a quick-add pushes.
+  `testOnlineLaunch` checks the loading gate, that push (DEBUG
+  "Mốc máy chủ" seq on Máy chủ) and "Tải lại dữ liệu".
 - Row taps need `.onTapGesture` (List-row `Button` actions don't fire on
   iOS 26); assertions on off-screen list items must scroll first.
 
@@ -231,14 +235,16 @@ workers know what already exists. Pushed views must not create their own
   no shadow store or refresh task exists during smoke tests;
   `.financeSyncAutoRefresh()` on the root attaches appear/scenePhase/
   60 s triggers plus the save-notification debounce — it attaches
-  NOTHING under `-uiTestInMemoryStore`, and every trigger is further
+  NOTHING under `-uiTestInMemoryStore` except `-uiTestOnline` (that
+  launch keeps the triggers so a quick-add pushes), and every trigger is further
   gated on `coordinator.enabled`/`refreshState()` writes only on real
   changes — a `.dataResetCompleted` forces the next
   cycle FULL, and the engine/bootstrap `addLocalStoreChangeHook`
   invalidates `LedgerBalanceStores`. `ServerStatusView`
   (Settings → Dữ liệu → "Máy chủ", AX ids `server.*`) shows the server
   URL, the signed-in WalletLink account, the connection state and the
-  last update time, plus "Tải lại dữ liệu" (`OnlineStore.reload()`) and
+  last update time (plus a DEBUG "Mốc máy chủ" high-water seq when the
+  UI-test fake is on), plus "Tải lại dữ liệu" (`OnlineStore.reload()`) and
   "Đăng xuất" (WalletLink `signOut`, in-memory data dropped, back to
   the sign-in gate). There is no enable/pause/disconnect UI.
   Only USER saves trigger the auto-sync (`FinanceSyncSaveFilter`:
@@ -247,7 +253,11 @@ workers know what already exists. Pushed views must not create their own
   context holds after each applied page, then writes the synced
   properties back through their setters and saves inside
   `FinanceSyncSaveFilter.asEngine` so Observation fires without
-  scheduling a push. In online mode the coordinator also long-polls
+  scheduling a push. If the main context already has unsaved user
+  edits, those are saved first as a normal user save (outside
+  `asEngine`, so the instant push runs); the engine-tagged save and
+  its `rollback` cover only the refresher's own touches. In online
+  mode the coordinator also long-polls
   `GET /v1/sync/wait` while the scene is active (`isOnline` drops on a
   transport failure; a `422` sets `rejectionReloadPending` and the store
   reloads from the export).
