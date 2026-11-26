@@ -27,8 +27,9 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   whole suite takes longer) live only in `scripts/ui-shards.sh`.
   `./scripts/ui-shards.sh <1-4>` prints the `AMFINANCE_UI_TEST_FILTERS` value
   (each selector is `-only-testing:AMFinanceUITests/AMFinanceUITests/<name>`).
-  Shard 1 also includes `testOnlineLaunch` when that test exists. Put a new
-  UI test into the lightest shard in that script.
+  Shard 1 is the lightest: `testWiredFeatureScreens`, `testFinanceSync`,
+  and `testOnlineLaunch`. Put a new UI test into the lightest shard in
+  that script.
 - `scripts/lib-test.sh` — shared lock/simulator/retry helper sourced by both
   test scripts; not meant to be run directly.
 - `./scripts/build-release.sh` — Release compile for the iOS Simulator,
@@ -68,8 +69,12 @@ green `ci/<suite>-<tree>` or `ci/all-<tree>` run and never waits longer than
   signed-in token — `testFinanceSync` drives the Máy chủ page
   (status visible, "Tải lại dữ liệu" reloads from the fake export).
   Without `-uiTestOnline` the sign-in gate stays off so the seeded
-  tabs are immediate. Automatic sync triggers are inert under
-  `-uiTestInMemoryStore`.
+  tabs are immediate, and automatic sync triggers stay inert.
+  `-uiTestOnline` (with both flags) runs the online gate against the
+  fake, which is seeded with one account, "Ăn uống" and two
+  transactions; the save observer stays on so a quick-add pushes.
+  `testOnlineLaunch` checks the loading gate, that push (DEBUG
+  "Mốc máy chủ" seq on Máy chủ) and "Tải lại dữ liệu".
 - Row taps need `.onTapGesture` (List-row `Button` actions don't fire on
   iOS 26); assertions on off-screen list items must scroll first.
 
@@ -245,14 +250,16 @@ workers know what already exists. Pushed views must not create their own
   no shadow store or refresh task exists during smoke tests;
   `.financeSyncAutoRefresh()` on the root attaches appear/scenePhase/
   60 s triggers plus the save-notification debounce — it attaches
-  NOTHING under `-uiTestInMemoryStore`, and every trigger is further
+  NOTHING under `-uiTestInMemoryStore` except `-uiTestOnline` (that
+  launch keeps the triggers so a quick-add pushes), and every trigger is further
   gated on `coordinator.enabled`/`refreshState()` writes only on real
   changes — a `.dataResetCompleted` forces the next
   cycle FULL, and the engine/bootstrap `addLocalStoreChangeHook`
   invalidates `LedgerBalanceStores`. `ServerStatusView`
   (Settings → Dữ liệu → "Máy chủ", AX ids `server.*`) shows the server
   URL, the signed-in WalletLink account, the connection state and the
-  last update time, plus "Tải lại dữ liệu" (`OnlineStore.reload()`) and
+  last update time (plus a DEBUG "Mốc máy chủ" high-water seq when the
+  UI-test fake is on), plus "Tải lại dữ liệu" (`OnlineStore.reload()`) and
   "Đăng xuất" (WalletLink `signOut`, in-memory data dropped, back to
   the sign-in gate). There is no enable/pause/disconnect UI.
   Only USER saves trigger the auto-sync (`FinanceSyncSaveFilter`:
@@ -261,7 +268,12 @@ workers know what already exists. Pushed views must not create their own
   context holds after each applied page, then writes the synced
   properties back through their setters and saves inside
   `FinanceSyncSaveFilter.asEngine` so Observation fires without
-  scheduling a push. In online mode the coordinator also long-polls
+  scheduling a push. If the main context already has unsaved user
+  edits, those are saved first as a normal user save (outside
+  `asEngine`, so the instant push runs); a failure there returns
+  without touching, so the edits stay pending. The engine-tagged
+  save and its `rollback` cover only the refresher's own touches. In online
+  mode the coordinator also long-polls
   `GET /v1/sync/wait` while the scene is active (`isOnline` drops on a
   transport failure; a `422` sets `rejectionReloadPending` and the store
   reloads from the export).
@@ -277,7 +289,7 @@ workers know what already exists. Pushed views must not create their own
 - `OnlineStore/` — the online-only launch (stage 1; the web server IS the
   backend, nothing is persisted locally). `OnlineStore` (@MainActor
   @Observable; phases `starting → signedOut → migratingLegacy → loading →
-  ready | failed(text)`, `isOnline`, `rejectionMessage`, `signIn()`/`retry()`, `reload(message:)` — the one reload path for a rejected push, "Tải lại dữ liệu", data reset and replace-restore — and `signOut()`) is created in `AMFinanceApp`
+  ready | failed(text)`, `isOnline`, `rejectionMessage`, `signIn()`/`retry()`, `reload(message:)` — the one reload path for a rejected push, "Tải lại dữ liệu", data reset and replace-restore; it stops live updates and waits out an in-flight cycle first so the engine is free — and `signOut()`) is created in `AMFinanceApp`
   for every real launch (and for `-uiTestInMemoryStore -uiTestFakeSyncServer
   -uiTestOnline`, DEBUG) over an in-memory app container with NO
   `SeedData` and an in-memory shadow; `OnlineGate` (`OnlineGateView`) shows

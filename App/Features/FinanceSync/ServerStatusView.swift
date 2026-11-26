@@ -14,6 +14,11 @@ struct ServerStatusView: View {
     @State private var isWorking = false
     @State private var confirmsSignOut = false
     @State private var errorMessage: String?
+    #if DEBUG
+    /// UI-test fake only — the server's high-water seq, so a test can
+    /// see that a quick-add was pushed. Stays empty for a real server.
+    @State private var serverHighWater = ""
+    #endif
 
     var body: some View {
         Form {
@@ -26,6 +31,12 @@ struct ServerStatusView: View {
                     .accessibilityIdentifier("server.connection")
                 LabeledContent("Cập nhật lần cuối", value: lastUpdateText)
                     .accessibilityIdentifier("server.lastUpdate")
+                #if DEBUG
+                if FinanceSyncUITestSupport.isEnabled {
+                    LabeledContent("Mốc máy chủ", value: serverHighWater)
+                        .accessibilityIdentifier("server.highWater")
+                }
+                #endif
             } header: {
                 Text("Trạng thái")
             } footer: {
@@ -52,6 +63,10 @@ struct ServerStatusView: View {
         }
         .navigationTitle("Máy chủ")
         .task { await refreshAccount() }
+        .onAppear(perform: refreshDebugHighWater)
+        .onChange(of: coordinator?.lastSyncAt) { _, _ in
+            refreshDebugHighWater()
+        }
         .confirmationDialog(
             "Đăng xuất?",
             isPresented: $confirmsSignOut,
@@ -95,6 +110,15 @@ struct ServerStatusView: View {
         guard let date = coordinator?.lastSyncAt else { return "Chưa cập nhật" }
         return AppDateFormat.dayHeader(date, now: .now)
             + " " + AppDateFormat.time(date)
+    }
+
+    /// Re-reads the in-app fake's high-water seq. No-op for a real
+    /// server and in Release — the row itself is DEBUG-only.
+    private func refreshDebugHighWater() {
+        #if DEBUG
+        guard FinanceSyncUITestSupport.isEnabled else { return }
+        serverHighWater = String(FinanceSyncUITestServer.shared.highWaterSeq)
+        #endif
     }
 
     private func refreshAccount() async {

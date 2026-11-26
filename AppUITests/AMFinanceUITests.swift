@@ -1479,6 +1479,131 @@ final class AMFinanceUITests: XCTestCase {
             "reload failed")
     }
 
+    /// Online launch against the in-app fake: the server already holds
+    /// an account, "Ăn uống" and two transactions. The loading gate
+    /// shows, then the tabs carry that data. A quick-add is pushed
+    /// (the DEBUG high-water seq on Máy chủ moves), and "Tải lại dữ
+    /// liệu" comes back to the same rows plus the new expense.
+    func testOnlineLaunch() throws {
+        app.terminate()
+        _ = app.wait(for: .notRunning, timeout: 10)
+        app.launchArguments = [
+            "-uiTestInMemoryStore", "-uiTestFakeSyncServer", "-uiTestOnline",
+        ]
+        app.launch()
+
+        let gate = scopedElement("online.gate.loading")
+        XCTAssertTrue(gate.waitForExistence(timeout: 5),
+                      "online loading gate missing")
+        XCTAssertTrue(
+            app.tabBars.buttons["Giao dịch"].waitForExistence(timeout: 30),
+            "tabs did not appear after the online load")
+
+        openTab("Giao dịch")
+        XCTAssertTrue(seededOnlineNote().waitForExistence(timeout: 8),
+                      "seeded server transaction note missing")
+
+        openTab("Tổng quan")
+        openServerStatus()
+        let baseline = currentServerHighWater()
+        goBack(to: "Cài đặt")
+        goBack(to: "Tổng quan")
+
+        quickAddExpense(amount: 77_000, category: "Ăn uống")
+
+        openServerStatus()
+        waitForServerHighWater(above: baseline)
+        tapWhenReady(app.buttons["server.reload"], "reload button missing")
+
+        XCTAssertTrue(
+            app.tabBars.buttons["Giao dịch"].waitForExistence(timeout: 20),
+            "tabs did not return after reload")
+        XCTAssertFalse(app.staticTexts["Không tải lại được"].exists,
+                       "reload failed")
+        openTab("Giao dịch")
+        XCTAssertTrue(seededOnlineNote().waitForExistence(timeout: 8),
+                      "seeded note missing after reload")
+        tapScope("txList.scope.all")
+        XCTAssertTrue(
+            app.staticTexts["-77.000 ₫"].waitForExistence(timeout: 8),
+            "pushed expense missing after reload")
+    }
+
+    /// Settings → Máy chủ. The gear lives on the dashboard.
+    private func openServerStatus() {
+        let gear = app.buttons["Cài đặt"]
+        XCTAssertTrue(waitReady(gear, timeout: 15), "settings gear missing")
+        gear.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Cài đặt"]
+                .waitForExistence(timeout: 5),
+            "settings screen missing")
+        tapOption("Máy chủ")
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Máy chủ"]
+                .waitForExistence(timeout: 5),
+            "server screen missing")
+    }
+
+    private func seededOnlineNote() -> XCUIElement {
+        app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Cà phê online")
+        ).firstMatch
+    }
+
+    /// The DEBUG "Mốc máy chủ" row — waits until the label carries a seq.
+    private func currentServerHighWater() -> Int64 {
+        let element = scopedElement("server.highWater")
+        if !reveal(element, maxSwipes: 3) {
+            XCTAssertTrue(element.waitForExistence(timeout: 5),
+                          "high water row missing")
+        }
+        let deadline = Date().addingTimeInterval(8)
+        var latest = ""
+        while Date() < deadline {
+            latest = element.label
+            if let value = Self.parseHighWater(latest) {
+                return value
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        XCTFail("high water unreadable — got '\(latest)'")
+        return -1
+    }
+
+    private func waitForServerHighWater(above baseline: Int64) {
+        let element = scopedElement("server.highWater")
+        if !reveal(element, maxSwipes: 3) {
+            XCTAssertTrue(element.waitForExistence(timeout: 5),
+                          "high water row missing")
+        }
+        let deadline = Date().addingTimeInterval(20)
+        var latest = ""
+        while Date() < deadline {
+            latest = element.label
+            if let value = Self.parseHighWater(latest), value > baseline {
+                return
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        XCTFail(
+            "high water did not pass \(baseline) — got '\(latest)'")
+    }
+
+    /// "Mốc máy chủ, 12" → 12. Nil while the row has not been filled in.
+    private static func parseHighWater(_ label: String) -> Int64? {
+        var digits = ""
+        for character in label.reversed() {
+            if character.isNumber {
+                digits.append(character)
+            } else if !digits.isEmpty {
+                break
+            }
+        }
+        guard !digits.isEmpty else { return nil }
+        return Int64(String(digits.reversed()))
+    }
+
     // MARK: - Flow helpers
 
     /// Types into the Agent input and taps send. The field may surface as

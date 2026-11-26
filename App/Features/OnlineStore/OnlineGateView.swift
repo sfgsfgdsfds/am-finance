@@ -90,9 +90,24 @@ private struct OnlineGateProgressView: View {
     let text: String
     let identifier: String
 
+    /// True only for `-uiTestOnline`, where the gate must be observable.
+    private static var hidesSpinnerForUITest: Bool {
+        #if DEBUG
+        FinanceSyncUITestSupport.onlineEnabled(
+            arguments: ProcessInfo.processInfo.arguments)
+        #else
+        false
+        #endif
+    }
+
     var body: some View {
         VStack(spacing: 16) {
-            ProgressView()
+            // The online UI test holds this gate up so XCUITest can see
+            // it. A spinning ProgressView never goes idle, so launch()
+            // would block until the gate was already gone.
+            if !Self.hidesSpinnerForUITest {
+                ProgressView()
+            }
             Text(text)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)

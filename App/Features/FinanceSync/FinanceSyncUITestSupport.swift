@@ -185,8 +185,99 @@ final class FinanceSyncUITestServer: @unchecked Sendable {
     /// Idempotency key → (body sha-256, stored 200 body).
     private var committedPushes: [String: (String, Data)] = [:]
 
+    /// The committed high-water seq. Read by the Máy chủ page under
+    /// the UI-test fake (`server.highWater`) — never a write seam.
+    var highWaterSeq: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return nextSeq
+    }
+
     private init() {
+        if FinanceSyncUITestSupport.onlineEnabled(
+            arguments: ProcessInfo.processInfo.arguments) {
+            seedOnlineLaunchFixture()
+        }
         FinanceSyncUITestStubProtocol.server = self
+    }
+
+    /// Account + expense category + two transactions `testOnlineLaunch`
+    /// expects on the server before the app loads. The coffee expense
+    /// is uncategorized so the default "Chưa phân loại" queue shows
+    /// its note; "Ăn uống" exists so quick-add can pick it.
+    private func seedOnlineLaunchFixture() {
+        let now = Date()
+        let accountID = UUID(uuidString: "11111111-0000-4000-8000-000000000001")!
+        let categoryID = UUID(uuidString: "11111111-0000-4000-8000-0000000000C1")!
+        let coffeeID = UUID(uuidString: "11111111-0000-4000-8000-0000000000A1")!
+        let lunchID = UUID(uuidString: "11111111-0000-4000-8000-0000000000A2")!
+        let account = BackupAccount(
+            id: accountID,
+            name: "Tiền mặt",
+            kindRaw: AccountKind.cash.rawValue,
+            openingBalance: 500_000,
+            icon: "banknote.fill",
+            colorHex: "34C759",
+            note: "",
+            sortOrder: 0,
+            isArchived: false,
+            createdAt: now,
+            creditLimit: nil,
+            statementDay: nil,
+            graceDays: nil,
+            loanPrincipal: nil,
+            loanAnnualRatePercent: nil,
+            loanTermMonths: nil,
+            loanStartDate: nil,
+            loanPaymentDay: nil,
+            loanMethodRaw: nil,
+            externalSource: nil,
+            externalAccountID: nil,
+            businessID: nil)
+        let category = BackupCategory(
+            id: categoryID,
+            name: "Ăn uống",
+            kindRaw: CategoryKind.expense.rawValue,
+            icon: "fork.knife",
+            colorHex: "FF9500",
+            sortOrder: 0,
+            isArchived: false)
+        func transaction(
+            _ id: UUID, amount: Int64, note: String, category: UUID?
+        ) -> BackupTransaction {
+            BackupTransaction(
+                id: id,
+                kindRaw: TransactionKind.expense.rawValue,
+                amount: amount,
+                date: now,
+                note: note,
+                accountID: accountID,
+                toAccountID: nil,
+                categoryID: category,
+                businessID: nil,
+                needsReview: false,
+                externalSource: nil,
+                externalID: nil,
+                createdAt: now,
+                updatedAt: now,
+                rentalLeaseID: nil,
+                rentalPeriod: nil)
+        }
+        let fixtures: [(String, UUID, SyncBackupDTO)] = [
+            ("account", accountID, .account(account)),
+            ("category", categoryID, .category(category)),
+            ("transaction", coffeeID, .transaction(transaction(
+                coffeeID, amount: 35_000, note: "Cà phê online", category: nil))),
+            ("transaction", lunchID, .transaction(transaction(
+                lunchID, amount: 45_000, note: "Cơm trưa online",
+                category: categoryID))),
+        ]
+        for (entity, id, dto) in fixtures {
+            let data = try! SyncRecordMapper.jsonValue(of: dto)
+            nextSeq += 1
+            rows[UITestServerKey(entity: entity, id: id)] = UITestServerRow(
+                seq: nextSeq, deleted: false, data: data)
+        }
     }
 
     // MARK: - Long-poll
