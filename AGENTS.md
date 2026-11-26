@@ -9,40 +9,54 @@ SwiftUI + SwiftData + Swift Testing. No third-party dependencies without asking.
   `~/Library/Caches/amfinance-tools`, override with `AMFINANCE_TOOLS_DIR`) and
   regenerates `AMFinance.xcodeproj` from `project.yml`.
 - `swift test --package-path Packages/FinanceCore` — fast logic tests on macOS.
-- `./scripts/test-app.sh` — the default fast gate: regenerates the project and
-  runs only the `AMFinanceTests` unit tests via `xcodebuild test` on an
-  auto-picked iPhone simulator (code signing off; the `AMFinanceUITests`
-  target is neither built nor run). App tests are serialized across worktrees
-  by a shared lock, so a check may wait for another worker's run to finish;
-  transient simulator failures retry once.
-- `./scripts/test-ui.sh` — the slow UI gate: runs only the `AMFinanceUITests`
-  XCUITest smoke suite under the same lock and retry logic, on the dedicated
+  This is the only test command to run on the owner's machine.
+- `./scripts/test-app.sh` — regenerates the project and runs only the
+  `AMFinanceTests` unit tests via `xcodebuild test` on an auto-picked iPhone
+  simulator (code signing off; the `AMFinanceUITests` target is neither built
+  nor run). App tests are serialized across worktrees by a shared lock, so a
+  check may wait for another worker's run to finish; transient simulator
+  failures retry once. CI runs this; do not run it locally (see CI below).
+- `./scripts/test-ui.sh` — runs only the `AMFinanceUITests` XCUITest smoke
+  suite under the same lock and retry logic, on the dedicated
   `AMFinanceUITests` scheme. Set `AMFINANCE_UI_TEST_FILTERS` to space-separated
-  `-only-testing:`/`-skip-testing:` selectors to run just a shard. Integration
-  jobs run it, and it must pass before device installs. If you change
-  navigation, tab structure or a flow the smoke tests cover, run it yourself
-  and update `AppUITests`.
-- AMDev stops a single `--check` after 15 minutes and the whole UI suite
-  takes longer, so gate it as four shards with `AMFINANCE_UI_TEST_FILTERS`
-  (each selector is `-only-testing:AMFinanceUITests/AMFinanceUITests/<name>`):
-  (1) `testWiredFeatureScreens`, `testFinanceSync`; (2)
-  `testTabsReportsAndSettings`, `testTransactionsAddEditDelete`,
-  `testAccountsAndDebts`; (3) `testRentalsImportAndReminders`,
-  `testAIEntryPointsAndSpendingShare`, `testTransactionScopes`; (4)
-  `testBillSplit`, `testAgentLedgerAccess`, `testAgentProposalConfirm`,
-  `testAgentSharedConversation`, `testAgentHistory`.
-  Put a new UI test into the lightest shard.
+  `-only-testing:`/`-skip-testing:` selectors to run just a shard. It must
+  pass before device installs. If you change navigation, tab structure or a
+  flow the smoke tests cover, update `AppUITests` and the shard list. CI runs
+  this; do not run it locally (see CI below).
+- UI smoke shards (AMDev stops a single `--check` after 15 minutes, and the
+  whole suite takes longer) live only in `scripts/ui-shards.sh`.
+  `./scripts/ui-shards.sh <1-4>` prints the `AMFINANCE_UI_TEST_FILTERS` value
+  (each selector is `-only-testing:AMFinanceUITests/AMFinanceUITests/<name>`).
+  Shard 1 also includes `testOnlineLaunch` when that test exists. Put a new
+  UI test into the lightest shard in that script.
 - `scripts/lib-test.sh` — shared lock/simulator/retry helper sourced by both
   test scripts; not meant to be run directly.
+- `./scripts/build-release.sh` — Release compile for the iOS Simulator,
+  signing off (CI's `build` job). Do not run it locally.
 - The generated `.xcodeproj` is a build artifact: git-ignored, never commit it.
+
+### CI (GitHub Actions)
+
+The owner's Mac is an Apple M1 with 8 GB of RAM — too weak for Xcode and
+simulators. Workers must **not** run `xcodebuild`, `./scripts/test-app.sh`,
+`./scripts/test-ui.sh`, `./scripts/build-release.sh`, or boot a simulator
+locally. Iterate on GitHub with `./scripts/ci.sh run <suite>` (`unit`, `ui`,
+`ui1`..`ui4`, `build`, or `all`): use `unit` or a single `uiN` while
+iterating and finish with `all`. `swift test --package-path Packages/FinanceCore`
+locally is fine. A device install is the only local Xcode build.
+`./scripts/ci.sh verify <suite>` is what `.amdev/checks` runs — it reuses a
+green `ci/<suite>-<tree>` or `ci/all-<tree>` run and never waits longer than
+14 minutes. `./scripts/ci.sh prune` deletes remote `ci/*` branches older than
+3 days.
 
 ## UI smoke tests
 
 - `AppUITests/` (`AMFinanceUITests`, XCTest + XCUITest) — end-to-end smoke:
   tabs, quick-add, income+business, edit/delete, settings, accounts/cards/
-  loans, debts, reports. Runs via `./scripts/test-ui.sh` on its own
-  `AMFinanceUITests` scheme; the default `./scripts/test-app.sh` gate uses the
-  `AMFinance` scheme, which only contains the unit-test bundle.
+  loans, debts, reports. Runs on CI via `./scripts/test-ui.sh` (shards in
+  `scripts/ui-shards.sh`) on its own `AMFinanceUITests` scheme; the app unit
+  job runs `./scripts/test-app.sh` on the `AMFinance` scheme, which only
+  contains the unit-test bundle. Do not run either script on the owner's Mac.
 - Tests launch the app with `-uiTestInMemoryStore` → in-memory store + seed.
 - Adding `-uiTestAgentScript` (honoured only beside the in-memory store,
   DEBUG-only) makes the Agent screen count as configured — a scripted
@@ -341,5 +355,5 @@ workers know what already exists. Pushed views must not create their own
 - `scripts/archive.sh` builds and exports an IPA for TestFlight.
 - `scripts/upload-testflight.sh` uploads the IPA — only with
   `--yes-upload`; without it the script is a dry run.
-- Both scripts must only run after `./scripts/test-app.sh` and
-  `./scripts/test-ui.sh` pass.
+- Both scripts must only run after a green `./scripts/ci.sh run all`
+  (do not run the app or UI suites on the owner's Mac).
