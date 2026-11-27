@@ -22,8 +22,17 @@ struct TransactionsView: View {
     @State private var addShown = false
     @State private var editing: LedgerTransaction?
     @State private var pendingDelete: LedgerTransaction?
+    /// Bumped on sheet dismissal and inline mutations so `TransactionListContent`
+    /// always re-fetches and recomputes `matchedScan` even when SwiftData's
+    /// `@Query` / `ModelContext.didSave` stays silent (iOS 17) or when an
+    /// in-place edit leaves the fetched `PersistentIdentifier` list unchanged.
+    @State private var refreshRevision = 0
 
-    init() {
+    /// Test seam: invoked on every body evaluation with the rendered scan.
+    private let onScan: (([TransactionListRow]) -> Void)?
+
+    init(onScan: (([TransactionListRow]) -> Void)? = nil) {
+        self.onScan = onScan
         let now = Date.now
         _monthAnchor = State(initialValue:
             AppCalendar.vietnam.dateInterval(of: .month, for: now)?.start ?? now)
@@ -46,7 +55,9 @@ struct TransactionsView: View {
                 onEdit: { editing = $0 },
                 onDelete: { pendingDelete = $0 },
                 onDuplicate: duplicate,
-                onAdd: { addShown = true }
+                onAdd: { addShown = true },
+                refreshRevision: refreshRevision,
+                onScan: onScan
             )
             .navigationTitle("Giao dịch")
             .searchable(
@@ -78,10 +89,10 @@ struct TransactionsView: View {
                     .accessibilityLabel("Thêm giao dịch")
                 }
             }
-            .sheet(isPresented: $addShown) {
+            .sheet(isPresented: $addShown, onDismiss: { refreshRevision += 1 }) {
                 TransactionEditorView()
             }
-            .sheet(item: $editing) { transaction in
+            .sheet(item: $editing, onDismiss: { refreshRevision += 1 }) { transaction in
                 TransactionEditorView(transaction: transaction)
             }
             .sheet(isPresented: $filterShown) {
@@ -111,24 +122,37 @@ struct TransactionsView: View {
 
     private func duplicate(_ transaction: LedgerTransaction) {
         TransactionListDuplicate.insert(of: transaction, into: modelContext)
-        try? modelContext.save()
+        try? LedgerBalanceStores.shared(for: modelContext.container)
+            .saveAndCheck(modelContext)
+        refreshRevision += 1
     }
 
     private func delete(_ transaction: LedgerTransaction) {
         LedgerTransactionDeletion.delete(transaction, in: modelContext)
-        try? modelContext.save()
+        try? LedgerBalanceStores.shared(for: modelContext.container)
+            .saveAndCheck(modelContext)
         pendingDelete = nil
+        refreshRevision += 1
     }
 }
 
-/// The query-owning body of the transactions tab. It is re-initialized with
-/// a new month range or search mode so `@Query` refetches: without search
-/// only the visible month is loaded (date-range predicate); while a search
-/// text is present every month is scanned and the visible result is capped
-/// at `TransactionListSearch.resultCap` rows. Its `scope` state is stable
-/// across those re-inits — the view identity never changes.
+/// The data-owning body of the transactions tab. Fetches explicitly on
+/// `modelContext` (the visible month while browsing; every month while
+/// searching, capped at `TransactionListSearch.resultCap`) and reloads on
+/// appear, month/search changes, sheet dismissals (`refreshRevision`) and
+/// any ledger save (`LedgerBalanceStore.changeCount`). Explicit fetching
+/// with a monotonic `loadRevision` guarantees an in-place categorization
+/// (which leaves the month's `PersistentIdentifier` list and `date` order
+/// unchanged, and on iOS 17 may emit no `ModelContext.didSave`) immediately
+/// re-runs `matchedScan` and drops the row from "Chưa phân loại".
 struct TransactionListContent: View {
-    @Query private var transactions: [LedgerTransaction]
+    @Environment(\.modelContext) private var modelContext
+    @State private var transactions: [LedgerTransaction] = []
+    @State private var hasLoaded = false
+    /// Monotonic counter bumped on every fetch — `[LedgerTransaction]`
+    /// equality compares `PersistentIdentifier` only, so an in-place edit
+    /// looks equal to `@State` without an integer revision change.
+    @State private var loadRevision = 0
 
     @Binding var monthAnchor: Date
     @Binding var filter: TransactionListFilter
@@ -144,6 +168,8 @@ struct TransactionListContent: View {
     let onDelete: (LedgerTransaction) -> Void
     let onDuplicate: (LedgerTransaction) -> Void
     let onAdd: () -> Void
+    let refreshRevision: Int
+    let onScan: (([TransactionListRow]) -> Void)?
 
     init(
         monthAnchor: Binding<Date>,
@@ -156,7 +182,9 @@ struct TransactionListContent: View {
         onEdit: @escaping (LedgerTransaction) -> Void,
         onDelete: @escaping (LedgerTransaction) -> Void,
         onDuplicate: @escaping (LedgerTransaction) -> Void,
-        onAdd: @escaping () -> Void
+        onAdd: @escaping () -> Void,
+        refreshRevision: Int = 0,
+        onScan: (([TransactionListRow]) -> Void)? = nil
     ) {
         _monthAnchor = monthAnchor
         _filter = filter
@@ -169,9 +197,17 @@ struct TransactionListContent: View {
         self.onDelete = onDelete
         self.onDuplicate = onDuplicate
         self.onAdd = onAdd
+        self.refreshRevision = refreshRevision
+        self.onScan = onScan
+    }
 
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: modelContext.container)
+    }
+
+    private var fetchDescriptor: FetchDescriptor<LedgerTransaction> {
         let (start, end) = TransactionListGrouping.monthInterval(
-            containing: monthAnchor.wrappedValue)
+            containing: monthAnchor)
         let predicate: Predicate<LedgerTransaction>? = searching
             ? nil
             : #Predicate { $0.date >= start && $0.date < end }
@@ -181,11 +217,21 @@ struct TransactionListContent: View {
         )
         descriptor.relationshipKeyPathsForPrefetching =
             [\.account, \.toAccount, \.category, \.business]
-        _transactions = Query(descriptor)
+        return descriptor
+    }
+
+    private func reload() {
+        transactions = (try? modelContext.fetch(fetchDescriptor)) ?? []
+        hasLoaded = true
+        loadRevision += 1
     }
 
     var body: some View {
+        let _ = loadRevision
+        let _ = refreshRevision
+        let _ = ledger.changeCount
         let scan = matchedScan
+        let _ = onScan?(scan.rows)
         VStack(spacing: 0) {
             if !searching {
                 monthHeader(scan.rows)
@@ -197,6 +243,14 @@ struct TransactionListContent: View {
             listView(scan)
         }
         .background(Color(.systemGroupedBackground))
+        .onAppear(perform: reload)
+        .task {
+            if !hasLoaded { reload() }
+        }
+        .onChange(of: monthAnchor) { _, _ in reload() }
+        .onChange(of: searching) { _, _ in reload() }
+        .onChange(of: refreshRevision) { _, _ in reload() }
+        .onChange(of: ledger.changeCount) { _, _ in reload() }
     }
 
     // MARK: - Data plumbing
@@ -549,7 +603,7 @@ struct TransactionListContent: View {
         }
         .listStyle(.insetGrouped)
         .scrollDismissesKeyboard(.interactively)
-        .overlay { if scan.rows.isEmpty { emptyState } }
+        .overlay { if hasLoaded && scan.rows.isEmpty { emptyState } }
     }
 
     private func rowButton(_ row: TransactionListRow) -> some View {
