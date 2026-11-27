@@ -437,7 +437,8 @@ struct TransactionEditorView: View {
             if let account = draft.account {
                 lastUsedAccountID = account.id.uuidString
             }
-            try modelContext.save()
+            try LedgerBalanceStores.shared(for: modelContext.container)
+                .saveAndCheck(modelContext)
             dismiss()
         } catch {
             saveFailed = true
@@ -447,7 +448,8 @@ struct TransactionEditorView: View {
     private func deleteTransaction() {
         guard let transaction else { return }
         LedgerTransactionDeletion.delete(transaction, in: modelContext)
-        try? modelContext.save()
+        try? LedgerBalanceStores.shared(for: modelContext.container)
+            .saveAndCheck(modelContext)
         dismiss()
     }
 }

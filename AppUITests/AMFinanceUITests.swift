@@ -1503,8 +1503,56 @@ final class AMFinanceUITests: XCTestCase {
         XCTAssertTrue(seededOnlineNote().waitForExistence(timeout: 8),
                       "seeded server transaction note missing")
 
+        // Categorize the seeded needsReview expense from "Chưa phân loại":
+        // it must leave "Chưa phân loại" immediately on Lưu (without needing
+        // a server reload) and show with its category under "Tất cả".
+        let reviewNote = app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Trà sữa chờ duyệt")
+        ).firstMatch
+        XCTAssertTrue(waitReady(reviewNote, timeout: 8),
+                      "seeded needsReview expense missing in 'Chưa phân loại'")
+        XCTAssertTrue(app.staticTexts["Chờ phân loại"].exists,
+                      "review tag missing before categorization")
+        reviewNote.tap()
+        XCTAssertTrue(
+            app.navigationBars.staticTexts["Sửa giao dịch"]
+                .waitForExistence(timeout: 5),
+            "editor did not open for needsReview expense")
+        pickCategory("Ăn uống")
+        saveSheet()
+
+        waitForDisappearance(
+            reviewNote,
+            message: "categorized row stayed in 'Chưa phân loại'")
+        XCTAssertFalse(
+            app.staticTexts["Chờ phân loại"].exists,
+            "review tag stayed visible after categorization")
+        XCTAssertTrue(seededOnlineNote().exists,
+                      "other uncategorized row vanished unexpectedly")
+
+        tapScopeElement(
+            categoryScopeChip("Ăn uống"),
+            "category scope chip for 'Ăn uống' missing")
+        XCTAssertTrue(
+            reviewNote.waitForExistence(timeout: 5),
+            "categorized row missing in 'Ăn uống' scope")
+
+        tapScope("txList.scope.all")
+        XCTAssertTrue(
+            reviewNote.waitForExistence(timeout: 5),
+            "categorized row missing under 'Tất cả'")
+        XCTAssertTrue(
+            app.staticTexts["-40.000 ₫"].exists,
+            "categorized row amount missing under 'Tất cả'")
+        XCTAssertFalse(
+            app.staticTexts["Chờ phân loại"].exists,
+            "review tag still shown under 'Tất cả'")
+
         openTab("Tổng quan")
         openServerStatus()
+        // Initial fixture seeds 5 rows (seq 1..5); wait for the categorization
+        // push to commit before capturing the baseline for quick-add.
+        waitForServerHighWater(above: 5)
         let baseline = currentServerHighWater()
         goBack(to: "Cài đặt")
         goBack(to: "Tổng quan")
@@ -1523,10 +1571,15 @@ final class AMFinanceUITests: XCTestCase {
         openTab("Giao dịch")
         XCTAssertTrue(seededOnlineNote().waitForExistence(timeout: 8),
                       "seeded note missing after reload")
+        XCTAssertFalse(reviewNote.exists,
+                       "categorized row came back in 'Chưa phân loại' after reload")
         tapScope("txList.scope.all")
         XCTAssertTrue(
             app.staticTexts["-77.000 ₫"].waitForExistence(timeout: 8),
             "pushed expense missing after reload")
+        XCTAssertTrue(
+            reviewNote.waitForExistence(timeout: 5),
+            "categorized row missing under 'Tất cả' after reload")
     }
 
     /// Settings → Máy chủ. The gear lives on the dashboard.
