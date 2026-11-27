@@ -12,6 +12,8 @@ struct WalletSyncStatusBanner: View {
 
     private let coordinator: WalletSyncCoordinator?
     private let defaults: UserDefaults
+    /// Test seam: invoked on every body evaluation when the banner renders.
+    private let onPendingCount: ((Int) -> Void)?
     @State private var own: WalletSyncCoordinator?
     /// `fetchCount` fallback shown until the coordinator exists; after
     /// that the banner tracks `coordinator.pendingReviewCount`.
@@ -19,10 +21,12 @@ struct WalletSyncStatusBanner: View {
 
     init(
         coordinator: WalletSyncCoordinator? = nil,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        onPendingCount: ((Int) -> Void)? = nil
     ) {
         self.coordinator = coordinator
         self.defaults = defaults
+        self.onPendingCount = onPendingCount
     }
 
     private var linked: [Account] {
@@ -41,6 +45,7 @@ struct WalletSyncStatusBanner: View {
 
     var body: some View {
         if !linked.isEmpty {
+            let _ = onPendingCount?(pending)
             card
                 .task {
                     pendingCount = WalletSyncEngine.pendingReviewCount(
