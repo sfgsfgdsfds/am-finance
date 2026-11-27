@@ -408,12 +408,17 @@ final class LedgerBalanceStore {
 
     /// Saves `context`, then runs the fingerprint check inline — the
     /// post-save trigger for writes the app's own code performs through
-    /// a context on this store's container. The check only invalidates
-    /// when ledger data actually moved, so a save touching unrelated
-    /// models stays free.
+    /// a context on this store's container. When no baseline fingerprint
+    /// has been computed yet, invalidates directly so `changeCount`
+    /// observers still fire even when `ModelContext.didSave` is silent
+    /// (iOS 17).
     func saveAndCheck(_ context: ModelContext) throws {
         try context.save()
-        refreshIfStale(force: true)
+        if housekeeping.aggregatedFingerprint == nil {
+            invalidate()
+        } else {
+            refreshIfStale(force: true)
+        }
     }
 
     private func scheduleRefresh() {

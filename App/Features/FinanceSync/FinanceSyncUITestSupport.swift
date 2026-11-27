@@ -201,16 +201,19 @@ final class FinanceSyncUITestServer: @unchecked Sendable {
         FinanceSyncUITestStubProtocol.server = self
     }
 
-    /// Account + expense category + two transactions `testOnlineLaunch`
+    /// Account + expense category + three transactions `testOnlineLaunch`
     /// expects on the server before the app loads. The coffee expense
-    /// is uncategorized so the default "Chưa phân loại" queue shows
-    /// its note; "Ăn uống" exists so quick-add can pick it.
+    /// stays uncategorized in "Chưa phân loại"; the milk-tea expense is
+    /// flagged `needsReview` so the test can categorize it and confirm it
+    /// leaves "Chưa phân loại" immediately; "Ăn uống" exists so quick-add
+    /// and editing can pick it.
     private func seedOnlineLaunchFixture() {
         let now = Date()
         let accountID = UUID(uuidString: "11111111-0000-4000-8000-000000000001")!
         let categoryID = UUID(uuidString: "11111111-0000-4000-8000-0000000000C1")!
         let coffeeID = UUID(uuidString: "11111111-0000-4000-8000-0000000000A1")!
         let lunchID = UUID(uuidString: "11111111-0000-4000-8000-0000000000A2")!
+        let reviewID = UUID(uuidString: "11111111-0000-4000-8000-0000000000A3")!
         let account = BackupAccount(
             id: accountID,
             name: "Tiền mặt",
@@ -243,7 +246,8 @@ final class FinanceSyncUITestServer: @unchecked Sendable {
             sortOrder: 0,
             isArchived: false)
         func transaction(
-            _ id: UUID, amount: Int64, note: String, category: UUID?
+            _ id: UUID, amount: Int64, note: String, category: UUID?,
+            needsReview: Bool = false
         ) -> BackupTransaction {
             BackupTransaction(
                 id: id,
@@ -255,7 +259,7 @@ final class FinanceSyncUITestServer: @unchecked Sendable {
                 toAccountID: nil,
                 categoryID: category,
                 businessID: nil,
-                needsReview: false,
+                needsReview: needsReview,
                 externalSource: nil,
                 externalID: nil,
                 createdAt: now,
@@ -271,6 +275,9 @@ final class FinanceSyncUITestServer: @unchecked Sendable {
             ("transaction", lunchID, .transaction(transaction(
                 lunchID, amount: 45_000, note: "Cơm trưa online",
                 category: categoryID))),
+            ("transaction", reviewID, .transaction(transaction(
+                reviewID, amount: 40_000, note: "Trà sữa chờ duyệt",
+                category: nil, needsReview: true))),
         ]
         for (entity, id, dto) in fixtures {
             let data = try! SyncRecordMapper.jsonValue(of: dto)

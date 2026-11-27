@@ -12,6 +12,8 @@ struct WalletSyncStatusBanner: View {
 
     private let coordinator: WalletSyncCoordinator?
     private let defaults: UserDefaults
+    /// Test seam: invoked on every body evaluation when the banner renders.
+    private let onPendingCount: ((Int) -> Void)?
     @State private var own: WalletSyncCoordinator?
     /// `fetchCount` fallback shown until the coordinator exists; after
     /// that the banner tracks `coordinator.pendingReviewCount`.
@@ -19,10 +21,12 @@ struct WalletSyncStatusBanner: View {
 
     init(
         coordinator: WalletSyncCoordinator? = nil,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        onPendingCount: ((Int) -> Void)? = nil
     ) {
         self.coordinator = coordinator
         self.defaults = defaults
+        self.onPendingCount = onPendingCount
     }
 
     private var linked: [Account] {
@@ -39,21 +43,31 @@ struct WalletSyncStatusBanner: View {
         resolved?.pendingReviewCount ?? pendingCount
     }
 
+    private var ledger: LedgerBalanceStore {
+        LedgerBalanceStores.shared(for: context.container)
+    }
+
+    private func refreshPending() {
+        pendingCount = WalletSyncEngine.pendingReviewCount(context: context)
+        resolved?.refreshPendingCount()
+    }
+
     var body: some View {
         if !linked.isEmpty {
+            let _ = onPendingCount?(pending)
             card
                 .task {
-                    pendingCount = WalletSyncEngine.pendingReviewCount(
-                        context: context)
                     if resolved == nil {
                         own = .live(context: context, defaults: defaults)
                     }
+                    refreshPending()
                 }
                 // Popping back from the inbox: re-count what was classified.
-                .onAppear {
-                    pendingCount = WalletSyncEngine.pendingReviewCount(
-                        context: context)
-                    resolved?.refreshPendingCount()
+                .onAppear(perform: refreshPending)
+                // Any ledger save (Giao dịch, Dashboard sheet, Agent, remote
+                // sync) re-counts what is still waiting for review.
+                .onChange(of: ledger.changeCount) { _, _ in
+                    refreshPending()
                 }
         }
     }
