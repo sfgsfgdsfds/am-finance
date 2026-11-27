@@ -30,9 +30,15 @@ struct DashboardView: View {
     /// Shared coordinator from `AMFinanceApp`, forwarded to the sync
     /// banner — nil under `-uiTestInMemoryStore`.
     private let syncCoordinator: WalletSyncCoordinator?
+    /// Test seam: invoked on every body evaluation with the rendered count.
+    private let onPendingReviewCount: ((Int) -> Void)?
 
-    init(syncCoordinator: WalletSyncCoordinator? = nil) {
+    init(
+        syncCoordinator: WalletSyncCoordinator? = nil,
+        onPendingReviewCount: ((Int) -> Void)? = nil
+    ) {
         self.syncCoordinator = syncCoordinator
+        self.onPendingReviewCount = onPendingReviewCount
         let calendar = AppCalendar.vietnam
         let monthStart = ReportSummary.monthInterval(
             containing: .now, calendar: calendar
@@ -49,6 +55,7 @@ struct DashboardView: View {
     }
 
     var body: some View {
+        let _ = onPendingReviewCount?(snapshot.pendingReviewCount)
         NavigationStack {
             ScrollView {
                 LazyVStack(spacing: 16) {

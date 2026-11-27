@@ -23,7 +23,11 @@ struct TransactionsView: View {
     @State private var editing: LedgerTransaction?
     @State private var pendingDelete: LedgerTransaction?
 
-    init() {
+    /// Test seam: invoked on every body evaluation with the rendered scan.
+    private let onScan: (([TransactionListRow]) -> Void)?
+
+    init(onScan: (([TransactionListRow]) -> Void)? = nil) {
+        self.onScan = onScan
         let now = Date.now
         _monthAnchor = State(initialValue:
             AppCalendar.vietnam.dateInterval(of: .month, for: now)?.start ?? now)
@@ -46,7 +50,8 @@ struct TransactionsView: View {
                 onEdit: { editing = $0 },
                 onDelete: { pendingDelete = $0 },
                 onDuplicate: duplicate,
-                onAdd: { addShown = true }
+                onAdd: { addShown = true },
+                onScan: onScan
             )
             .navigationTitle("Giao dịch")
             .searchable(
@@ -144,6 +149,7 @@ struct TransactionListContent: View {
     let onDelete: (LedgerTransaction) -> Void
     let onDuplicate: (LedgerTransaction) -> Void
     let onAdd: () -> Void
+    let onScan: (([TransactionListRow]) -> Void)?
 
     init(
         monthAnchor: Binding<Date>,
@@ -156,7 +162,8 @@ struct TransactionListContent: View {
         onEdit: @escaping (LedgerTransaction) -> Void,
         onDelete: @escaping (LedgerTransaction) -> Void,
         onDuplicate: @escaping (LedgerTransaction) -> Void,
-        onAdd: @escaping () -> Void
+        onAdd: @escaping () -> Void,
+        onScan: (([TransactionListRow]) -> Void)? = nil
     ) {
         _monthAnchor = monthAnchor
         _filter = filter
@@ -169,6 +176,7 @@ struct TransactionListContent: View {
         self.onDelete = onDelete
         self.onDuplicate = onDuplicate
         self.onAdd = onAdd
+        self.onScan = onScan
 
         let (start, end) = TransactionListGrouping.monthInterval(
             containing: monthAnchor.wrappedValue)
@@ -186,6 +194,7 @@ struct TransactionListContent: View {
 
     var body: some View {
         let scan = matchedScan
+        let _ = onScan?(scan.rows)
         VStack(spacing: 0) {
             if !searching {
                 monthHeader(scan.rows)
